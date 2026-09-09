@@ -1,0 +1,23 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "EmbyClientPlus",
+  "version": "0.1.0",
+  "identifier": "com.krakerz.embyclientplus",
+  "build": {
+    "frontendDist": "ui"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "EmbyClientPlus",
+        "width": 1280,
+        "height": 800,
+        "url": "index.html"
+      }
+    ]
+  },
+  "bundle": {
+    "active": false
+  }
+}
