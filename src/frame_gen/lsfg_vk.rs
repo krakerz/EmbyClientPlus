@@ -6,11 +6,23 @@ use crate::config::config_dir;
 
 /// Distinct process name registered in lsfg-vk's own `active_in` list, so
 /// the layer only ever hooks playback launched through us — never the
-/// user's own unrelated mpv usage. `/proc/pid/comm` truncates at 15
-/// chars, but lsfg-vk itself reads the untruncated executable path (real
-/// user profiles in the wild have longer names than that and still
-/// match), confirmed indirectly — see NOTES.md.
-pub const PROCESS_NAME: &str = "embyclientplus-mpv";
+/// user's own unrelated mpv usage.
+///
+/// Must be ≤15 characters (`TASK_COMM_LEN - 1`). Verified against
+/// lsfg-vk's real upstream source (`lsfg-vk-config/src/config.cpp`,
+/// `identifyProcess`) rather than assumed: its *first* match attempt reads
+/// `/proc/self/exe`, which always resolves through symlinks to the real
+/// target file — so a symlink named e.g. "embyclientplus-mpv" pointing at
+/// the real mpv binary can never match there, no matter what it's named.
+/// Its actual working fallback is an *exact-equality* match against
+/// `/proc/self/comm`, which does reflect the invoking symlink's own name
+/// (not resolved through the symlink) — but the kernel truncates that to
+/// 15 characters, so anything longer silently fails the equality check.
+/// The previous 19-character name ("embyclientplus-mpv") never matched
+/// either path, which is the real explanation for the lsfg-vk Vulkan
+/// negotiation failures documented in NOTES.md/TODO.md as an unresolved
+/// blocker — not an actual Vulkan/driver bug.
+pub const PROCESS_NAME: &str = "embyclientplus";
 
 fn conf_path() -> Result<PathBuf> {
     let home = std::env::var_os("HOME").context("HOME not set")?;
@@ -180,16 +192,18 @@ preserve_swapchain_image_count = true
         let path = temp_conf_path("idempotent.toml");
         std::fs::write(
             &path,
-            r#"
+            format!(
+                r#"
 version = 2
 
 [global]
 dll = "x"
 
 [[profile]]
-active_in = ["embyclientplus-mpv"]
+active_in = ["{PROCESS_NAME}"]
 multiplier = 2
-"#,
+"#
+            ),
         )
         .unwrap();
 
