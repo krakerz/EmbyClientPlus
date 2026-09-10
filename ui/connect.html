@@ -1,0 +1,57 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>EmbyClientPlus</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+        margin: 0;
+        background: #1a1a1a;
+        color: #eee;
+      }
+      form {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        width: 320px;
+      }
+      input {
+        padding: 8px;
+        font-size: 14px;
+      }
+      button {
+        padding: 8px;
+        font-size: 14px;
+        cursor: pointer;
+      }
+      #error {
+        color: #f66;
+        min-height: 1.2em;
+      }
+    </style>
+  </head>
+  <body>
+    <form id="connect-form">
+      <h2>Connect to your Emby server</h2>
+      <input id="server-url" type="text" placeholder="http://192.168.1.3:8096" required />
+      <button type="submit">Connect</button>
+      <div id="error"></div>
+    </form>
+    <script>
+      document.getElementById('connect-form').addEventListener('submit', function (event) {
+        event.preventDefault();
+        var url = document.getElementById('server-url').value.trim();
+        var errorEl = document.getElementById('error');
+        errorEl.textContent = '';
+        window.__TAURI__.core.invoke('set_server_url', { url: url }).catch(function (err) {
+          errorEl.textContent = 'Could not connect: ' + err;
+        });
+      });
+    </script>
+  </body>
+</html>
