@@ -183,6 +183,45 @@ pub struct ItemDto {
     pub series_id: Option<String>,
 }
 
+/// One chapter marker on an item, as Emby reports it — used for the seek
+/// bar's tick marks (`playback/mod.rs`), which only need `start_position_
+/// ticks`. `name` isn't displayed anywhere yet (no chapter tooltip/label
+/// in this pass) but is cheap to keep modeled faithfully against the real
+/// API shape for whenever that's wanted.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ChapterInfo {
+    pub start_position_ticks: i64,
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// Just enough of an item (episode or movie) to build the OSD title, seek
+/// bar chapter ticks, and — for episodes — locate this item's neighbors
+/// within its series for the previous/next-episode buttons.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ItemSummary {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub index_number: Option<i32>,
+    #[serde(default)]
+    pub parent_index_number: Option<i32>,
+    #[serde(default)]
+    pub series_name: Option<String>,
+    #[serde(default)]
+    pub chapters: Vec<ChapterInfo>,
+}
+
+/// Emby's standard list-response envelope (`{"Items": [...], ...}`).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ItemsResponse {
+    pub items: Vec<ItemSummary>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct PlayingRequest {
@@ -275,5 +314,34 @@ mod tests {
         assert!(source.supports_direct_play);
         assert_eq!(source.media_streams.len(), 1);
         assert_eq!(source.media_streams[0].stream_type, "Audio");
+    }
+
+    #[test]
+    fn items_response_deserializes_episode_list_with_chapters() {
+        let raw = serde_json::json!({
+            "Items": [
+                {
+                    "Id": "ep1",
+                    "Name": "Pilot",
+                    "IndexNumber": 1,
+                    "ParentIndexNumber": 1,
+                    "SeriesName": "Some Show",
+                    "Chapters": [
+                        {"StartPositionTicks": 0, "Name": "Intro"},
+                        {"StartPositionTicks": 6000000000i64, "Name": null}
+                    ]
+                }
+            ],
+            "TotalRecordCount": 1
+        });
+        let response: ItemsResponse = serde_json::from_value(raw).unwrap();
+        assert_eq!(response.items.len(), 1);
+        let ep = &response.items[0];
+        assert_eq!(ep.id, "ep1");
+        assert_eq!(ep.index_number, Some(1));
+        assert_eq!(ep.series_name.as_deref(), Some("Some Show"));
+        assert_eq!(ep.chapters.len(), 2);
+        assert_eq!(ep.chapters[0].name.as_deref(), Some("Intro"));
+        assert_eq!(ep.chapters[1].start_position_ticks, 6_000_000_000);
     }
 }

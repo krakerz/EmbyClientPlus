@@ -17,6 +17,15 @@ pub struct SpawnArgs<'a> {
     pub container_window: u32,
     pub socket_path: &'a Path,
     pub stream_url: &'a str,
+    /// Set when we're rendering subtitles ourselves onto a separate
+    /// overlay window (see `subtitles.rs`) — avoids mpv also drawing
+    /// them onto the same frames.
+    pub disable_native_subs: bool,
+    /// Set when this spawn is resuming an in-progress session (a quality
+    /// or frame-gen quick-toggle restarting the mpv child in place) —
+    /// appends `--start=` so playback picks up where it left off instead
+    /// of restarting from 0.
+    pub resume_seconds: Option<f64>,
 }
 
 fn which_mpv() -> Result<PathBuf> {
@@ -79,6 +88,13 @@ pub fn spawn(args: SpawnArgs) -> Result<MpvLaunch> {
                 );
             }
         },
+    }
+
+    if args.disable_native_subs {
+        extra_args.push("--sid=no".to_string());
+    }
+    if let Some(seconds) = args.resume_seconds {
+        extra_args.push(format!("--start={seconds}"));
     }
 
     let mut command = Command::new(&binary);

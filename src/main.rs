@@ -9,6 +9,7 @@ mod db;
 mod emby;
 mod frame_gen;
 mod playback;
+mod subtitles;
 mod webview_bridge;
 
 fn main() {

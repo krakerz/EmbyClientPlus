@@ -15,6 +15,7 @@ pub async fn intercept_playback(
     item_id: String,
     access_token: String,
     user_id: Option<String>,
+    window: tauri::WebviewWindow,
 ) -> Result<(), String> {
     tracing::info!(item_id = %item_id, has_user_id = user_id.is_some(), "playback route intercepted");
 
@@ -28,14 +29,31 @@ pub async fn intercept_playback(
     let override_key = crate::playback::resolve_override_key(&emby, &user_id, &item_id)
         .await
         .map_err(|e| e.to_string())?;
+    // `resolve_override_key` returns the item's own id for movies (no
+    // SeriesId found) and the series id otherwise — mirror that here
+    // rather than re-deriving it from scratch.
+    let item_type = if override_key == item_id {
+        crate::db::ItemType::Movie
+    } else {
+        crate::db::ItemType::Series
+    };
     let title_override = {
         let db = Db::open_default().map_err(|e| e.to_string())?;
         db.get_override(&override_key).map_err(|e| e.to_string())?
     };
 
-    crate::playback::start_playback(emby, title_override, &settings, &user_id, &item_id)
-        .await
-        .map_err(|e| e.to_string())
+    crate::playback::start_playback(
+        emby,
+        title_override,
+        &settings,
+        &user_id,
+        &item_id,
+        window,
+        override_key,
+        item_type,
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Called from `ui/connect.html` on first run, before any server is

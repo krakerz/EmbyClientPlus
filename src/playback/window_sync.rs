@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use x11rb::connection::Connection;
-use x11rb::protocol::xproto::{ConnectionExt, CreateWindowAux, EventMask, Window, WindowClass};
+use x11rb::protocol::xproto::{
+    ConfigureWindowAux, ConnectionExt, CreateWindowAux, EventMask, Window, WindowClass,
+};
 use x11rb::rust_connection::RustConnection;
 
 /// A bare X11 window mpv gets reparented into via `--wid`. Confirmed
@@ -55,6 +57,27 @@ impl ContainerWindow {
             .context("X11 server rejected mapping the container window")?;
         conn.flush().context("failed to flush X11 connection")?;
         Ok(ContainerWindow { conn, window })
+    }
+
+    /// Moves/resizes the window to follow the main app window (M10 —
+    /// this was a fixed placeholder before, see NOTES.md).
+    pub fn reconfigure(&self, x: i32, y: i32, width: u32, height: u32) -> Result<()> {
+        self.conn
+            .configure_window(
+                self.window,
+                &ConfigureWindowAux::new()
+                    .x(x)
+                    .y(y)
+                    .width(width)
+                    .height(height),
+            )
+            .context("failed to reconfigure the mpv container window")?
+            .check()
+            .context("X11 server rejected reconfiguring the container window")?;
+        self.conn
+            .flush()
+            .context("failed to flush X11 connection")?;
+        Ok(())
     }
 
     pub fn destroy(&self) -> Result<()> {

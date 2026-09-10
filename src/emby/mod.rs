@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod library;
 pub mod models;
 pub mod playback_info;
 pub mod sessions;
@@ -88,6 +89,22 @@ impl EmbyClient {
             .with_context(|| format!("GET {path} returned an unparsable body"))
     }
 
+    async fn get_text(&self, path: &str) -> Result<String> {
+        let response = self
+            .http
+            .get(self.url(path))
+            .headers(self.headers()?)
+            .send()
+            .await
+            .with_context(|| format!("GET {path} failed"))?
+            .error_for_status()
+            .with_context(|| format!("GET {path} returned an error status"))?;
+        response
+            .text()
+            .await
+            .with_context(|| format!("GET {path} returned an unreadable body"))
+    }
+
     async fn post<B: serde::Serialize, T: serde::de::DeserializeOwned>(
         &self,
         path: &str,
@@ -140,6 +157,36 @@ impl EmbyClient {
         ))
     }
 
+    /// Resolves a `TranscodingUrl` from a PlaybackInfo response into a
+    /// fully-qualified URL mpv can open directly — Emby returns these as
+    /// server-root-relative paths (already carrying whatever query params
+    /// authenticate/identify the transcode session), so this only needs
+    /// to prefix `base_url` when the path isn't already absolute.
+    pub fn resolve_transcoding_url(&self, transcoding_url: &str) -> String {
+        if transcoding_url.starts_with("http://") || transcoding_url.starts_with("https://") {
+            transcoding_url.to_string()
+        } else {
+            format!("{}{}", self.base_url, transcoding_url)
+        }
+    }
+
+    /// Fetches a subtitle stream's raw content — works for embedded or
+    /// external tracks alike, since Emby serves any subtitle stream as a
+    /// standalone file through this endpoint regardless of how it was
+    /// originally delivered.
+    pub async fn get_subtitle_stream(
+        &self,
+        item_id: &str,
+        media_source_id: &str,
+        stream_index: i32,
+        format: &str,
+    ) -> Result<String> {
+        self.get_text(&format!(
+            "/emby/Videos/{item_id}/{media_source_id}/Subtitles/{stream_index}/Stream.{format}"
+        ))
+        .await
+    }
+
     /// Resolves an item's parent `SeriesId` (for episodes) so per-title
     /// overrides can be keyed at the series level. Returns `None` for
     /// items with no series (movies use their own ItemId directly).
@@ -186,5 +233,22 @@ mod tests {
         let client = EmbyClient::new("http://server", "device-1").with_token("secret-token");
         let headers = client.headers().unwrap();
         assert_eq!(headers.get("X-Emby-Token").unwrap(), "secret-token");
+    }
+
+    #[test]
+    fn resolve_transcoding_url_prefixes_a_relative_path() {
+        let client = EmbyClient::new("http://192.168.1.3:8096", "device-1");
+        let resolved = client.resolve_transcoding_url("/videos/123/master.m3u8?MediaSourceId=abc");
+        assert_eq!(
+            resolved,
+            "http://192.168.1.3:8096/videos/123/master.m3u8?MediaSourceId=abc"
+        );
+    }
+
+    #[test]
+    fn resolve_transcoding_url_leaves_an_absolute_url_untouched() {
+        let client = EmbyClient::new("http://192.168.1.3:8096", "device-1");
+        let absolute = "https://cdn.example.com/stream.m3u8";
+        assert_eq!(client.resolve_transcoding_url(absolute), absolute);
     }
 }
