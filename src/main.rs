@@ -1,41 +1,89 @@
-// Keyring-backed token persistence — not yet wired into the login flow
-// (which currently always reads a fresh token from the webview via
-// ui/inject.js); would let a future version skip needing the user
-// already logged into the embedded webview on every launch.
-#[allow(dead_code)]
 mod auth;
 mod config;
 mod db;
 mod emby;
 mod frame_gen;
+mod logging;
 mod playback;
-mod webview_bridge;
+mod player;
+mod runtime;
+mod svp;
+mod ui;
 
-fn main() {
-    tracing_subscriber::fmt::init();
+use adw::prelude::*;
+use gtk::{gdk, glib};
+use player::Player;
 
-    // M1's mpv embedding reparents an X11 child window into the main
-    // window, which only works if both are in the same protocol domain.
-    // This app's main window renders as a native Wayland surface by
-    // default under this session type, which cannot host that at all —
-    // confirmed live in M7 (see NOTES.md). Must be set before Tauri/GTK
-    // initializes.
-    if std::env::var_os("GDK_BACKEND").is_none() {
-        // SAFETY: single-threaded at this point, before Tauri/GTK init.
-        unsafe {
-            std::env::set_var("GDK_BACKEND", "x11");
+const APP_ID: &str = "io.github.krakerz.EmbyClientPlus";
+
+fn main() -> glib::ExitCode {
+    logging::init();
+
+    // An argument plays that file/URL directly, skipping Emby (handy for
+    // checking the player and SVP on their own).
+    let target = std::env::args().nth(1);
+
+    let app = adw::Application::builder().application_id(APP_ID).build();
+    app.connect_activate(move |app| {
+        let result = match &target {
+            Some(target) => build_standalone_player(app, target),
+            None => Player::new().map(|player| ui::window::build(app, player).present()),
+        };
+        if let Err(e) = result {
+            tracing::error!("{e:#}");
+            app.quit();
         }
-    }
+    });
+    // argv is ours to handle; GTK would otherwise try to open the target itself.
+    app.run_with_args::<&str>(&[])
+}
 
-    tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![
-            webview_bridge::intercept_playback,
-            webview_bridge::set_server_url,
-        ])
-        .setup(|app| {
-            webview_bridge::create_main_window(app)?;
-            Ok(())
-        })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+fn build_standalone_player(app: &adw::Application, target: &str) -> anyhow::Result<()> {
+    let player = Player::new()?;
+    // Standalone mode always offers itself to SVP.
+    player.set_svp(true)?;
+    let video = player::video_area::new(player);
+    let weak = glib::SendWeakRef::from(video.downgrade());
+    player.on_event(move |event| {
+        if event == player::PlayerEvent::Geometry {
+            let weak = weak.clone();
+            glib::MainContext::default().invoke(move || {
+                if let Some(video) = weak.upgrade() {
+                    player::video_area::refit(player, &video);
+                }
+            });
+        }
+    });
+    let window = adw::ApplicationWindow::builder()
+        .application(app)
+        .title("EmbyClientPlus")
+        .default_width(1280)
+        .default_height(720)
+        .content(&video)
+        .build();
+
+    let keys = gtk::EventControllerKey::new();
+    keys.connect_key_pressed(move |_, key, _, _| {
+        let result = match key {
+            gdk::Key::space => player.toggle_pause(),
+            gdk::Key::Left => player.seek_relative(-5),
+            gdk::Key::Right => player.seek_relative(5),
+            _ => return glib::Propagation::Proceed,
+        };
+        if let Err(e) = result {
+            tracing::warn!("{e:#}");
+        }
+        glib::Propagation::Stop
+    });
+    window.add_controller(keys);
+
+    window.connect_close_request(move |_| {
+        if let Err(e) = player.quit() {
+            tracing::warn!("{e:#}");
+        }
+        glib::Propagation::Proceed
+    });
+
+    window.present();
+    player.load(target)
 }

@@ -32,15 +32,14 @@ impl ItemType {
 fn frame_gen_backend_as_str(backend: FrameGenBackend) -> &'static str {
     match backend {
         FrameGenBackend::Off => "off",
-        FrameGenBackend::LsfgVk => "lsfg_vk",
         FrameGenBackend::Svp => "svp",
     }
 }
 
 fn frame_gen_backend_from_str(s: &str) -> Result<FrameGenBackend> {
     match s {
-        "off" => Ok(FrameGenBackend::Off),
-        "lsfg_vk" => Ok(FrameGenBackend::LsfgVk),
+        // lsfg-vk was a backend before 0.2.0; existing rows fall back to off.
+        "off" | "lsfg_vk" => Ok(FrameGenBackend::Off),
         "svp" => Ok(FrameGenBackend::Svp),
         other => bail!("unknown frame_gen_backend {other:?} in db"),
     }
@@ -134,10 +133,6 @@ impl Db {
         }))
     }
 
-    // Not yet called anywhere — there's no UI to set an override yet
-    // (M10, native overlay controls). `get_override` is already
-    // exercised by M8's playback orchestration.
-    #[allow(dead_code)]
     pub fn upsert_override(&self, entry: &TitleOverride) -> Result<()> {
         self.conn.execute(
             "INSERT INTO title_overrides
@@ -164,7 +159,12 @@ impl Db {
         Ok(())
     }
 
-    #[allow(dead_code)] // same as upsert_override, above
+    /// Forgets every remembered per-title choice; returns how many.
+    pub fn clear_overrides(&self) -> Result<usize> {
+        Ok(self.conn.execute("DELETE FROM title_overrides", [])?)
+    }
+
+    #[allow(dead_code)] // no per-title "reset" in the UI yet
     pub fn delete_override(&self, emby_item_id: &str) -> Result<()> {
         self.conn.execute(
             "DELETE FROM title_overrides WHERE emby_item_id = ?1",
@@ -220,13 +220,27 @@ mod tests {
         };
         db.upsert_override(&entry).unwrap();
 
-        entry.frame_gen_backend = Some(FrameGenBackend::LsfgVk);
+        entry.frame_gen_backend = Some(FrameGenBackend::Svp);
         entry.frame_gen_multiplier = Some(3);
         db.upsert_override(&entry).unwrap();
 
         let fetched = db.get_override("movie-1").unwrap().unwrap();
-        assert_eq!(fetched.frame_gen_backend, Some(FrameGenBackend::LsfgVk));
+        assert_eq!(fetched.frame_gen_backend, Some(FrameGenBackend::Svp));
         assert_eq!(fetched.frame_gen_multiplier, Some(3));
+    }
+
+    #[test]
+    fn legacy_lsfg_row_reads_as_off() {
+        let db = Db::open_in_memory().unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO title_overrides (emby_item_id, item_type, frame_gen_backend)
+                 VALUES ('series-legacy', 'series', 'lsfg_vk')",
+                [],
+            )
+            .unwrap();
+        let fetched = db.get_override("series-legacy").unwrap().unwrap();
+        assert_eq!(fetched.frame_gen_backend, Some(FrameGenBackend::Off));
     }
 
     #[test]
@@ -244,5 +258,27 @@ mod tests {
         db.upsert_override(&entry).unwrap();
         db.delete_override("movie-2").unwrap();
         assert_eq!(db.get_override("movie-2").unwrap(), None);
+    }
+
+    #[test]
+    fn clear_overrides_removes_everything() {
+        let db = Db::open(
+            &std::env::temp_dir().join(format!("embyclientplus-clear-{}.db", std::process::id())),
+        )
+        .unwrap();
+        for id in ["a", "b"] {
+            db.upsert_override(&TitleOverride {
+                emby_item_id: id.into(),
+                item_type: ItemType::Movie,
+                audio_language: Some("jpn".into()),
+                subtitle_language: None,
+                subtitle_forced_only: None,
+                frame_gen_backend: None,
+                frame_gen_multiplier: None,
+            })
+            .unwrap();
+        }
+        assert_eq!(db.clear_overrides().unwrap(), 2);
+        assert!(db.get_override("a").unwrap().is_none());
     }
 }

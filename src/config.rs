@@ -22,6 +22,26 @@ pub struct Settings {
 pub struct ServerSettings {
     #[serde(default)]
     pub url: String,
+    /// Logged-in user; the token itself lives in the keyring (`auth.rs`).
+    #[serde(default)]
+    pub user_id: String,
+    #[serde(default)]
+    pub username: String,
+    /// Stable per-install id so Emby sees one device across launches.
+    #[serde(default)]
+    pub device_id: String,
+}
+
+impl ServerSettings {
+    /// Generates the device id on first use; returns whether it was new
+    /// (and so needs saving).
+    pub fn ensure_device_id(&mut self) -> bool {
+        if !self.device_id.is_empty() {
+            return false;
+        }
+        self.device_id = uuid::Uuid::new_v4().to_string();
+        true
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -85,54 +105,24 @@ impl Default for SubtitleSettings {
     }
 }
 
+/// Interpolation settings themselves (multiplier, quality) live in SVP
+/// Manager, which attaches over mpv's IPC socket — we only decide whether
+/// to expose the socket at all.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FrameGenSettings {
     #[serde(default)]
     pub default_backend: FrameGenBackend,
-    #[serde(default)]
-    pub lsfg_vk: LsfgVkSettings,
-    #[serde(default)]
-    pub svp: SvpSettings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum FrameGenBackend {
-    #[default]
+    /// `lsfg_vk` was a backend before 0.2.0; old configs map it to off.
+    #[serde(alias = "lsfg_vk")]
     Off,
-    LsfgVk,
+    /// The default: SVP attaches whenever SVP Manager is running.
+    #[default]
     Svp,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LsfgVkSettings {
-    #[serde(default = "default_multiplier")]
-    pub multiplier: u32,
-    #[serde(default = "default_flow_scale")]
-    pub flow_scale: f64,
-}
-
-impl Default for LsfgVkSettings {
-    fn default() -> Self {
-        Self {
-            multiplier: default_multiplier(),
-            flow_scale: default_flow_scale(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SvpSettings {
-    #[serde(default = "default_multiplier")]
-    pub multiplier: u32,
-}
-
-impl Default for SvpSettings {
-    fn default() -> Self {
-        Self {
-            multiplier: default_multiplier(),
-        }
-    }
 }
 
 fn default_language() -> String {
@@ -141,14 +131,6 @@ fn default_language() -> String {
 
 fn default_true() -> bool {
     true
-}
-
-fn default_multiplier() -> u32 {
-    2
-}
-
-fn default_flow_scale() -> f64 {
-    1.0
 }
 
 /// Directory holding config.toml, the SQLite override db, and any other
@@ -177,6 +159,15 @@ impl Settings {
         toml::from_str(&contents).with_context(|| format!("failed to parse {}", path.display()))
     }
 
+    /// Re-reads the file, applies `change`, and writes it back, so edits
+    /// from different places (login, preferences) never clobber each other.
+    pub fn update(change: impl FnOnce(&mut Settings)) -> Result<Settings> {
+        let mut settings = Settings::load()?;
+        change(&mut settings);
+        settings.save()?;
+        Ok(settings)
+    }
+
     pub fn save(&self) -> Result<()> {
         let path = config_file_path()?;
         if let Some(parent) = path.parent() {
@@ -199,8 +190,30 @@ mod tests {
         let serialized = toml::to_string_pretty(&settings).unwrap();
         let parsed: Settings = toml::from_str(&serialized).unwrap();
         assert_eq!(parsed.playback.mode, PlaybackMode::DirectPlayPreferred);
+        assert_eq!(parsed.frame_gen.default_backend, FrameGenBackend::Svp);
+    }
+
+    #[test]
+    fn legacy_lsfg_config_still_parses_as_off() {
+        let legacy = r#"
+            [frame_gen]
+            default_backend = "lsfg_vk"
+
+            [frame_gen.lsfg_vk]
+            multiplier = 3
+            flow_scale = 0.8
+        "#;
+        let parsed: Settings = toml::from_str(legacy).unwrap();
         assert_eq!(parsed.frame_gen.default_backend, FrameGenBackend::Off);
-        assert_eq!(parsed.frame_gen.lsfg_vk.multiplier, 2);
+    }
+
+    #[test]
+    fn device_id_is_generated_once() {
+        let mut server = ServerSettings::default();
+        assert!(server.ensure_device_id());
+        let id = server.device_id.clone();
+        assert!(!server.ensure_device_id());
+        assert_eq!(server.device_id, id);
     }
 
     #[test]
@@ -214,6 +227,7 @@ mod tests {
         "#;
         let parsed: Settings = toml::from_str(partial).unwrap();
         assert_eq!(parsed.server.url, "http://192.168.1.3:8096");
+        assert!(parsed.server.user_id.is_empty());
         assert_eq!(parsed.frame_gen.default_backend, FrameGenBackend::Svp);
         // Untouched sections still get their defaults.
         assert_eq!(parsed.audio.preferred_language, "eng");

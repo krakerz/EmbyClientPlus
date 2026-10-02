@@ -1,10 +1,10 @@
 use anyhow::Result;
 
 use super::EmbyClient;
-use super::models::{PlayingRequest, ProgressRequest, StoppedRequest};
+use super::models::{ProgressRequest, StoppedRequest};
 
 impl EmbyClient {
-    pub async fn report_playing(&self, request: &PlayingRequest) -> Result<()> {
+    pub async fn report_playing(&self, request: &ProgressRequest) -> Result<()> {
         self.post_empty("/emby/Sessions/Playing", request).await
     }
 

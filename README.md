@@ -1,21 +1,17 @@
 # EmbyClientPlus
 
-A Linux-native Emby client with client-side frame interpolation and frame generation built into playback.
+A native Linux Emby client with SVP motion interpolation support.
 
 ## Description
 
-Emby's own web client handles library browsing well already, but no existing Emby client adds motion-smoothing or AI frame generation during playback. EmbyClientPlus embeds Emby's own web UI for browsing/login, then hands playback off to a native mpv-backed player that adds optional frame interpolation — either SVP-style motion interpolation (VapourSynth + mvtools) or lsfg-vk-style Vulkan frame generation — on top of a direct-play-first pipeline that lets mpv/ffmpeg handle far more codecs than a typical browser client.
-
-**Status: early development.** No playback pipeline exists yet — see `CHANGELOG.md` for what's actually implemented so far.
+EmbyClientPlus is a native GTK4/libadwaita Emby client for Linux that embeds libmpv for playback with built-in VapourSynth support, enabling SVP (SmoothVideo Project) motion interpolation during playback. It provides a lightweight alternative to web-based Emby clients with superior codec support and frame smoothing capabilities.
 
 ## Features
 
-- Emby library browsing and login via the server's own web client, embedded directly
-- Native mpv-backed playback with optional frame generation, switchable between two backends:
-  - SVP-style motion interpolation (VapourSynth + mvtools)
-  - lsfg-vk-style Vulkan frame generation
-- Per-title/series playback preference overrides (audio/subtitle language, frame-gen backend), on top of global defaults
-- Native subtitle rendering independent of mpv, avoiding frame-gen ghosting on subtitle text
+- Native Emby login and library browsing
+- Direct stream preferred with server transcode fallback
+- SVP motion interpolation support (requires SVP 4 installed at ~/SVP4 and running)
+- Session-persistent playback tracking and resume positions
 
 ## Installation
 
@@ -23,25 +19,63 @@ Not yet available as a packaged release. Build from source (below) in the meanti
 
 ## Building from source
 
-Prerequisites: a Rust toolchain (stable, edition 2024 support) and the system packages Tauri's Linux backend needs (webkit2gtk, GTK3, and their `-dev` headers).
+Prerequisites: `meson`, `ninja`, a Rust toolchain, GTK4 and libadwaita development files, mpv's usual build dependencies, and SVP 4 at `~/SVP4`.
 
 ```sh
-git clone git@github.com:krakerz/EmbyClientPlus.git
-cd EmbyClientPlus
-cargo build
+./scripts/build-libmpv.sh
+cargo build --release
 ```
 
 ## Usage
 
-Not yet functional end-to-end — usage instructions will follow once the playback pipeline lands.
+### Launch the app
+
+Run `embyclientplus` to start:
+1. Log in with your server address, username, and password (token stored in system keyring)
+2. Browse Home (libraries, continue watching, next up, latest items) — tap the menu for Preferences
+3. Navigate series, search, and view item details
+4. Click Play to start playback inside the same window
+
+In Preferences you can set SVP and quality defaults, preferred audio and subtitle languages, clear per-title choices, and access logs.
+
+### Player controls
+
+The player shows an auto-hiding on-screen display (OSD) with a toolbar, hide after 3 s idle while playing; stays visible while paused or a menu is open. The OSD includes a seek bar with chapter marks, audio/subtitle track pickers that remember your choice per series/movie, quality presets, and controls for next/previous episodes.
+
+**Keyboard:**
+- **Space** or **K** — play/pause
+- **←/→** — seek ±10 seconds
+- **↑/↓** — volume
+- **M** — mute
+- **N/P** — next/previous episode
+- **Page Down/Up** — next/previous chapter
+- **F** or **F11** — toggle fullscreen
+- **Esc** — exit fullscreen, then go back
+- **Double-click** — toggle fullscreen
+
+**Quality menu:** Original (direct stream, default), 20/10/6/3 Mbps. Capped presets request a server transcode and resume at the same position.
+
+**Skip Intro / Skip Credits:** buttons appear when the playback position reaches intro or credits markers (from Emby's metadata). Skip Credits plays the next episode.
+
+**Up Next card:** appears near the end of an episode with a 10 s countdown; auto-plays the next episode unless cancelled.
+
+**SVP per-title toggle:** in the OSD controls. The button shows green while interpolating, amber while waiting for SVP Manager, red (with a one-time notice) when SVP Manager isn't running, or disabled if SVP isn't installed. Your choice is remembered per series/movie; the global default is set in Preferences.
+
+### Standalone playback (file or URL)
+
+```sh
+embyclientplus <file-or-url>
+```
+
+Plays a local file or URL directly without Emby login. Useful for testing the player or SVP outside the client.
 
 ## FAQ
 
-**Why embed Emby's own web client instead of a native browsing UI?**
-It already does browsing/search/theming well and stays in sync with whatever server version you run — reimplementing it natively would just be maintenance burden for no benefit.
-
 **Does this work on Wayland?**
-The primary window-embedding approach targets XWayland; a native-Wayland fallback is not yet implemented.
+Yes. The app uses native Wayland rendering with libmpv embedded in a GTK4 GLArea.
+
+**How do I use SVP?**
+Ensure SVP 4 is installed at `~/SVP4` and SVP Manager is running. The app automatically attaches via `/tmp/mpvsocket`.
 
 ---
 
