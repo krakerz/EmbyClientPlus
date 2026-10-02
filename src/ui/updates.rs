@@ -91,12 +91,10 @@ fn notice(text: &str) -> adw::Toast {
 }
 
 /// Preferences → Updates.
-pub fn preferences_group(toasts: &adw::PreferencesDialog) -> adw::PreferencesGroup {
+pub fn preferences_group(toasts: &adw::ToastOverlay) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder().title("Updates").build();
     let kind = update::install_kind();
-    let version = adw::ActionRow::builder()
-        .title(format!("EmbyClientPlus {}", update::current_version()))
-        .build();
+    let version = adw::ActionRow::builder().title("Updates").build();
     let button = gtk::Button::builder()
         .label("Check for Updates")
         .valign(gtk::Align::Center)
@@ -167,7 +165,7 @@ pub fn preferences_group(toasts: &adw::PreferencesDialog) -> adw::PreferencesGro
 }
 
 fn install_from_dialog(
-    dialog: &glib::WeakRef<adw::PreferencesDialog>,
+    dialog: &glib::WeakRef<adw::ToastOverlay>,
     button: &gtk::Button,
     row: &adw::ActionRow,
     kind: InstallKind,

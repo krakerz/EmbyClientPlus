@@ -23,6 +23,9 @@ struct SeriesView {
     related: gtk::Box,
     /// Seasons backing the chips, in their order.
     season_items: RefCell<Vec<BaseItem>>,
+    /// The episode last opened (season id, row index), so coming back
+    /// puts the cursor on it again.
+    opened: RefCell<Option<(String, usize)>>,
 }
 
 type SeasonChanged = Box<dyn Fn(usize)>;
@@ -132,6 +135,7 @@ pub fn page(ui: &Ui, series: &BaseItem) -> adw::NavigationPage {
         episodes,
         related,
         season_items: RefCell::new(Vec::new()),
+        opened: RefCell::new(None),
     });
 
     let weak = ui.downgrade();
@@ -169,6 +173,23 @@ pub fn page(ui: &Ui, series: &BaseItem) -> adw::NavigationPage {
         }
     });
     load(ui, &view, &series_id);
+    // Episodes may load before the page has finished sliding in, and the
+    // navigation view moves focus when it does; place the cursor again.
+    page.connect_shown({
+        let view = Rc::downgrade(&view);
+        move |_| {
+            if let Some(view) = view.upgrade() {
+                let season = view
+                    .season_items
+                    .borrow()
+                    .get(view.seasons.selected())
+                    .map(|season| season.id.clone());
+                if let Some(season) = season {
+                    focus_episode(&view, &season);
+                }
+            }
+        }
+    });
     page
 }
 
@@ -273,9 +294,17 @@ fn load_episodes(ui: &Ui, view: &Rc<SeriesView>, series_id: &str, season_id: &st
         clear_list(&view.episodes);
         match result {
             Ok(episodes) => {
-                for episode in &episodes {
-                    view.episodes.append(&episode_row(&ui, episode));
+                for (index, episode) in episodes.iter().enumerate() {
+                    let row = episode_row(&ui, episode);
+                    let (opened, season) = (Rc::downgrade(&view), wanted.clone());
+                    row.connect_activated(move |_| {
+                        if let Some(view) = opened.upgrade() {
+                            view.opened.replace(Some((season.clone(), index)));
+                        }
+                    });
+                    view.episodes.append(&row);
                 }
+                focus_episode(&view, &wanted);
             }
             Err(e) => ui.report_error("Could not load episodes", &e),
         }
@@ -334,6 +363,36 @@ fn episode_row(ui: &Ui, episode: &BaseItem) -> adw::ActionRow {
         }
     });
     row
+}
+
+/// Puts the cursor on an episode, so the controller starts there instead
+/// of somewhere unseen: the one last opened in this season, else the
+/// first. Leaves the focus alone while the user is elsewhere on the page
+/// (hero buttons, cast); season chips count as "on the episodes".
+fn focus_episode(view: &SeriesView, season_id: &str) {
+    let Some(page) = view.episodes.ancestor(adw::NavigationPage::static_type()) else {
+        return;
+    };
+    let focus = view.episodes.root().and_then(|root| root.focus());
+    let elsewhere_on_page = focus.as_ref().is_some_and(|focus| {
+        focus.is_ancestor(&page)
+            && !focus.is_ancestor(&view.episodes)
+            && !focus.is_ancestor(&view.seasons.root)
+    });
+    if elsewhere_on_page {
+        return;
+    }
+    let index = match &*view.opened.borrow() {
+        Some((season, index)) if season == season_id => *index as i32,
+        _ => 0,
+    };
+    let row = view
+        .episodes
+        .row_at_index(index)
+        .or_else(|| view.episodes.row_at_index(0));
+    if let Some(row) = row {
+        row.grab_focus();
+    }
 }
 
 fn clear_list(list: &gtk::ListBox) {

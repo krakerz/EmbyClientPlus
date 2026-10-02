@@ -46,6 +46,17 @@ pub fn page(ui: &Ui) -> adw::NavigationPage {
         .tooltip_text("Favorites")
         .build();
     header.pack_start(&favorites);
+    // Search starts right here in the header; Enter (or the search button)
+    // opens the results page.
+    let search_entry = gtk::SearchEntry::builder()
+        .placeholder_text("Search movies, shows, episodes")
+        .width_request(320)
+        .build();
+    let search_bar = gtk::Revealer::builder()
+        .transition_type(gtk::RevealerTransitionType::SlideRight)
+        .child(&search_entry)
+        .build();
+    header.pack_start(&search_bar);
     let weak = ui.downgrade();
     favorites.connect_clicked(move |_| {
         if let Some(ui) = weak.upgrade() {
@@ -65,12 +76,49 @@ pub fn page(ui: &Ui) -> adw::NavigationPage {
 
     let page = scrolled_page("Home", Some("home"), &header, &content);
 
-    let weak = ui.downgrade();
-    search.connect_clicked(move |_| {
-        if let Some(ui) = weak.upgrade() {
-            ui.open_search();
+    let submit = {
+        let (weak, entry, bar) = (ui.downgrade(), search_entry.clone(), search_bar.clone());
+        move || {
+            let term = entry.text().trim().to_string();
+            if term.is_empty() {
+                return false;
+            }
+            if let Some(ui) = weak.upgrade() {
+                ui.open_search(&term);
+            }
+            entry.set_text("");
+            bar.set_reveal_child(false);
+            true
+        }
+    };
+    let show_search = {
+        let (entry, bar) = (search_entry.clone(), search_bar.clone());
+        move || {
+            bar.set_reveal_child(true);
+            entry.grab_focus();
+        }
+    };
+    search.connect_clicked({
+        let (submit, show_search, bar) = (submit.clone(), show_search.clone(), search_bar.clone());
+        move |_| {
+            if !bar.reveals_child() {
+                show_search();
+            } else if !submit() {
+                bar.set_reveal_child(false);
+            }
         }
     });
+    search_entry.connect_activate(move |_| {
+        submit();
+    });
+    search_entry.connect_stop_search({
+        let bar = search_bar.clone();
+        move |entry| {
+            entry.set_text("");
+            bar.set_reveal_child(false);
+        }
+    });
+    ui.set_search_starter(show_search);
 
     let actions = gio::SimpleActionGroup::new();
     let refresh = gio::SimpleAction::new("refresh", None);

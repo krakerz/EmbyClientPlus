@@ -197,6 +197,27 @@ pub struct MediaStream {
     pub is_text_subtitle_stream: bool,
     #[serde(default)]
     pub display_title: Option<String>,
+    /// "SDR" / "HDR" (video streams).
+    #[serde(default)]
+    pub video_range: Option<String>,
+    #[serde(default)]
+    pub color_transfer: Option<String>,
+}
+
+/// Whether the source's video is HDR (PQ or HLG).
+pub fn is_hdr(streams: &[MediaStream]) -> bool {
+    streams
+        .iter()
+        .filter(|s| s.stream_type == "Video")
+        .any(|s| {
+            s.video_range
+                .as_deref()
+                .is_some_and(|r| r.eq_ignore_ascii_case("HDR"))
+                || matches!(
+                    s.color_transfer.as_deref(),
+                    Some("smpte2084" | "arib-std-b67")
+                )
+        })
 }
 
 /// One chapter marker. `marker_type` is `Chapter`, or `IntroStart` /
@@ -207,6 +228,8 @@ pub struct ChapterInfo {
     pub start_position_ticks: i64,
     pub name: Option<String>,
     pub marker_type: Option<String>,
+    /// Set when the server has an image for this chapter.
+    pub image_tag: Option<String>,
 }
 
 /// The generic item shape every browse endpoint returns (Emby's
@@ -248,10 +271,16 @@ pub struct BaseItem {
     pub artist_items: Vec<NameId>,
     pub album_artists: Vec<NameId>,
     pub child_count: Option<i32>,
+    pub genre_items: Vec<NameId>,
     pub remote_trailers: Vec<RemoteTrailer>,
     /// A person's role in the title they're listed for (cast cards only).
     #[serde(skip)]
     pub role: Option<String>,
+    /// The entry's id inside a playlist (playlist listings only), for
+    /// removing or moving that one entry.
+    pub playlist_item_id: Option<String>,
+    /// `Audio`, `Video`, ...; tells music playlists from video ones.
+    pub media_type: Option<String>,
 }
 
 /// A linked item by name and id (album artists).
@@ -259,7 +288,17 @@ pub struct BaseItem {
 #[serde(rename_all = "PascalCase", default)]
 pub struct NameId {
     pub name: String,
+    /// Emby sends some of these ids as numbers (genres) and some as text.
+    #[serde(deserialize_with = "string_or_number")]
     pub id: String,
+}
+
+fn string_or_number<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(text) => text,
+        serde_json::Value::Number(number) => number.to_string(),
+        _ => String::new(),
+    })
 }
 
 /// A trailer hosted elsewhere (usually a YouTube page).
@@ -315,7 +354,7 @@ pub struct UserItemData {
 }
 
 /// One "Because you watched X" row from `/Movies/Recommendations`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct Recommendation {
     #[serde(default)]
@@ -337,6 +376,7 @@ impl Recommendation {
                 format!("Directed by {baseline}")
             }
             "HasActorFromRecentlyPlayed" | "HasLikedActor" => format!("Starring {baseline}"),
+            "Genre" => format!("More {baseline}"),
             _ if !baseline.is_empty() => format!("Because of {baseline}"),
             _ => "Recommended".to_string(),
         }
@@ -443,6 +483,32 @@ mod tests {
         assert_eq!(rows[0].title(), "Because you watched Godzilla");
         assert_eq!(rows[0].items[0].name, "Kong");
         assert_eq!(rows[1].title(), "Recommended");
+    }
+
+    #[test]
+    fn genre_ids_may_be_numbers() {
+        let item: BaseItem = serde_json::from_value(serde_json::json!({
+            "Id": "s", "Name": "Show", "Type": "Series",
+            "GenreItems": [{"Name": "Fantasy", "Id": 7424}, {"Name": "Drama", "Id": "7425"}]
+        }))
+        .unwrap();
+        assert_eq!(item.genre_items[0].id, "7424");
+        assert_eq!(item.genre_items[1].id, "7425");
+    }
+
+    #[test]
+    fn hdr_is_detected_from_range_or_transfer() {
+        let video = |range: Option<&str>, transfer: Option<&str>| -> MediaStream {
+            serde_json::from_value(serde_json::json!({
+                "Index": 0, "Type": "Video", "VideoRange": range, "ColorTransfer": transfer
+            }))
+            .unwrap()
+        };
+        assert!(is_hdr(&[video(Some("HDR"), None)]));
+        assert!(is_hdr(&[video(None, Some("smpte2084"))]));
+        assert!(is_hdr(&[video(Some("SDR"), Some("arib-std-b67"))]));
+        assert!(!is_hdr(&[video(Some("SDR"), Some("bt709"))]));
+        assert!(!is_hdr(&[]));
     }
 
     #[test]

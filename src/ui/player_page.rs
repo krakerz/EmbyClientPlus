@@ -13,8 +13,9 @@ use super::{format_timestamp, images};
 use crate::emby::EmbyClient;
 use crate::emby::models::BaseItem;
 use crate::playback::{PlaybackSession, QUALITIES, Quality, TICKS_PER_SECOND, TrackEntry};
+use crate::player::compositor::BarFill;
 use crate::player::{
-    self, END_FILE_REASON_EOF, END_FILE_REASON_ERROR, Player, PlayerEvent, TrackKind,
+    self, Aspect, END_FILE_REASON_EOF, END_FILE_REASON_ERROR, Player, PlayerEvent, TrackKind,
 };
 
 /// OSD hides after this long without pointer movement while playing.
@@ -23,8 +24,12 @@ const OSD_TIMEOUT: Duration = Duration::from_secs(3);
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
 const UP_NEXT_COUNTDOWN: Duration = Duration::from_secs(10);
 const SEEK_STEP: i32 = 10;
+/// One zoom step, in mpv's log2 units (about 7%).
+const ZOOM_STEP: f64 = 0.1;
 /// How often the SVP button re-checks whether SVP attached.
 const SVP_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+/// How long the volume pop-up stays after the last change.
+const VOLUME_OSD_TIME: Duration = Duration::from_millis(1500);
 /// Volume changes are reported to Emby once they settle.
 const VOLUME_REPORT_DELAY: Duration = Duration::from_millis(800);
 const SVP_STATE_CLASSES: [&str; 3] = ["svp-active", "svp-waiting", "svp-missing"];
@@ -33,6 +38,8 @@ const VOLUME_STEP: f64 = 5.0;
 const SUBTITLES_OFF_ID: i64 = -1;
 
 thread_local! {
+    /// Titles already told that HDR keeps SVP off (once per run).
+    static HDR_NOTICED: RefCell<std::collections::HashSet<String>> = RefCell::default();
     /// The page mpv events are delivered to (main thread only).
     static CURRENT: RefCell<Weak<Inner>> = const { RefCell::new(Weak::new()) };
 }
@@ -78,6 +85,12 @@ struct Inner {
     hide_timer: RefCell<Option<glib::SourceId>>,
     tick: RefCell<Option<glib::SourceId>>,
     volume_report: RefCell<Option<glib::SourceId>>,
+    /// Last volume/mute seen, so only real changes pop up the volume OSD.
+    volume_seen: Cell<Option<(i64, bool)>>,
+    /// Start pressed: the controller moves through the OSD's buttons
+    /// instead of seeking, and the OSD stays up.
+    controls_mode: Cell<bool>,
+    volume_osd_timer: RefCell<Option<glib::SourceId>>,
     svp_checked_at: Cell<Option<Instant>>,
     /// The "SVP Manager isn't running" toast shows once per item.
     svp_warned: Cell<bool>,
@@ -99,6 +112,7 @@ struct Osd {
     audio: gtk::MenuButton,
     subtitles: gtk::MenuButton,
     quality: gtk::MenuButton,
+    picture: gtk::MenuButton,
     svp: gtk::ToggleButton,
     fullscreen: gtk::Button,
     skip: gtk::Button,
@@ -108,9 +122,13 @@ struct Osd {
     up_next_countdown: gtk::Label,
     up_next_play: gtk::Button,
     up_next_cancel: gtk::Button,
-    /// Album cover shown while music plays (there's no video).
-    cover: gtk::Picture,
-    cover_frame: gtk::Overlay,
+    /// Frame, chapter and time over the seek bar while scrubbing.
+    preview: super::scrub_preview::ScrubPreview,
+    /// Pops up on volume changes, even with the OSD hidden (controller).
+    volume_osd: gtk::Revealer,
+    volume_osd_icon: gtk::Image,
+    volume_osd_level: gtk::ProgressBar,
+    volume_osd_label: gtk::Label,
 }
 
 impl PlayerPage {
@@ -139,6 +157,9 @@ impl PlayerPage {
             hide_timer: RefCell::new(None),
             tick: RefCell::new(None),
             volume_report: RefCell::new(None),
+            volume_seen: Cell::new(None),
+            controls_mode: Cell::new(false),
+            volume_osd_timer: RefCell::new(None),
             svp_checked_at: Cell::new(None),
             svp_warned: Cell::new(false),
         });
@@ -147,6 +168,9 @@ impl PlayerPage {
 
         player.on_event(|event| {
             glib::MainContext::default().invoke(move || {
+                if crate::music::dispatch(&event) {
+                    return;
+                }
                 if let Some(inner) = CURRENT.with(|current| current.borrow().upgrade()) {
                     inner.handle(event);
                 }
@@ -165,6 +189,21 @@ impl PlayerPage {
         self.inner.osd.menu_open()
     }
 
+    /// Whether the controller is moving through the OSD's buttons.
+    pub fn controls_mode(&self) -> bool {
+        self.inner.controls_mode.get()
+    }
+
+    /// Leaves the OSD-buttons mode; the OSD hides again as usual.
+    pub fn leave_controls_mode(&self) {
+        let inner = &self.inner;
+        inner.controls_mode.set(false);
+        if let Some(window) = inner.window() {
+            gtk::prelude::GtkWindowExt::set_focus(&window, None::<&gtk::Widget>);
+        }
+        inner.show_osd();
+    }
+
     /// Runs a player-context controller action.
     pub fn controller_action(&self, action: crate::controller::Action) {
         use crate::controller::Action;
@@ -173,8 +212,14 @@ impl PlayerPage {
         match action {
             Action::PlayPause => warn(player.toggle_pause()),
             Action::Leave => inner.pop(),
-            Action::SeekBack => warn(player.seek_relative(-SEEK_STEP)),
-            Action::SeekForward => warn(player.seek_relative(SEEK_STEP)),
+            Action::SeekBack => {
+                inner.show_osd();
+                inner.seek_by(-SEEK_STEP);
+            }
+            Action::SeekForward => {
+                inner.show_osd();
+                inner.seek_by(SEEK_STEP);
+            }
             Action::VolumeUp => warn(player.set_volume(player.volume() + VOLUME_STEP)),
             Action::VolumeDown => warn(player.set_volume(player.volume() - VOLUME_STEP)),
             Action::PreviousEpisode => inner.play_neighbour(false),
@@ -189,7 +234,13 @@ impl PlayerPage {
                 inner.show_osd();
                 inner.osd.subtitles.popup();
             }
-            Action::ShowControls => {}
+            // The OSD stays up and the controller moves through its buttons.
+            Action::ShowControls => {
+                inner.controls_mode.set(true);
+                inner.show_osd();
+                inner.osd.play.grab_focus();
+                return;
+            }
             _ => return,
         }
         inner.show_osd();
@@ -197,6 +248,8 @@ impl PlayerPage {
 
     /// Readies the page for `item` before its stream is negotiated.
     pub fn prepare(&self, item: &BaseItem, quality: Quality, handlers: Handlers) {
+        self.inner.osd.preview.clear();
+        self.inner.controls_mode.set(false);
         let inner = &self.inner;
         inner.session.replace(None);
         inner.handlers.replace(Some(Rc::new(handlers)));
@@ -209,7 +262,7 @@ impl PlayerPage {
         inner.osd.title.set_label(&title);
         inner.osd.subtitle.set_label(&subtitle);
         inner.osd.subtitle.set_visible(!subtitle.is_empty());
-        inner.osd.cover_frame.set_visible(item.is_audio());
+        inner.apply_picture(Aspect::Fit, 0.0, false);
         inner.osd.seek.set_range(0.0, 1.0);
         inner.osd.seek.set_value(0.0);
         inner.osd.seek.clear_marks();
@@ -224,17 +277,27 @@ impl PlayerPage {
     /// Hooks up a started session: markers, neighbours, menus, SVP state.
     pub fn attach(&self, session: Rc<PlaybackSession>, client: &std::sync::Arc<EmbyClient>) {
         let inner = &self.inner;
+        inner
+            .osd
+            .preview
+            .load(client, &session.item, session.trickplay_source());
         inner.osd.previous.set_sensitive(session.previous.is_some());
         inner.osd.next.set_sensitive(session.next.is_some());
         inner.osd.svp.set_active(session.svp_enabled());
-        if session.item.is_audio() {
-            images::load_with_client(client, &inner.osd.cover, session.item.poster(), 720);
+        if session.hdr && !session.svp_enabled() {
+            let first_time =
+                HDR_NOTICED.with(|seen| seen.borrow_mut().insert(session.item.id.clone()));
+            if first_time && let Some(handlers) = inner.handlers() {
+                (handlers.toast)("HDR: SVP is off for this title (turn it on with the SVP button)");
+            }
         }
         if let Some(next) = &session.next {
             inner.osd.up_next_title.set_label(&next.episode_label());
             images::load_with_client(client, &inner.osd.up_next_picture, next.landscape(), 384);
         }
+        let (aspect, zoom) = session.picture();
         inner.session.replace(Some(session));
+        inner.apply_picture(aspect, zoom, false);
         inner.refresh_duration();
         inner.rebuild_menus();
     }
@@ -300,7 +363,6 @@ impl Osd {
             .orientation(gtk::Orientation::Horizontal)
             .hexpand(true)
             .draw_value(false)
-            .has_tooltip(true)
             .build();
         seek.set_range(0.0, 1.0);
         let seek_row = gtk::Box::builder().spacing(12).build();
@@ -333,6 +395,8 @@ impl Osd {
         let audio = menu_button(crate::ui::icons::AUDIO, "Audio");
         let subtitles = menu_button(crate::ui::icons::SUBTITLES, "Subtitles");
         let quality = menu_button(crate::ui::icons::QUALITY, "Quality");
+        let picture = menu_button(crate::ui::icons::PICTURE, "Picture");
+        picture.set_menu_model(Some(&picture_menu()));
         let svp = gtk::ToggleButton::builder()
             .label("SVP")
             .tooltip_text("Frame interpolation through SVP (remembered for this title)")
@@ -351,6 +415,7 @@ impl Osd {
         end.append(&audio);
         end.append(&subtitles);
         end.append(&quality);
+        end.append(&picture);
         end.append(&svp);
         end.append(&fullscreen);
         buttons.set_start_widget(Some(&start));
@@ -442,19 +507,38 @@ impl Osd {
         overlay.add_overlay(&bottom);
         overlay.add_overlay(&skip);
         overlay.add_overlay(&up_next);
-        let cover = gtk::Picture::builder()
-            .content_fit(gtk::ContentFit::Cover)
+
+        let volume_osd_icon = gtk::Image::builder()
+            .icon_name(crate::ui::icons::VOLUME)
+            .pixel_size(24)
             .build();
-        let cover_frame = gtk::Overlay::builder()
-            .child(&super::fixed_picture(&cover, 360, 360))
-            .overflow(gtk::Overflow::Hidden)
-            .halign(gtk::Align::Center)
+        let volume_osd_level = gtk::ProgressBar::builder()
+            .width_request(200)
             .valign(gtk::Align::Center)
-            .css_classes(["card"])
-            .can_target(false)
-            .visible(false)
             .build();
-        overlay.add_overlay(&cover_frame);
+        let volume_osd_label = gtk::Label::builder()
+            .width_chars(5)
+            .xalign(1.0)
+            .css_classes(["numeric", "heading"])
+            .build();
+        let volume_osd_box = gtk::Box::builder()
+            .spacing(12)
+            .css_classes(["osd", "volume-osd"])
+            .build();
+        volume_osd_box.append(&volume_osd_icon);
+        volume_osd_box.append(&volume_osd_level);
+        volume_osd_box.append(&volume_osd_label);
+        let volume_osd = gtk::Revealer::builder()
+            .child(&volume_osd_box)
+            .transition_type(gtk::RevealerTransitionType::Crossfade)
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Start)
+            .margin_top(96)
+            .can_target(false)
+            .build();
+        overlay.add_overlay(&volume_osd);
+        let preview = super::scrub_preview::ScrubPreview::new();
+        overlay.add_overlay(preview.widget());
 
         let osd = Osd {
             top,
@@ -472,6 +556,7 @@ impl Osd {
             audio,
             subtitles,
             quality,
+            picture,
             svp,
             fullscreen,
             skip,
@@ -481,8 +566,11 @@ impl Osd {
             up_next_countdown,
             up_next_play,
             up_next_cancel,
-            cover,
-            cover_frame,
+            preview,
+            volume_osd,
+            volume_osd_icon,
+            volume_osd_level,
+            volume_osd_label,
         };
         (osd, overlay)
     }
@@ -493,6 +581,7 @@ impl Osd {
             &self.audio,
             &self.subtitles,
             &self.quality,
+            &self.picture,
         ]
         .iter()
         .any(|button| button.is_active())
@@ -592,6 +681,78 @@ impl Inner {
         ));
         self.actions.add_action(&quality);
 
+        // Picture: bar fill (global), aspect and zoom (per title).
+        let fill_names = ["off", "blur", "glow"];
+        let current_fill = fill_names[self.player.bar_fill() as usize].to_variant();
+        let fill = gio::SimpleAction::new_stateful(
+            "bar-fill",
+            Some(glib::VariantTy::STRING),
+            &current_fill,
+        );
+        fill.connect_activate(glib::clone!(
+            #[strong]
+            weak,
+            move |action, value| {
+                let (Some(inner), Some(name)) =
+                    (weak.upgrade(), value.and_then(|v| v.get::<String>()))
+                else {
+                    return;
+                };
+                action.set_state(&name.to_variant());
+                let fill = bar_fill_from_name(&name);
+                warn(inner.player.set_bar_fill(fill));
+                inner.video.queue_render();
+                let saved = name.clone();
+                if let Err(e) = crate::config::Settings::update(|s| s.playback.bar_fill = saved) {
+                    tracing::warn!("{e:#}");
+                }
+            }
+        ));
+        self.actions.add_action(&fill);
+        let aspect = gio::SimpleAction::new_stateful(
+            "aspect",
+            Some(glib::VariantTy::STRING),
+            &Aspect::Fit.name().to_variant(),
+        );
+        aspect.connect_activate(glib::clone!(
+            #[strong]
+            weak,
+            move |action, value| {
+                let (Some(inner), Some(name)) =
+                    (weak.upgrade(), value.and_then(|v| v.get::<String>()))
+                else {
+                    return;
+                };
+                let Some(chosen) = Aspect::from_name(&name) else {
+                    return;
+                };
+                action.set_state(&name.to_variant());
+                inner.apply_picture(chosen, inner.player.user_zoom(), true);
+            }
+        ));
+        self.actions.add_action(&aspect);
+        for (name, step) in [
+            ("zoom-in", ZOOM_STEP),
+            ("zoom-out", -ZOOM_STEP),
+            ("zoom-reset", 0.0),
+        ] {
+            let action = gio::SimpleAction::new(name, None);
+            action.connect_activate(glib::clone!(
+                #[strong]
+                weak,
+                move |_, _| {
+                    let Some(inner) = weak.upgrade() else { return };
+                    let zoom = if step == 0.0 {
+                        0.0
+                    } else {
+                        inner.player.user_zoom() + step
+                    };
+                    inner.apply_picture(inner.current_aspect(), zoom, true);
+                }
+            ));
+            self.actions.add_action(&action);
+        }
+
         // Buttons.
         let osd = &self.osd;
         osd.play.connect_clicked(glib::clone!(
@@ -660,28 +821,35 @@ impl Inner {
                 if let Some(inner) = weak.upgrade() {
                     inner.seeked_at.set(Some(Instant::now()));
                     warn(inner.player.seek_absolute(value));
+                    inner.preview_at(value, true);
                 }
                 glib::Propagation::Proceed
             }
         ));
-        osd.seek.connect_query_tooltip(glib::clone!(
+        // Hovering the seek bar previews that point.
+        let hover = gtk::EventControllerMotion::new();
+        hover.connect_motion(glib::clone!(
             #[strong]
             weak,
-            move |seek, x, _, _, tooltip| {
-                let Some(inner) = weak.upgrade() else {
-                    return false;
-                };
-                let Some(duration) = inner.player.duration() else {
-                    return false;
-                };
-                let fraction = (f64::from(x) / f64::from(seek.width().max(1))).clamp(0.0, 1.0);
-                let seconds = fraction * duration;
-                tooltip.set_text(Some(&format_timestamp(
-                    (seconds * TICKS_PER_SECOND as f64) as i64,
-                )));
-                true
+            move |_, x, _| {
+                if let Some(inner) = weak.upgrade() {
+                    let fraction = (x / f64::from(inner.osd.seek.width().max(1))).clamp(0.0, 1.0);
+                    if let Some(duration) = inner.player.duration() {
+                        inner.preview_at(fraction * duration, false);
+                    }
+                }
             }
         ));
+        hover.connect_leave(glib::clone!(
+            #[strong]
+            weak,
+            move |_| {
+                if let Some(inner) = weak.upgrade() {
+                    inner.osd.preview.hide();
+                }
+            }
+        ));
+        osd.seek.add_controller(hover);
         osd.skip.connect_clicked(glib::clone!(
             #[strong]
             weak,
@@ -803,6 +971,8 @@ impl Inner {
                 }
             }
             PlayerEvent::Duration(_) => self.refresh_duration(),
+            // The music queue's business (see `music`).
+            PlayerEvent::PlaylistPos(_) => {}
             PlayerEvent::Tracks => self.rebuild_menus(),
             PlayerEvent::Volume => {
                 self.osd.volume.set_value(self.player.volume());
@@ -814,6 +984,7 @@ impl Inner {
                         crate::ui::icons::VOLUME
                     });
                 self.schedule_volume_report();
+                self.flash_volume();
             }
             PlayerEvent::FileLoaded => {
                 if let Some(session) = self.session() {
@@ -884,6 +1055,27 @@ impl Inner {
             for &chapter in session.markers.chapters.iter().filter(|&&c| c > 0.0) {
                 seek.add_mark(chapter, gtk::PositionType::Bottom, None);
             }
+        }
+    }
+
+    fn current_aspect(&self) -> Aspect {
+        self.actions
+            .lookup_action("aspect")
+            .and_then(|action| action.state())
+            .and_then(|state| state.get::<String>())
+            .and_then(|name| Aspect::from_name(&name))
+            .unwrap_or_default()
+    }
+
+    /// Applies aspect and zoom, refits, and (when `remember`) saves them
+    /// for the title.
+    fn apply_picture(&self, aspect: Aspect, zoom: f64, remember: bool) {
+        warn(self.player.set_aspect(aspect));
+        self.player.set_user_zoom(zoom);
+        set_state(&self.actions, "aspect", aspect.name().to_variant());
+        player::video_area::refit(self.player, &self.video);
+        if remember && let Some(session) = self.session() {
+            session.remember_picture(aspect, self.player.user_zoom());
         }
     }
 
@@ -1062,6 +1254,48 @@ impl Inner {
         button.set_tooltip_text(Some(tooltip));
     }
 
+    /// Shows the volume pop-up for a moment when volume or mute changed.
+    fn flash_volume(self: &Rc<Self>) {
+        let (volume, muted) = (self.player.volume(), self.player.is_muted());
+        let seen = (volume.round() as i64, muted);
+        // The first reading is mpv's starting state, not a change.
+        if self
+            .volume_seen
+            .replace(Some(seen))
+            .is_none_or(|last| last == seen)
+        {
+            return;
+        }
+        let osd = &self.osd;
+        osd.volume_osd_icon.set_icon_name(Some(if muted {
+            crate::ui::icons::MUTED
+        } else {
+            crate::ui::icons::VOLUME
+        }));
+        osd.volume_osd_level.set_fraction(if muted {
+            0.0
+        } else {
+            (volume / 100.0).clamp(0.0, 1.0)
+        });
+        osd.volume_osd_label.set_label(&if muted {
+            "Muted".to_string()
+        } else {
+            format!("{}%", seen.0)
+        });
+        osd.volume_osd.set_reveal_child(true);
+        if let Some(pending) = self.volume_osd_timer.take() {
+            pending.remove();
+        }
+        let weak = Rc::downgrade(self);
+        let pending = glib::timeout_add_local_once(VOLUME_OSD_TIME, move || {
+            if let Some(inner) = weak.upgrade() {
+                inner.volume_osd_timer.take();
+                inner.osd.volume_osd.set_reveal_child(false);
+            }
+        });
+        self.volume_osd_timer.replace(Some(pending));
+    }
+
     fn schedule_volume_report(self: &Rc<Self>) {
         if let Some(pending) = self.volume_report.take() {
             pending.remove();
@@ -1077,6 +1311,40 @@ impl Inner {
         self.volume_report.replace(Some(pending));
     }
 
+    /// Shows the scrub preview for `seconds`, over that point of the seek
+    /// bar; `flash`: hide it again shortly (no pointer hovering there).
+    fn preview_at(&self, seconds: f64, flash: bool) {
+        let Some(overlay) = self.page.child() else {
+            return;
+        };
+        let seek = &self.osd.seek;
+        let duration = self.player.duration().unwrap_or(0.0);
+        if duration <= 0.0 || !self.osd.bottom.reveals_child() {
+            return;
+        }
+        let fraction = (seconds / duration).clamp(0.0, 1.0);
+        let x = fraction * f64::from(seek.width());
+        let Some(point) = seek.compute_point(&overlay, &gtk::graphene::Point::new(x as f32, 0.0))
+        else {
+            return;
+        };
+        let (x, top) = (f64::from(point.x()), f64::from(point.y()));
+        if flash {
+            self.osd.preview.flash_at(&overlay, seconds, x, top);
+        } else {
+            self.osd.preview.show_at(&overlay, seconds, x, top);
+        }
+    }
+
+    /// A relative seek (controller or arrow keys), previewed on the bar.
+    fn seek_by(&self, seconds: i32) {
+        warn(self.player.seek_relative(seconds));
+        if let (Some(position), Some(duration)) = (self.player.position(), self.player.duration()) {
+            let target = (position + f64::from(seconds)).clamp(0.0, duration);
+            self.preview_at(target, true);
+        }
+    }
+
     fn seek_chapter(&self, forward: bool) {
         let (Some(session), Some(position)) = (self.session(), self.player.position()) else {
             return;
@@ -1088,6 +1356,7 @@ impl Inner {
         };
         if let Some(target) = target {
             warn(self.player.seek_absolute(target));
+            self.preview_at(target, true);
         }
     }
 
@@ -1095,8 +1364,14 @@ impl Inner {
         let player = self.player;
         match key {
             gdk::Key::space | gdk::Key::k => warn(player.toggle_pause()),
-            gdk::Key::Left => warn(player.seek_relative(-SEEK_STEP)),
-            gdk::Key::Right => warn(player.seek_relative(SEEK_STEP)),
+            gdk::Key::Left => {
+                self.show_osd();
+                self.seek_by(-SEEK_STEP);
+            }
+            gdk::Key::Right => {
+                self.show_osd();
+                self.seek_by(SEEK_STEP);
+            }
             gdk::Key::Up => warn(player.set_volume(player.volume() + VOLUME_STEP)),
             gdk::Key::Down => warn(player.set_volume(player.volume() - VOLUME_STEP)),
             gdk::Key::m => warn(player.toggle_mute()),
@@ -1128,7 +1403,7 @@ impl Inner {
             if !inner.page.is_mapped() {
                 return;
             }
-            if inner.player.is_paused() || inner.osd.menu_open() {
+            if inner.player.is_paused() || inner.osd.menu_open() || inner.controls_mode.get() {
                 inner.show_osd();
                 return;
             }
@@ -1203,6 +1478,42 @@ fn titles(item: &BaseItem) -> (String, String) {
                 .map(|y| y.to_string())
                 .unwrap_or_default(),
         ),
+    }
+}
+
+fn picture_menu() -> gio::Menu {
+    let menu = gio::Menu::new();
+    let bars = gio::Menu::new();
+    for (label, name) in [
+        ("Off", "off"),
+        ("Blurred picture", "blur"),
+        ("Edge glow", "glow"),
+    ] {
+        let item = gio::MenuItem::new(Some(label), None);
+        item.set_action_and_target_value(Some("player.bar-fill"), Some(&name.to_variant()));
+        bars.append_item(&item);
+    }
+    menu.append_section(Some("Black bars"), &bars);
+    let aspects = gio::Menu::new();
+    for aspect in Aspect::ALL {
+        let item = gio::MenuItem::new(Some(aspect.label()), None);
+        item.set_action_and_target_value(Some("player.aspect"), Some(&aspect.name().to_variant()));
+        aspects.append_item(&item);
+    }
+    menu.append_section(Some("Aspect"), &aspects);
+    let zoom = gio::Menu::new();
+    zoom.append(Some("Zoom In"), Some("player.zoom-in"));
+    zoom.append(Some("Zoom Out"), Some("player.zoom-out"));
+    zoom.append(Some("Reset Zoom"), Some("player.zoom-reset"));
+    menu.append_section(Some("Zoom"), &zoom);
+    menu
+}
+
+pub fn bar_fill_from_name(name: &str) -> BarFill {
+    match name {
+        "blur" => BarFill::Blur,
+        "glow" => BarFill::Glow,
+        _ => BarFill::Off,
     }
 }
 

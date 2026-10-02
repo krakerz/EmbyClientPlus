@@ -11,13 +11,16 @@ mod hero;
 mod home;
 pub mod icons;
 mod image_disk_cache;
-mod images;
+pub(crate) mod images;
 mod library;
 mod library_page;
 pub mod login;
+mod music;
 pub mod player_page;
+mod playlists;
 mod preferences;
 mod rows;
+mod scrub_preview;
 mod search;
 mod series;
 mod updates;
@@ -37,6 +40,9 @@ use crate::playback::{PlaybackSession, Quality};
 use crate::player::Player;
 use player_page::{Handlers, PlayerPage};
 
+/// Songs in an Instant Mix.
+const INSTANT_MIX_SIZE: usize = 100;
+
 /// How long notices stay on screen.
 pub const TOAST_SECONDS: u32 = 3;
 
@@ -55,6 +61,9 @@ pub struct Ui {
 struct Inner {
     session: Session,
     nav: adw::NavigationView,
+    /// Holds `nav` plus the music player's bar and Now Playing sheet.
+    root: adw::BottomSheet,
+    music: crate::music::MusicPlayer,
     toasts: adw::ToastOverlay,
     player: Player,
     player_page: PlayerPage,
@@ -66,6 +75,8 @@ struct Inner {
     reloaders: RefCell<Vec<Reloader>>,
     /// A web link (trailer) is playing outside any Emby session.
     playing_link: Cell<bool>,
+    /// Reveals and focuses Home's search box.
+    search_starter: RefCell<Option<Rc<dyn Fn()>>>,
     on_logout: Box<dyn Fn(bool)>,
 }
 
@@ -79,10 +90,14 @@ impl Ui {
         player_page: PlayerPage,
         on_logout: impl Fn(bool) + 'static,
     ) -> Self {
+        let music =
+            crate::music::MusicPlayer::new(session.client.clone(), session.user_id.clone(), player);
         let ui = Ui {
             inner: Rc::new(Inner {
                 session,
                 nav: adw::NavigationView::new(),
+                root: adw::BottomSheet::new(),
+                music,
                 toasts,
                 player,
                 player_page,
@@ -90,6 +105,7 @@ impl Ui {
                 data_generation: Cell::new(0),
                 reloaders: RefCell::new(Vec::new()),
                 playing_link: Cell::new(false),
+                search_starter: RefCell::new(None),
                 on_logout: Box::new(on_logout),
             }),
         };
@@ -106,11 +122,24 @@ impl Ui {
         });
         actions.add_action(&home);
         ui.inner.nav.insert_action_group("nav", Some(&actions));
+        ui.inner.root.set_content(Some(&ui.inner.nav));
+        music::attach(&ui, &ui.inner.music, &ui.inner.root);
         ui
     }
 
-    pub fn widget(&self) -> &adw::NavigationView {
-        &self.inner.nav
+    pub fn widget(&self) -> &adw::BottomSheet {
+        &self.inner.root
+    }
+
+    pub fn music(&self) -> &crate::music::MusicPlayer {
+        &self.inner.music
+    }
+
+    /// Closes Now Playing if it's open; false when it wasn't.
+    pub fn close_now_playing(&self) -> bool {
+        let open = self.inner.root.is_open();
+        self.inner.root.set_open(false);
+        open
     }
 
     pub fn session(&self) -> &Session {
@@ -156,9 +185,9 @@ impl Ui {
     /// Opens whatever page fits the item: series overview, playable item
     /// details, or a folder/library listing.
     pub fn open(&self, item: &BaseItem) {
-        // A song card plays right away (with its album as the queue).
+        // A song plays right away, with its album as the queue.
         if item.is_audio() {
-            return self.play(item, 0);
+            return self.play_song(item);
         }
         self.push(&self.page_for(item));
     }
@@ -185,6 +214,7 @@ impl Ui {
             "Person" => library_page::person(self, item),
             "MusicAlbum" => album::page(self, item),
             "MusicArtist" => library_page::artist(self, item),
+            "Playlist" => playlists::page(self, item),
             "Season" => match &item.series_id {
                 Some(series_id) => {
                     let series = BaseItem {
@@ -202,8 +232,21 @@ impl Ui {
         }
     }
 
-    pub fn open_search(&self) {
-        self.push(&search::page(self));
+    /// Results for `term`, on their own page (refinable there).
+    pub fn open_search(&self, term: &str) {
+        self.push(&search::page(self, term));
+    }
+
+    /// Opens the search box in Home's header (going Home first).
+    pub fn start_search(&self) {
+        self.inner.nav.pop_to_tag("home");
+        if let Some(start) = self.inner.search_starter.borrow().clone() {
+            start();
+        }
+    }
+
+    fn set_search_starter(&self, start: impl Fn() + 'static) {
+        self.inner.search_starter.replace(Some(Rc::new(start)));
     }
 
     pub fn open_favorites(&self) {
@@ -275,8 +318,116 @@ impl Ui {
         });
     }
 
-    /// Plays `item` from `start_ticks` in the player page.
+    /// Plays `items` from `start` in the music player (never the video
+    /// player: no SVP, browsing carries on).
+    pub fn play_music(&self, items: Vec<BaseItem>, start: usize, shuffle: bool) {
+        self.stop_playback();
+        if self.player_visible() {
+            self.inner.nav.pop();
+        }
+        self.inner.music.play(items, start, shuffle);
+    }
+
+    /// Plays everything `item` stands for (album, artist, playlist).
+    pub fn play_collection(&self, item: &BaseItem, shuffle: bool) {
+        self.with_tracks(item, move |ui, tracks| ui.play_music(tracks, 0, shuffle));
+    }
+
+    /// Queues `item`'s tracks after the current one (`next`) or at the end.
+    pub fn queue_music(&self, item: &BaseItem, next: bool) {
+        let name = item.name.clone();
+        self.with_tracks(item, move |ui, tracks| {
+            let music = ui.music();
+            if !music.is_active() {
+                return ui.play_music(tracks, 0, false);
+            }
+            if next {
+                // Each goes right after the current track: insert backwards.
+                for track in tracks.into_iter().rev() {
+                    music.play_next(track);
+                }
+            } else {
+                for track in tracks {
+                    music.add(track);
+                }
+            }
+            ui.toast(&if next {
+                format!("{name} plays next")
+            } else {
+                format!("Added {name} to the queue")
+            });
+        });
+    }
+
+    /// Plays Emby's Instant Mix of songs like `item`.
+    pub fn play_instant_mix(&self, item: &BaseItem) {
+        let ui = self.clone();
+        let id = item.id.clone();
+        glib::spawn_future_local(async move {
+            let (client, user_id) = (ui.client(), ui.user_id());
+            let mix = crate::runtime::spawn_tokio(async move {
+                client.instant_mix(&user_id, &id, INSTANT_MIX_SIZE).await
+            })
+            .await;
+            match mix {
+                Ok(tracks) if tracks.is_empty() => ui.toast("No Instant Mix for this one"),
+                Ok(tracks) => ui.play_music(tracks, 0, false),
+                Err(e) => ui.report_error("Couldn't make an Instant Mix", &e),
+            }
+        });
+    }
+
+    pub fn add_to_playlist(&self, item: &BaseItem) {
+        playlists::add_dialog(self, item);
+    }
+
+    fn with_tracks(&self, item: &BaseItem, then: impl FnOnce(&Ui, Vec<BaseItem>) + 'static) {
+        let ui = self.clone();
+        let item = item.clone();
+        glib::spawn_future_local(async move {
+            let (client, user_id) = (ui.client(), ui.user_id());
+            let tracks = crate::runtime::spawn_tokio(async move {
+                playlists::tracks_of(&client, &user_id, &item).await
+            })
+            .await;
+            match tracks {
+                Ok(tracks) if tracks.is_empty() => ui.toast("Nothing to play here"),
+                Ok(tracks) => then(&ui, tracks),
+                Err(e) => ui.report_error("Couldn't load the tracks", &e),
+            }
+        });
+    }
+
+    /// Plays one song with the rest of its album queued around it.
+    fn play_song(&self, song: &BaseItem) {
+        let Some(album_id) = song.album_id.clone() else {
+            return self.play_music(vec![song.clone()], 0, false);
+        };
+        let ui = self.clone();
+        let song = song.clone();
+        glib::spawn_future_local(async move {
+            let (client, user_id) = (ui.client(), ui.user_id());
+            let tracks = crate::runtime::spawn_tokio(async move {
+                client.album_tracks(&user_id, &album_id).await
+            })
+            .await;
+            match tracks {
+                Ok(tracks) if !tracks.is_empty() => {
+                    let start = tracks.iter().position(|t| t.id == song.id).unwrap_or(0);
+                    ui.play_music(tracks, start, false);
+                }
+                Ok(_) => ui.play_music(vec![song], 0, false),
+                Err(e) => ui.report_error("Couldn't load the album", &e),
+            }
+        });
+    }
+
+    /// Plays `item` from `start_ticks` in the player page (songs go to the
+    /// music player instead).
     pub fn play(&self, item: &BaseItem, start_ticks: i64) {
+        if item.is_audio() {
+            return self.play_song(item);
+        }
         // The current session's quality carries over to the next episode;
         // otherwise the configured default applies.
         let quality = self
@@ -303,6 +454,7 @@ impl Ui {
         quality: Quality,
         audio_stream_index: Option<i32>,
     ) {
+        self.inner.music.stop();
         self.stop_playback();
         let page = &self.inner.player_page;
         page.prepare(item, quality, self.player_handlers());
@@ -390,6 +542,7 @@ impl Ui {
 
     /// Plays a web link (a movie's YouTube trailer) without an Emby session.
     pub fn play_link(&self, title: &str, url: &str) {
+        self.inner.music.stop();
         self.stop_playback();
         let item = BaseItem {
             name: title.to_string(),
@@ -406,11 +559,19 @@ impl Ui {
         glib::spawn_future_local(async move {
             let link = url.clone();
             let resolved = crate::runtime::spawn_tokio(async move {
-                tokio::task::spawn_blocking(move || crate::remote::resolve(&link)).await?
+                let options =
+                    crate::remote::Options::from_settings(&Settings::load().unwrap_or_default());
+                tokio::task::spawn_blocking(move || crate::remote::resolve(&link, &options)).await?
             })
             .await;
             match resolved {
-                Ok(stream) => match ui.inner.player.load_at(&stream, 0.0, &[]) {
+                Ok(stream) => match ui.inner.player.load_at(
+                    &stream.url,
+                    0.0,
+                    // mpv shows a single added subtitle file by default.
+                    &stream.subtitle.as_deref().into_iter().collect::<Vec<_>>(),
+                    stream.audio.as_deref(),
+                ) {
                     Ok(()) => ui.inner.playing_link.set(true),
                     Err(e) => {
                         ui.report_error("Playback failed", &e);
@@ -441,6 +602,7 @@ impl Ui {
     /// Stops playback and waits briefly for Emby to get the final
     /// position, for window close.
     pub fn stop_playback_and_wait(&self) {
+        self.inner.music.stop();
         if let Some(session) = self.inner.playback.take() {
             session.stop_and_wait();
         }
@@ -664,6 +826,27 @@ fn fixed_picture(picture: &gtk::Picture, width: i32, height: i32) -> adw::Clamp 
     };
     let horizontal = clamp(gtk::Orientation::Horizontal, width, picture.upcast_ref());
     clamp(gtk::Orientation::Vertical, height, horizontal.upcast_ref())
+}
+
+/// A dim type icon for `picture`, shown only while it has no image. Add it
+/// as an overlay on the picture's frame.
+fn placeholder_for(picture: &gtk::Picture, icon: &str) -> gtk::Image {
+    let placeholder = gtk::Image::builder()
+        .icon_name(icon)
+        .pixel_size(48)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .can_target(false)
+        .css_classes(["dim-label", "art-placeholder"])
+        .visible(picture.paintable().is_none())
+        .build();
+    let weak = placeholder.downgrade();
+    picture.connect_paintable_notify(move |picture| {
+        if let Some(placeholder) = weak.upgrade() {
+            placeholder.set_visible(picture.paintable().is_none());
+        }
+    });
+    placeholder
 }
 
 /// The picture inside a [`fixed_picture`] wrapper.

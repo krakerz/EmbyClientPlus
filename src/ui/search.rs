@@ -12,7 +12,7 @@ use crate::emby::browse::ItemQuery;
 
 const RESULT_LIMIT: usize = 60;
 
-pub fn page(ui: &Ui) -> adw::NavigationPage {
+pub fn page(ui: &Ui, term: &str) -> adw::NavigationPage {
     let (grid, store) = grid(ui, Shape::Poster);
     let entry = gtk::SearchEntry::builder()
         .placeholder_text("Movies, shows, episodes")
@@ -38,6 +38,20 @@ pub fn page(ui: &Ui) -> adw::NavigationPage {
     stack.add_named(&grid, Some("results"));
     let page = scrolled_page("Search", None, &header, &stack);
 
+    // The cursor lands on the first result, ready for the controller,
+    // unless the user is typing a new search in the entry.
+    store.connect_items_changed({
+        let (grid, entry) = (grid.clone(), entry.clone());
+        move |store, _, _, _| {
+            let typing = grid
+                .root()
+                .and_then(|root| root.focus())
+                .is_some_and(|focus| focus.is_ancestor(&entry));
+            if store.n_items() > 0 && !typing {
+                grid.scroll_to(0, gtk::ListScrollFlags::FOCUS, None);
+            }
+        }
+    });
     // Each query bumps this; pages of an older query are discarded.
     let generation = Rc::new(Cell::new(0u64));
     let weak = ui.downgrade();
@@ -70,8 +84,7 @@ pub fn page(ui: &Ui) -> adw::NavigationPage {
             |_| {},
         );
     });
-    page.connect_shown(move |_| {
-        entry.grab_focus();
-    });
+    // Fires search-changed, which runs the query.
+    entry.set_text(term);
     page
 }

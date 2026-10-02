@@ -1,4 +1,5 @@
-//! An album: cover, artist, track list. Tracks play in album order.
+//! An album: cover, artist, track list. Tracks play in the music player,
+//! with the album as the queue.
 
 use std::rc::Rc;
 
@@ -32,6 +33,7 @@ pub fn page(ui: &Ui, album: &BaseItem) -> adw::NavigationPage {
         .valign(gtk::Align::Start)
         .css_classes(["card"])
         .build();
+    cover_frame.add_overlay(&super::placeholder_for(&cover, crate::ui::icons::SONGS));
     let title = gtk::Label::builder()
         .label(&album.name)
         .xalign(0.0)
@@ -179,19 +181,24 @@ fn show(ui: &Ui, view: &AlbumView, album: &BaseItem, tracks: &[BaseItem]) {
     view.meta.set_label(&meta.join(" · "));
 
     clear(&view.buttons);
-    if let Some(first) = tracks.first() {
-        let play = gtk::Button::builder()
-            .label("Play")
-            .css_classes(["suggested-action", "pill"])
-            .build();
-        let weak = ui.downgrade();
-        let first = first.clone();
-        play.connect_clicked(move |_| {
-            if let Some(ui) = weak.upgrade() {
-                ui.play(&first, 0);
-            }
-        });
-        view.buttons.append(&play);
+    if !tracks.is_empty() {
+        for (label, shuffle) in [("Play", false), ("Shuffle", true)] {
+            let button = gtk::Button::builder()
+                .label(label)
+                .css_classes(if shuffle {
+                    vec!["pill"]
+                } else {
+                    vec!["suggested-action", "pill"]
+                })
+                .build();
+            let (weak, tracks) = (ui.downgrade(), tracks.to_vec());
+            button.connect_clicked(move |_| {
+                if let Some(ui) = weak.upgrade() {
+                    ui.play_music(tracks.clone(), 0, shuffle);
+                }
+            });
+            view.buttons.append(&button);
+        }
     }
     let [_, star] = super::hero::item_toggles(ui, album);
     view.buttons.append(&star);
@@ -202,12 +209,21 @@ fn show(ui: &Ui, view: &AlbumView, album: &BaseItem, tracks: &[BaseItem]) {
         .filter_map(|t| t.parent_index_number)
         .max()
         .is_some_and(|discs| discs > 1);
-    for track in tracks {
-        view.tracks.append(&track_row(ui, album, track, multi_disc));
+    let queue: Rc<[BaseItem]> = tracks.into();
+    for index in 0..queue.len() {
+        view.tracks
+            .append(&track_row(ui, album, &queue, index, multi_disc));
     }
 }
 
-fn track_row(ui: &Ui, album: &BaseItem, track: &BaseItem, multi_disc: bool) -> adw::ActionRow {
+fn track_row(
+    ui: &Ui,
+    album: &BaseItem,
+    tracks: &Rc<[BaseItem]>,
+    index: usize,
+    multi_disc: bool,
+) -> adw::ActionRow {
+    let track = &tracks[index];
     let number = match (multi_disc, track.parent_index_number, track.index_number) {
         (true, Some(disc), Some(n)) => format!("{disc}.{n}"),
         (_, _, Some(n)) => n.to_string(),
@@ -239,11 +255,15 @@ fn track_row(ui: &Ui, album: &BaseItem, track: &BaseItem, multi_disc: bool) -> a
                 .build(),
         );
     }
-    let weak = ui.downgrade();
-    let target = track.clone();
+    super::card::attach_menu(ui, &row, {
+        let track = track.clone();
+        move || Some(track.clone())
+    });
+    // A track plays with the whole album queued around it.
+    let (weak, tracks) = (ui.downgrade(), tracks.clone());
     row.connect_activated(move |_| {
         if let Some(ui) = weak.upgrade() {
-            ui.play(&target, 0);
+            ui.play_music(tracks.to_vec(), index, false);
         }
     });
     row

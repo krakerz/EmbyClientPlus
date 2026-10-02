@@ -3,7 +3,9 @@ pub mod browse;
 pub mod library;
 pub mod models;
 pub mod playback_info;
+pub mod playlists;
 pub mod sessions;
+pub mod trickplay;
 
 use anyhow::{Context, Result};
 use reqwest::header::{HeaderMap, HeaderValue};

@@ -61,6 +61,10 @@ pub struct TitleOverride {
     pub subtitle_forced_only: Option<bool>,
     pub frame_gen_backend: Option<FrameGenBackend>,
     pub frame_gen_multiplier: Option<u32>,
+    /// Picture aspect mode name (see `player::Aspect`), if changed.
+    pub aspect_mode: Option<String>,
+    /// Extra zoom (log2 steps) on top of the automatic fit.
+    pub zoom: Option<f64>,
 }
 
 pub struct Db {
@@ -102,13 +106,27 @@ impl Db {
                 frame_gen_multiplier  INTEGER
             );",
         )
-        .context("failed to initialize title_overrides schema")
+        .context("failed to initialize title_overrides schema")?;
+        // Columns added after the first release; older databases lack them.
+        for (column, kind) in [("aspect_mode", "TEXT"), ("zoom", "REAL")] {
+            let exists = conn
+                .prepare("SELECT 1 FROM pragma_table_info('title_overrides') WHERE name = ?1")?
+                .exists([column])?;
+            if !exists {
+                conn.execute_batch(&format!(
+                    "ALTER TABLE title_overrides ADD COLUMN {column} {kind};"
+                ))
+                .with_context(|| format!("failed to add the {column} column"))?;
+            }
+        }
+        Ok(())
     }
 
     pub fn get_override(&self, emby_item_id: &str) -> Result<Option<TitleOverride>> {
         let mut stmt = self.conn.prepare(
             "SELECT emby_item_id, item_type, audio_language, subtitle_language,
-                    subtitle_forced_only, frame_gen_backend, frame_gen_multiplier
+                    subtitle_forced_only, frame_gen_backend, frame_gen_multiplier,
+                    aspect_mode, zoom
              FROM title_overrides WHERE emby_item_id = ?1",
         )?;
         let mut rows = stmt.query([emby_item_id])?;
@@ -130,6 +148,8 @@ impl Db {
                 .map(|s| frame_gen_backend_from_str(&s))
                 .transpose()?,
             frame_gen_multiplier: row.get::<_, Option<i64>>(6)?.map(|v| v as u32),
+            aspect_mode: row.get(7)?,
+            zoom: row.get(8)?,
         }))
     }
 
@@ -137,15 +157,18 @@ impl Db {
         self.conn.execute(
             "INSERT INTO title_overrides
                 (emby_item_id, item_type, audio_language, subtitle_language,
-                 subtitle_forced_only, frame_gen_backend, frame_gen_multiplier)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 subtitle_forced_only, frame_gen_backend, frame_gen_multiplier,
+                 aspect_mode, zoom)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(emby_item_id) DO UPDATE SET
                 item_type = excluded.item_type,
                 audio_language = excluded.audio_language,
                 subtitle_language = excluded.subtitle_language,
                 subtitle_forced_only = excluded.subtitle_forced_only,
                 frame_gen_backend = excluded.frame_gen_backend,
-                frame_gen_multiplier = excluded.frame_gen_multiplier",
+                frame_gen_multiplier = excluded.frame_gen_multiplier,
+                aspect_mode = excluded.aspect_mode,
+                zoom = excluded.zoom",
             rusqlite::params![
                 entry.emby_item_id,
                 entry.item_type.as_str(),
@@ -154,6 +177,8 @@ impl Db {
                 entry.subtitle_forced_only.map(|v| v as i64),
                 entry.frame_gen_backend.map(frame_gen_backend_as_str),
                 entry.frame_gen_multiplier.map(|v| v as i64),
+                entry.aspect_mode,
+                entry.zoom,
             ],
         )?;
         Ok(())
@@ -193,6 +218,8 @@ mod tests {
             subtitle_forced_only: Some(false),
             frame_gen_backend: Some(FrameGenBackend::Svp),
             frame_gen_multiplier: Some(2),
+            aspect_mode: None,
+            zoom: None,
         };
 
         db.upsert_override(&entry).unwrap();
@@ -217,6 +244,8 @@ mod tests {
             subtitle_forced_only: None,
             frame_gen_backend: Some(FrameGenBackend::Off),
             frame_gen_multiplier: None,
+            aspect_mode: None,
+            zoom: None,
         };
         db.upsert_override(&entry).unwrap();
 
@@ -254,6 +283,8 @@ mod tests {
             subtitle_forced_only: None,
             frame_gen_backend: None,
             frame_gen_multiplier: None,
+            aspect_mode: None,
+            zoom: None,
         };
         db.upsert_override(&entry).unwrap();
         db.delete_override("movie-2").unwrap();
@@ -275,10 +306,40 @@ mod tests {
                 subtitle_forced_only: None,
                 frame_gen_backend: None,
                 frame_gen_multiplier: None,
+                aspect_mode: None,
+                zoom: None,
             })
             .unwrap();
         }
         assert_eq!(db.clear_overrides().unwrap(), 2);
         assert!(db.get_override("a").unwrap().is_none());
+    }
+
+    #[test]
+    fn old_databases_gain_the_new_columns() {
+        let path =
+            std::env::temp_dir().join(format!("embyclientplus-migrate-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE title_overrides (emby_item_id TEXT PRIMARY KEY, item_type TEXT NOT NULL,
+                 audio_language TEXT, subtitle_language TEXT, subtitle_forced_only INTEGER,
+                 frame_gen_backend TEXT, frame_gen_multiplier INTEGER);
+                 INSERT INTO title_overrides (emby_item_id, item_type, audio_language)
+                 VALUES ('old', 'movie', 'jpn');",
+            )
+            .unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        let old = db.get_override("old").unwrap().unwrap();
+        assert_eq!(old.audio_language.as_deref(), Some("jpn"));
+        assert_eq!(old.aspect_mode, None);
+        let mut changed = old.clone();
+        changed.aspect_mode = Some("fill".into());
+        changed.zoom = Some(0.2);
+        db.upsert_override(&changed).unwrap();
+        assert_eq!(db.get_override("old").unwrap().unwrap().zoom, Some(0.2));
+        let _ = std::fs::remove_file(&path);
     }
 }

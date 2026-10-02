@@ -117,6 +117,8 @@ pub struct PlaybackSession {
     last_ticks: Cell<i64>,
     timer: RefCell<Option<glib::SourceId>>,
     stopped: Cell<bool>,
+    /// HDR source: SVP stays off unless the title explicitly enables it.
+    pub hdr: bool,
 }
 
 impl PlaybackSession {
@@ -132,8 +134,6 @@ impl PlaybackSession {
         let user_id = session.user_id.clone();
         let item_id = item.id.clone();
         let series_id = item.series_id.clone();
-        // Tracks queue up in album order, episodes in series order.
-        let album_id = item.is_audio().then(|| item.album_id.clone()).flatten();
         let request = StreamRequest {
             start_ticks,
             max_bitrate: quality.max_bitrate(),
@@ -143,12 +143,9 @@ impl PlaybackSession {
             let client = client.clone();
             async move {
                 let episodes = async {
-                    match (&album_id, &series_id) {
-                        (Some(album_id), _) => client.album_tracks(&user_id, album_id).await,
-                        (None, Some(series_id)) => {
-                            client.series_episodes(series_id, &user_id).await
-                        }
-                        (None, None) => Ok(Vec::new()),
+                    match &series_id {
+                        Some(series_id) => client.series_episodes(series_id, &user_id).await,
+                        None => Ok(Vec::new()),
                     }
                 };
                 let (item, episodes, info) = tokio::join!(
@@ -171,14 +168,22 @@ impl PlaybackSession {
             .into_iter()
             .next()
             .context("Emby returned no playable media source for this item")?;
+        let mut external_audio = None;
+        let mut web_captions = None;
         let url = match quality {
             // Trailers and other links elsewhere play from their own URL.
             _ if source.is_remote => {
                 let path = source.path.clone().context("this item has no address")?;
-                spawn_tokio(async move {
-                    tokio::task::spawn_blocking(move || crate::remote::resolve(&path)).await?
+                let options =
+                    crate::remote::Options::from_settings(&Settings::load().unwrap_or_default());
+                let stream = spawn_tokio(async move {
+                    tokio::task::spawn_blocking(move || crate::remote::resolve(&path, &options))
+                        .await?
                 })
-                .await?
+                .await?;
+                external_audio = stream.audio;
+                web_captions = stream.subtitle;
+                stream.url
             }
             Quality::Original => client.direct_stream_url(&item.id, &source.id)?,
             Quality::Mbps(_) => client.resolve_transcoding_url(&without_burned_subtitles(
@@ -189,6 +194,7 @@ impl PlaybackSession {
             )),
         };
         let external_subtitles = subtitle_files(&client, &item.id, &source, quality)?;
+        let hdr = crate::emby::models::is_hdr(&source.media_streams);
         let (previous, next) = neighbours(&episodes, &item.id);
         let (override_key, override_type) = match &item.series_id {
             Some(series_id) => (series_id.clone(), ItemType::Series),
@@ -211,6 +217,7 @@ impl PlaybackSession {
             last_ticks: Cell::new(start_ticks),
             timer: RefCell::new(None),
             stopped: Cell::new(false),
+            hdr,
         });
 
         let settings = Settings::load().unwrap_or_default();
@@ -225,11 +232,13 @@ impl PlaybackSession {
             .external_subtitles
             .iter()
             .map(|(_, url)| url.as_str())
+            .chain(web_captions.as_deref())
             .collect();
         player.load_at(
             &url,
             start_ticks as f64 / TICKS_PER_SECOND as f64,
             &subtitle_urls,
+            external_audio.as_deref(),
         )?;
         session.report_playing();
 
@@ -247,7 +256,18 @@ impl PlaybackSession {
 
     /// Picks the starting audio/subtitle tracks once mpv has loaded the
     /// file: the title's remembered choice, else the configured languages.
+    /// The Emby media source, for its trickplay thumbnails; `None` for web
+    /// links, which have none.
+    pub fn trickplay_source(&self) -> Option<&str> {
+        (!self.source.is_remote).then_some(self.source.id.as_str())
+    }
+
     pub fn apply_initial_tracks(&self) {
+        // Web trailers come with their tracks chosen (captions as set in
+        // Preferences); Emby knows nothing about them.
+        if self.source.is_remote {
+            return;
+        }
         let tracks = self.player.tracks();
         let remembered = self.remembered();
         let settings = Settings::load().unwrap_or_default();
@@ -359,12 +379,35 @@ impl PlaybackSession {
         self.emby_stream(&track).map(|s| s.index)
     }
 
+    /// The title's remembered picture aspect and extra zoom.
+    pub fn picture(&self) -> (crate::player::Aspect, f64) {
+        let remembered = self.remembered();
+        let aspect = remembered
+            .as_ref()
+            .and_then(|o| o.aspect_mode.as_deref())
+            .and_then(crate::player::Aspect::from_name)
+            .unwrap_or_default();
+        (aspect, remembered.and_then(|o| o.zoom).unwrap_or(0.0))
+    }
+
+    pub fn remember_picture(&self, aspect: crate::player::Aspect, zoom: f64) {
+        self.remember(|o| {
+            o.aspect_mode = Some(aspect.name().to_string());
+            o.zoom = Some(zoom);
+        });
+    }
+
     pub fn svp_enabled(&self) -> bool {
         let default = Settings::load()
             .unwrap_or_default()
             .frame_gen
             .default_backend;
         let remembered = self.remembered().and_then(|o| o.frame_gen_backend);
+        if self.hdr {
+            // SVP's 8-bit path bands HDR and costs a lot at 4K, so HDR needs
+            // an explicit opt-in per title.
+            return remembered == Some(FrameGenBackend::Svp);
+        }
         resolve_backend(default, remembered) == FrameGenBackend::Svp
     }
 
@@ -400,6 +443,8 @@ impl PlaybackSession {
             subtitle_forced_only: None,
             frame_gen_backend: None,
             frame_gen_multiplier: None,
+            aspect_mode: None,
+            zoom: None,
         });
         change(&mut entry);
         if let Err(e) = Db::open_default().and_then(|db| db.upsert_override(&entry)) {
@@ -589,7 +634,7 @@ fn apply_smoothing(player: Player, svp: bool) {
     }
 }
 
-fn svp_socket() -> String {
+pub(crate) fn svp_socket() -> String {
     Settings::load()
         .unwrap_or_default()
         .frame_gen

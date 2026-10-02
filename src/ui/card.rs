@@ -55,6 +55,7 @@ pub struct Card {
     picture: gtk::Picture,
     progress: gtk::ProgressBar,
     watched: gtk::Image,
+    placeholder: gtk::Image,
     title: gtk::Label,
     subtitle: gtk::Label,
 }
@@ -92,12 +93,15 @@ impl Card {
             .build();
         frame.add_overlay(&progress);
         frame.add_overlay(&watched);
+        let placeholder = super::placeholder_for(&picture, crate::ui::icons::IMAGE);
+        frame.add_overlay(&placeholder);
 
         let title = gtk::Label::builder()
             .xalign(0.0)
             .ellipsize(gtk::pango::EllipsizeMode::End)
             .max_width_chars(1)
             .margin_top(6)
+            .css_classes(["card-title"])
             .build();
         let subtitle = gtk::Label::builder()
             .xalign(0.0)
@@ -118,6 +122,7 @@ impl Card {
             picture,
             progress,
             watched,
+            placeholder,
             title,
             subtitle,
         }
@@ -129,6 +134,7 @@ impl Card {
         let picture = super::fixed_picture_child(&sized).expect("card picture is pinned");
         let progress: gtk::ProgressBar = child(sized.next_sibling());
         let watched: gtk::Image = child(progress.next_sibling());
+        let placeholder: gtk::Image = child(watched.next_sibling());
         let title: gtk::Label = child(frame.next_sibling());
         let subtitle: gtk::Label = child(title.next_sibling());
         Card {
@@ -136,6 +142,7 @@ impl Card {
             picture,
             progress,
             watched,
+            placeholder,
             title,
             subtitle,
         }
@@ -154,6 +161,8 @@ impl Card {
             None => self.progress.set_visible(false),
         }
         self.watched.set_visible(item.played());
+        self.placeholder
+            .set_icon_name(Some(crate::ui::icons::placeholder(&item.item_type)));
         let (image, width) = match shape {
             Shape::Poster | Shape::Person | Shape::Square => (item.poster(), 300),
             Shape::Landscape => (item.landscape().or_else(|| item.poster()), 520),
@@ -248,6 +257,44 @@ pub fn show_menu(ui: &Ui, widget: &gtk::Widget, item: &BaseItem) {
         });
         entries.append(&button);
     };
+    if super::playlists::is_music(item) {
+        if !item.is_audio() {
+            let target = item.clone();
+            add(
+                "Play",
+                Box::new(move |ui| ui.play_collection(&target, false)),
+            );
+            let target = item.clone();
+            add(
+                "Shuffle",
+                Box::new(move |ui| ui.play_collection(&target, true)),
+            );
+        }
+        if item.item_type != "Playlist" {
+            let target = item.clone();
+            add(
+                "Instant Mix",
+                Box::new(move |ui| ui.play_instant_mix(&target)),
+            );
+        }
+        let target = item.clone();
+        add(
+            "Play Next",
+            Box::new(move |ui| ui.queue_music(&target, true)),
+        );
+        let target = item.clone();
+        add(
+            "Add to Queue",
+            Box::new(move |ui| ui.queue_music(&target, false)),
+        );
+        if item.item_type != "Playlist" {
+            let target = item.clone();
+            add(
+                "Add to Playlist…",
+                Box::new(move |ui| ui.add_to_playlist(&target)),
+            );
+        }
+    }
     if item.is_playable() {
         let resume = item.resume_ticks();
         let target = item.clone();
@@ -256,7 +303,7 @@ pub fn show_menu(ui: &Ui, widget: &gtk::Widget, item: &BaseItem) {
     }
     let target = item.clone();
     add("Open", Box::new(move |ui| ui.open(&target)));
-    if item.item_type != "Person" {
+    if item.item_type != "Person" && !super::playlists::is_music(item) {
         let played = item.played();
         let target = item.clone();
         add(

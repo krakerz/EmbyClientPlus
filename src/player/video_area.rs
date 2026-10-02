@@ -9,6 +9,7 @@ use libloading::Library;
 use libmpv2::render::{OpenGLInitParams, RenderContext, RenderParam, RenderParamApiType};
 
 use super::Player;
+use super::compositor::{BarFill, Compositor};
 
 const GL_DRAW_FRAMEBUFFER_BINDING: u32 = 0x8CA6;
 
@@ -52,6 +53,8 @@ fn get_proc_address(loader: &GlLoader, name: &str) -> *mut c_void {
 struct RenderState {
     context: RefCell<Option<RenderContext<'static>>>,
     get_integerv: Cell<Option<GetIntegervFn>>,
+    /// Draws the bar fill; `None` if its shaders couldn't be built.
+    compositor: RefCell<Option<Compositor>>,
 }
 
 /// A GLArea that libmpv draws video frames into via its OpenGL render API.
@@ -79,6 +82,12 @@ pub fn new(player: Player) -> gtk::GLArea {
                 }
                 Err(e) => tracing::error!("failed to create mpv render context: {e:#}"),
             }
+            match create_compositor(area) {
+                Ok(compositor) => {
+                    state.compositor.replace(Some(compositor));
+                }
+                Err(e) => tracing::warn!("bar fill unavailable: {e:#}"),
+            }
         }
     });
 
@@ -92,13 +101,30 @@ pub fn new(player: Player) -> gtk::GLArea {
                 // SAFETY: valid GL entry point, GTK made the context current.
                 unsafe { get_integerv(GL_DRAW_FRAMEBUFFER_BINDING, &mut fbo) };
                 let scale = area.scale_factor();
-                if let Err(e) = context.render::<GlLoader>(
-                    fbo,
-                    area.width() * scale,
-                    area.height() * scale,
-                    true,
-                ) {
-                    tracing::warn!("mpv render failed: {e:?}");
+                let (width, height) = (area.width() * scale, area.height() * scale);
+                let fill = player.bar_fill();
+                let mut compositor = state.compositor.borrow_mut();
+                let rect = (fill != BarFill::Off)
+                    .then(|| player.video_rect())
+                    .flatten();
+                match (compositor.as_mut(), rect) {
+                    // Fill on and there are bars: render offscreen, then composite.
+                    (Some(compositor), Some(rect)) => {
+                        let result = compositor.scene_fbo(width, height).and_then(|scene| {
+                            context
+                                .render::<GlLoader>(scene, width, height, true)
+                                .map_err(|e| format!("{e:?}"))?;
+                            compositor.composite(fill, rect, fbo)
+                        });
+                        if let Err(e) = result {
+                            tracing::warn!("bar fill failed: {e}");
+                        }
+                    }
+                    _ => {
+                        if let Err(e) = context.render::<GlLoader>(fbo, width, height, true) {
+                            tracing::warn!("mpv render failed: {e:?}");
+                        }
+                    }
                 }
             }
             glib::Propagation::Stop
@@ -109,6 +135,7 @@ pub fn new(player: Player) -> gtk::GLArea {
     // mpv frees GL objects against a dead context on window close.
     area.connect_unrealize(move |area| {
         area.make_current();
+        state.compositor.take();
         state.context.take();
     });
 
@@ -127,6 +154,17 @@ fn fit(player: Player, width: i32, height: i32) {
     {
         tracing::warn!("{e:#}");
     }
+}
+
+fn create_compositor(area: &gtk::GLArea) -> Result<Compositor> {
+    let loader = GlLoader::load()?;
+    // SAFETY: the GLArea's context is current (realize); the loader stays
+    // valid for the function pointers glow copies out.
+    let gl = unsafe {
+        glow::Context::from_loader_function(|name| loader.proc_address(name) as *const _)
+    };
+    let es = area.context().is_some_and(|context| context.uses_es());
+    Compositor::new(gl, es).map_err(|e| anyhow!(e))
 }
 
 fn create_render_context(
