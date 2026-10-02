@@ -505,7 +505,7 @@ checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
 name = "embyclientplus"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "directories",
@@ -515,6 +515,7 @@ dependencies = [
  "libc",
  "libloading",
  "libmpv2",
+ "libmpv2-sys",
  "reqwest",
  "rusqlite",
  "serde",
@@ -523,6 +524,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -2683,6 +2685,7 @@ version = "1.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5772d71c9be8a8a6ac2117d949c5b224c1b72241bb611d9a3012edcf8af7812"
 dependencies = [
+ "getrandom 0.4.3",
  "js-sys",
  "serde_core",
  "wasm-bindgen",

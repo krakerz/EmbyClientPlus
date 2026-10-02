@@ -1,32 +1,24 @@
 use anyhow::Result;
 
 use super::EmbyClient;
-use super::models::{ItemSummary, ItemsResponse};
+use super::models::{BaseItem, QueryResult};
 
 impl EmbyClient {
-    /// Every episode in a series, ordered by season then episode number —
-    /// used to locate the currently-playing episode's neighbors for the
-    /// previous/next-episode overlay buttons, and (via the matched entry
-    /// itself) its title/chapters. Requesting `Fields=Chapters` here means
-    /// a single call covers both needs, no separate per-episode lookup.
-    pub async fn get_series_episodes(
-        &self,
-        series_id: &str,
-        user_id: &str,
-    ) -> Result<Vec<ItemSummary>> {
-        let response: ItemsResponse = self
+    /// Every episode of a series in watch order, for finding the previous
+    /// and next episode around the one playing.
+    pub async fn series_episodes(&self, series_id: &str, user_id: &str) -> Result<Vec<BaseItem>> {
+        let result: QueryResult<BaseItem> = self
             .get(&format!(
-                "/emby/Shows/{series_id}/Episodes?UserId={user_id}&Fields=Chapters&SortBy=ParentIndexNumber,IndexNumber&SortOrder=Ascending"
+                "/emby/Shows/{series_id}/Episodes?UserId={user_id}&SortBy=ParentIndexNumber,IndexNumber&SortOrder=Ascending&Fields=Overview"
             ))
             .await?;
-        Ok(response.items)
+        Ok(result.items)
     }
 
-    /// A single item's summary (title + chapters) — the movie-or-no-
-    /// series fallback when there's no episode list to pull this from.
-    pub async fn get_item_summary(&self, user_id: &str, item_id: &str) -> Result<ItemSummary> {
+    /// One item with its chapters (and intro/credits markers), for playback.
+    pub async fn item_with_chapters(&self, user_id: &str, item_id: &str) -> Result<BaseItem> {
         self.get(&format!(
-            "/emby/Users/{user_id}/Items/{item_id}?Fields=Chapters"
+            "/emby/Users/{user_id}/Items/{item_id}?Fields=Chapters,Overview"
         ))
         .await
     }

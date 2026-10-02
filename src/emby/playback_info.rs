@@ -3,29 +3,83 @@ use anyhow::Result;
 use super::EmbyClient;
 use super::models::{DeviceProfile, PlaybackInfoRequest, PlaybackInfoResponse};
 
+/// What to ask Emby for: the original file (`max_bitrate: None`), or a
+/// transcode capped at `max_bitrate` bits/s.
+#[derive(Debug, Clone, Default)]
+pub struct StreamRequest {
+    pub start_ticks: i64,
+    pub max_bitrate: Option<i64>,
+    /// Emby `MediaStream.Index` of the audio to transcode with.
+    pub audio_stream_index: Option<i32>,
+}
+
+impl StreamRequest {
+    fn to_request(&self, user_id: &str) -> PlaybackInfoRequest {
+        let transcode = self.max_bitrate.is_some();
+        PlaybackInfoRequest {
+            user_id: user_id.to_string(),
+            device_profile: if transcode {
+                DeviceProfile::transcode_only(self.max_bitrate)
+            } else {
+                DeviceProfile::default()
+            },
+            max_streaming_bitrate: self.max_bitrate,
+            // A transcode that starts mid-file has a timeline starting at 0,
+            // which breaks positions; start it at 0 and let mpv seek instead.
+            start_time_ticks: if transcode { 0 } else { self.start_ticks },
+            media_source_id: None,
+            auto_open_live_stream: true,
+            enable_direct_play: !transcode,
+            enable_direct_stream: !transcode,
+            enable_transcoding: transcode,
+            audio_stream_index: self.audio_stream_index,
+            // Never burn subtitles in; mpv loads them as separate files.
+            subtitle_stream_index: transcode.then_some(-1),
+        }
+    }
+}
+
 impl EmbyClient {
-    /// Negotiates direct-play vs. transcode for an item. `device_profile`
-    /// defaults to `DeviceProfile::default()` (deliberately permissive —
-    /// mpv/ffmpeg direct-plays far more than a typical Emby client) unless
-    /// the caller has a reason to constrain it (e.g. a user-set bitrate
-    /// cap).
     pub async fn get_playback_info(
         &self,
         user_id: &str,
         item_id: &str,
-        device_profile: DeviceProfile,
-        max_streaming_bitrate: Option<i64>,
-        start_time_ticks: i64,
+        stream: &StreamRequest,
     ) -> Result<PlaybackInfoResponse> {
-        let request = PlaybackInfoRequest {
-            user_id: user_id.to_string(),
-            device_profile,
-            max_streaming_bitrate,
-            start_time_ticks,
-            media_source_id: None,
-            auto_open_live_stream: true,
-        };
-        self.post(&format!("/emby/Items/{item_id}/PlaybackInfo"), &request)
-            .await
+        self.post(
+            &format!("/emby/Items/{item_id}/PlaybackInfo"),
+            &stream.to_request(user_id),
+        )
+        .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn original_quality_allows_direct_play_only() {
+        let request = StreamRequest::default().to_request("u");
+        assert!(request.enable_direct_play && request.enable_direct_stream);
+        assert!(!request.enable_transcoding);
+        assert_eq!(request.subtitle_stream_index, None);
+    }
+
+    #[test]
+    fn capped_quality_forces_a_transcode_without_burned_subtitles() {
+        let request = StreamRequest {
+            start_ticks: 42,
+            max_bitrate: Some(6_000_000),
+            audio_stream_index: Some(1),
+        }
+        .to_request("u");
+        assert!(!request.enable_direct_play && !request.enable_direct_stream);
+        assert!(request.enable_transcoding);
+        assert_eq!(request.max_streaming_bitrate, Some(6_000_000));
+        assert_eq!(request.subtitle_stream_index, Some(-1));
+        assert_eq!(request.audio_stream_index, Some(1));
+        assert_eq!(request.start_time_ticks, 0);
+        assert!(request.device_profile.direct_play_profiles.is_empty());
     }
 }

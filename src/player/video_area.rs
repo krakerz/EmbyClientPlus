@@ -61,16 +61,8 @@ pub fn new(player: Player) -> gtk::GLArea {
     area.set_vexpand(true);
     let state = Rc::new(RenderState::default());
 
+    // The owner also calls `refit` on `PlayerEvent::Geometry`.
     area.connect_resize(move |_, width, height| fit(player, width, height));
-    let weak = glib::SendWeakRef::from(area.downgrade());
-    player.on_geometry_change(move || {
-        let weak = weak.clone();
-        glib::MainContext::default().invoke(move || {
-            if let Some(area) = weak.upgrade() {
-                fit(player, area.width(), area.height());
-            }
-        });
-    });
 
     area.connect_realize({
         let state = state.clone();
@@ -121,6 +113,11 @@ pub fn new(player: Player) -> gtk::GLArea {
     });
 
     area
+}
+
+/// Re-applies the SVP padding fit after the video's geometry changed.
+pub fn refit(player: Player, area: &gtk::GLArea) {
+    fit(player, area.width(), area.height());
 }
 
 fn fit(player: Player, width: i32, height: i32) {

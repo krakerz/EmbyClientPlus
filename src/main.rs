@@ -1,39 +1,35 @@
-// Emby, auth, overrides and settings layers aren't wired into the new GTK
-// app until Phase 1 (see TODO.md).
-#[allow(dead_code)]
 mod auth;
-#[allow(dead_code)]
 mod config;
-#[allow(dead_code)]
 mod db;
-#[allow(dead_code)]
 mod emby;
-#[allow(dead_code)]
 mod frame_gen;
+mod logging;
+mod playback;
 mod player;
+mod runtime;
+mod svp;
+mod ui;
 
 use adw::prelude::*;
 use gtk::{gdk, glib};
 use player::Player;
-use tracing_subscriber::EnvFilter;
 
 const APP_ID: &str = "io.github.krakerz.EmbyClientPlus";
 
 fn main() -> glib::ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    logging::init();
 
-    let Some(target) = std::env::args().nth(1) else {
-        eprintln!("usage: embyclientplus <file-or-url>");
-        return glib::ExitCode::FAILURE;
-    };
+    // An argument plays that file/URL directly, skipping Emby (handy for
+    // checking the player and SVP on their own).
+    let target = std::env::args().nth(1);
 
     let app = adw::Application::builder().application_id(APP_ID).build();
     app.connect_activate(move |app| {
-        if let Err(e) = build_window(app, &target) {
+        let result = match &target {
+            Some(target) => build_standalone_player(app, target),
+            None => Player::new().map(|player| ui::window::build(app, player).present()),
+        };
+        if let Err(e) = result {
             tracing::error!("{e:#}");
             app.quit();
         }
@@ -42,14 +38,28 @@ fn main() -> glib::ExitCode {
     app.run_with_args::<&str>(&[])
 }
 
-fn build_window(app: &adw::Application, target: &str) -> anyhow::Result<()> {
+fn build_standalone_player(app: &adw::Application, target: &str) -> anyhow::Result<()> {
     let player = Player::new()?;
+    // Standalone mode always offers itself to SVP.
+    player.set_svp(true)?;
+    let video = player::video_area::new(player);
+    let weak = glib::SendWeakRef::from(video.downgrade());
+    player.on_event(move |event| {
+        if event == player::PlayerEvent::Geometry {
+            let weak = weak.clone();
+            glib::MainContext::default().invoke(move || {
+                if let Some(video) = weak.upgrade() {
+                    player::video_area::refit(player, &video);
+                }
+            });
+        }
+    });
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("EmbyClientPlus")
         .default_width(1280)
         .default_height(720)
-        .content(&player::video_area::new(player))
+        .content(&video)
         .build();
 
     let keys = gtk::EventControllerKey::new();

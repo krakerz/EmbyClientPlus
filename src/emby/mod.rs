@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod browse;
 pub mod library;
 pub mod models;
 pub mod playback_info;
@@ -6,8 +7,6 @@ pub mod sessions;
 
 use anyhow::{Context, Result};
 use reqwest::header::{HeaderMap, HeaderValue};
-
-use models::ItemDto;
 
 const DEVICE_NAME: &str = "EmbyClientPlus";
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -17,9 +16,7 @@ pub struct EmbyClient {
     base_url: String,
     http: reqwest::Client,
     device_id: String,
-    /// Set once authenticated (either via `auth::authenticate_by_name`, or
-    /// by the caller after reading the token out of the embedded webview's
-    /// localStorage — the primary path per the app's design).
+    /// Set once authenticated, via `authenticate_by_name` or a stored token.
     access_token: Option<String>,
 }
 
@@ -38,12 +35,12 @@ impl EmbyClient {
         self
     }
 
-    #[allow(dead_code)] // only used by the currently-unwired auth::authenticate_by_name fallback
     pub fn set_token(&mut self, token: impl Into<String>) {
         self.access_token = Some(token.into());
     }
 
-    fn url(&self, path: &str) -> String {
+    /// Absolute URL for a server path.
+    pub fn url(&self, path: &str) -> String {
         format!("{}{}", self.base_url, path)
     }
 
@@ -89,6 +86,7 @@ impl EmbyClient {
             .with_context(|| format!("GET {path} returned an unparsable body"))
     }
 
+    #[allow(dead_code)] // Phase 2: own subtitle layer (TODO.md)
     async fn get_text(&self, path: &str) -> Result<String> {
         let response = self
             .http
@@ -141,6 +139,24 @@ impl EmbyClient {
         Ok(())
     }
 
+    /// Raw response body, e.g. image bytes.
+    pub async fn fetch_bytes(&self, path: &str) -> Result<Vec<u8>> {
+        let response = self
+            .http
+            .get(self.url(path))
+            .headers(self.headers()?)
+            .send()
+            .await
+            .with_context(|| format!("GET {path} failed"))?
+            .error_for_status()
+            .with_context(|| format!("GET {path} returned an error status"))?;
+        let bytes = response
+            .bytes()
+            .await
+            .with_context(|| format!("GET {path} returned an unreadable body"))?;
+        Ok(bytes.to_vec())
+    }
+
     /// A direct-play stream URL for an already-negotiated media source.
     /// Interpolation happens after decode either way (see project
     /// CLAUDE.md), so this is deliberately decoupled from whatever
@@ -153,6 +169,25 @@ impl EmbyClient {
             .context("cannot build a stream url before authentication")?;
         Ok(format!(
             "{}/emby/Videos/{item_id}/stream?static=true&mediaSourceId={media_source_id}&api_key={token}",
+            self.base_url
+        ))
+    }
+
+    /// A subtitle stream as a standalone file mpv can load with `sub-add`;
+    /// works for embedded and external tracks alike.
+    pub fn subtitle_url(
+        &self,
+        item_id: &str,
+        media_source_id: &str,
+        stream_index: i32,
+        format: &str,
+    ) -> Result<String> {
+        let token = self
+            .access_token
+            .as_deref()
+            .context("cannot build a subtitle url before authentication")?;
+        Ok(format!(
+            "{}/emby/Videos/{item_id}/{media_source_id}/Subtitles/{stream_index}/Stream.{format}?api_key={token}",
             self.base_url
         ))
     }
@@ -174,6 +209,7 @@ impl EmbyClient {
     /// external tracks alike, since Emby serves any subtitle stream as a
     /// standalone file through this endpoint regardless of how it was
     /// originally delivered.
+    #[allow(dead_code)] // Phase 2: own subtitle layer (TODO.md)
     pub async fn get_subtitle_stream(
         &self,
         item_id: &str,
@@ -186,18 +222,14 @@ impl EmbyClient {
         ))
         .await
     }
+}
 
-    /// Resolves an item's parent `SeriesId` (for episodes) so per-title
-    /// overrides can be keyed at the series level. Returns `None` for
-    /// items with no series (movies use their own ItemId directly).
-    pub async fn get_item_series_id(&self, user_id: &str, item_id: &str) -> Result<Option<String>> {
-        let item: ItemDto = self
-            .get(&format!(
-                "/emby/Users/{user_id}/Items/{item_id}?Fields=SeriesId"
-            ))
-            .await?;
-        Ok(item.series_id)
-    }
+/// Whether a request failed because the server rejected our token.
+pub fn is_unauthorized(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<reqwest::Error>()
+        .and_then(reqwest::Error::status)
+        .is_some_and(|status| status == reqwest::StatusCode::UNAUTHORIZED)
 }
 
 #[cfg(test)]

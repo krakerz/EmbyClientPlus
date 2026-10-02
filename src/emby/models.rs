@@ -1,9 +1,7 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
-// Only constructed by the currently-unwired auth::authenticate_by_name
-// fallback (see its doc comment) — real login goes through the embedded
-// webview instead.
-#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct AuthenticateByNameRequest {
@@ -11,16 +9,15 @@ pub struct AuthenticateByNameRequest {
     pub pw: String,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct AuthenticateByNameResponse {
     pub access_token: String,
+    #[allow(dead_code)]
     pub server_id: String,
     pub user: EmbyUser,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct EmbyUser {
@@ -69,20 +66,38 @@ impl Default for DeviceProfile {
                 audio_codec: "aac".to_string(),
                 protocol: "hls".to_string(),
             }],
-            subtitle_profiles: vec![
-                SubtitleProfile {
-                    format: "srt".to_string(),
+            // mpv renders every subtitle format itself, embedded in the
+            // container; anything missing here makes Emby fall back to a
+            // burn-in transcode.
+            subtitle_profiles: [
+                "ass", "ssa", "srt", "subrip", "vtt", "webvtt", "pgs", "pgssub", "dvdsub",
+                "vobsub", "dvbsub", "mov_text", "sub", "smi",
+            ]
+            .into_iter()
+            .map(|format| SubtitleProfile {
+                format: format.to_string(),
+                method: "Embed".to_string(),
+            })
+            .collect(),
+        }
+    }
+}
+
+impl DeviceProfile {
+    /// Forces Emby to transcode (no direct-play profiles), to HLS H.264/AAC
+    /// under `max_bitrate`. Subtitles are requested as external files.
+    pub fn transcode_only(max_bitrate: Option<i64>) -> Self {
+        DeviceProfile {
+            max_streaming_bitrate: max_bitrate,
+            direct_play_profiles: Vec::new(),
+            subtitle_profiles: ["ass", "ssa", "srt", "subrip", "vtt"]
+                .into_iter()
+                .map(|format| SubtitleProfile {
+                    format: format.to_string(),
                     method: "External".to_string(),
-                },
-                SubtitleProfile {
-                    format: "ass".to_string(),
-                    method: "External".to_string(),
-                },
-                SubtitleProfile {
-                    format: "vtt".to_string(),
-                    method: "External".to_string(),
-                },
-            ],
+                })
+                .collect(),
+            ..DeviceProfile::default()
         }
     }
 }
@@ -124,6 +139,12 @@ pub struct PlaybackInfoRequest {
     pub start_time_ticks: i64,
     pub media_source_id: Option<String>,
     pub auto_open_live_stream: bool,
+    pub enable_direct_play: bool,
+    pub enable_direct_stream: bool,
+    pub enable_transcoding: bool,
+    pub audio_stream_index: Option<i32>,
+    /// -1 asks for no subtitle in the stream (we fetch subtitles ourselves).
+    pub subtitle_stream_index: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -167,73 +188,104 @@ pub struct MediaStream {
     pub is_forced: bool,
     pub delivery_method: Option<String>,
     pub delivery_url: Option<String>,
+    #[serde(default)]
+    pub is_external: bool,
+    #[serde(default)]
+    pub is_text_subtitle_stream: bool,
+    #[serde(default)]
+    pub display_title: Option<String>,
 }
 
-/// Minimal item lookup — just enough to resolve an episode's parent
-/// SeriesId for the per-series override key. `id`/`item_type` aren't
-/// read yet (only `series_id` is), kept since the API returns them and
-/// they're cheap to have on hand.
-#[allow(dead_code)]
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-pub struct ItemDto {
-    pub id: String,
-    #[serde(rename = "Type")]
-    pub item_type: String,
-    pub series_id: Option<String>,
-}
-
-/// One chapter marker on an item, as Emby reports it — used for the seek
-/// bar's tick marks (`playback/mod.rs`), which only need `start_position_
-/// ticks`. `name` isn't displayed anywhere yet (no chapter tooltip/label
-/// in this pass) but is cheap to keep modeled faithfully against the real
-/// API shape for whenever that's wanted.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "PascalCase")]
+/// One chapter marker. `marker_type` is `Chapter`, or `IntroStart` /
+/// `IntroEnd` / `CreditsStart` for Emby's detected intro and credits.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "PascalCase", default)]
 pub struct ChapterInfo {
     pub start_position_ticks: i64,
-    #[allow(dead_code)]
-    #[serde(default)]
     pub name: Option<String>,
+    pub marker_type: Option<String>,
 }
 
-/// Just enough of an item (episode or movie) to build the OSD title, seek
-/// bar chapter ticks, and — for episodes — locate this item's neighbors
-/// within its series for the previous/next-episode buttons.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-pub struct ItemSummary {
+/// The generic item shape every browse endpoint returns (Emby's
+/// `BaseItemDto`), trimmed to what the UI shows.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "PascalCase", default)]
+pub struct BaseItem {
     pub id: String,
     pub name: String,
-    #[serde(default)]
-    pub index_number: Option<i32>,
-    #[serde(default)]
-    pub parent_index_number: Option<i32>,
-    #[serde(default)]
+    #[serde(rename = "Type")]
+    pub item_type: String,
+    pub collection_type: Option<String>,
+    pub series_id: Option<String>,
     pub series_name: Option<String>,
-    #[serde(default)]
+    pub season_id: Option<String>,
+    pub index_number: Option<i32>,
+    pub parent_index_number: Option<i32>,
+    pub production_year: Option<i32>,
+    pub overview: Option<String>,
+    pub run_time_ticks: Option<i64>,
+    pub official_rating: Option<String>,
+    pub community_rating: Option<f64>,
+    pub image_tags: HashMap<String, String>,
+    pub backdrop_image_tags: Vec<String>,
+    pub series_primary_image_tag: Option<String>,
+    pub parent_backdrop_item_id: Option<String>,
+    pub parent_backdrop_image_tags: Vec<String>,
+    pub parent_thumb_item_id: Option<String>,
+    pub parent_thumb_image_tag: Option<String>,
+    pub user_data: Option<UserItemData>,
     pub chapters: Vec<ChapterInfo>,
 }
 
-/// Emby's standard list-response envelope (`{"Items": [...], ...}`).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "PascalCase", default)]
+pub struct UserItemData {
+    pub playback_position_ticks: i64,
+    pub played: bool,
+    pub played_percentage: Option<f64>,
+    pub unplayed_item_count: Option<i32>,
+}
+
+/// One "Because you watched X" row from `/Movies/Recommendations`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct Recommendation {
+    #[serde(default)]
+    pub recommendation_type: String,
+    #[serde(default)]
+    pub baseline_item_name: Option<String>,
+    #[serde(default)]
+    pub items: Vec<BaseItem>,
+}
+
+impl Recommendation {
+    /// Row heading in Emby web's wording.
+    pub fn title(&self) -> String {
+        let baseline = self.baseline_item_name.as_deref().unwrap_or_default();
+        match self.recommendation_type.as_str() {
+            "SimilarToRecentlyPlayed" => format!("Because you watched {baseline}"),
+            "SimilarToLikedItem" => format!("Because you like {baseline}"),
+            "HasDirectorFromRecentlyPlayed" | "HasLikedDirector" => {
+                format!("Directed by {baseline}")
+            }
+            "HasActorFromRecentlyPlayed" | "HasLikedActor" => format!("Starring {baseline}"),
+            _ if !baseline.is_empty() => format!("Because of {baseline}"),
+            _ => "Recommended".to_string(),
+        }
+    }
+}
+
+/// Emby's paged list envelope.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
-pub struct ItemsResponse {
-    pub items: Vec<ItemSummary>,
+pub struct QueryResult<T> {
+    pub items: Vec<T>,
+    #[serde(default)]
+    pub total_record_count: usize,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "PascalCase")]
-pub struct PlayingRequest {
-    pub item_id: String,
-    pub media_source_id: String,
-    pub play_session_id: String,
-    pub position_ticks: i64,
-    pub is_paused: bool,
-    pub can_seek: bool,
-}
-
-#[derive(Debug, Serialize)]
+/// Body of `/Sessions/Playing` and `/Sessions/Playing/Progress`.
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct ProgressRequest {
     pub item_id: String,
@@ -241,8 +293,17 @@ pub struct ProgressRequest {
     pub play_session_id: String,
     pub position_ticks: i64,
     pub is_paused: bool,
+    pub is_muted: bool,
+    pub volume_level: i32,
     pub can_seek: bool,
-    pub event_name: String,
+    /// `DirectStream` or `Transcode`.
+    pub play_method: &'static str,
+    pub audio_stream_index: Option<i32>,
+    pub subtitle_stream_index: Option<i32>,
+    /// `TimeUpdate`, `Pause`, `Unpause`, `AudioTrackChange`, ...; omitted
+    /// on the initial Playing report.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_name: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -257,6 +318,64 @@ pub struct StoppedRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base_item_deserializes_an_episode_with_user_data() {
+        let raw = serde_json::json!({
+            "Id": "ep4",
+            "Name": "Episode 4",
+            "Type": "Episode",
+            "SeriesId": "s1",
+            "SeriesName": "Futsutsuka na Akujo",
+            "IndexNumber": 4,
+            "ParentIndexNumber": 1,
+            "RunTimeTicks": 14_200_000_000i64,
+            "ImageTags": {"Primary": "tag-p"},
+            "SeriesPrimaryImageTag": "tag-sp",
+            "ParentBackdropItemId": "s1",
+            "ParentBackdropImageTags": ["tag-b"],
+            "UserData": {"PlaybackPositionTicks": 6_000_000_000i64, "Played": false, "PlayedPercentage": 42.2},
+            "SomethingNew": {"ignored": true}
+        });
+        let item: BaseItem = serde_json::from_value(raw).unwrap();
+        assert_eq!(item.item_type, "Episode");
+        assert_eq!(item.index_number, Some(4));
+        assert_eq!(item.image_tags["Primary"], "tag-p");
+        assert_eq!(item.parent_backdrop_image_tags, ["tag-b"]);
+        let user_data = item.user_data.unwrap();
+        assert_eq!(user_data.playback_position_ticks, 6_000_000_000);
+        assert!(!user_data.played);
+    }
+
+    #[test]
+    fn query_result_deserializes_a_sparse_series_list() {
+        let raw = serde_json::json!({
+            "Items": [{"Id": "s1", "Name": "Show", "Type": "Series",
+                       "UserData": {"UnplayedItemCount": 3}}],
+            "TotalRecordCount": 120
+        });
+        let result: QueryResult<BaseItem> = serde_json::from_value(raw).unwrap();
+        assert_eq!(result.total_record_count, 120);
+        let series = &result.items[0];
+        assert!(series.backdrop_image_tags.is_empty());
+        assert_eq!(
+            series.user_data.as_ref().unwrap().unplayed_item_count,
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn recommendation_rows_are_titled_like_emby_web() {
+        let raw = serde_json::json!([
+            {"RecommendationType": "SimilarToRecentlyPlayed", "BaselineItemName": "Godzilla",
+             "CategoryId": "1", "Items": [{"Id": "m1", "Name": "Kong", "Type": "Movie"}]},
+            {"RecommendationType": "SomethingNew", "Items": []}
+        ]);
+        let rows: Vec<Recommendation> = serde_json::from_value(raw).unwrap();
+        assert_eq!(rows[0].title(), "Because you watched Godzilla");
+        assert_eq!(rows[0].items[0].name, "Kong");
+        assert_eq!(rows[1].title(), "Recommended");
+    }
 
     #[test]
     fn device_profile_serializes_with_pascal_case_keys() {
@@ -314,34 +433,5 @@ mod tests {
         assert!(source.supports_direct_play);
         assert_eq!(source.media_streams.len(), 1);
         assert_eq!(source.media_streams[0].stream_type, "Audio");
-    }
-
-    #[test]
-    fn items_response_deserializes_episode_list_with_chapters() {
-        let raw = serde_json::json!({
-            "Items": [
-                {
-                    "Id": "ep1",
-                    "Name": "Pilot",
-                    "IndexNumber": 1,
-                    "ParentIndexNumber": 1,
-                    "SeriesName": "Some Show",
-                    "Chapters": [
-                        {"StartPositionTicks": 0, "Name": "Intro"},
-                        {"StartPositionTicks": 6000000000i64, "Name": null}
-                    ]
-                }
-            ],
-            "TotalRecordCount": 1
-        });
-        let response: ItemsResponse = serde_json::from_value(raw).unwrap();
-        assert_eq!(response.items.len(), 1);
-        let ep = &response.items[0];
-        assert_eq!(ep.id, "ep1");
-        assert_eq!(ep.index_number, Some(1));
-        assert_eq!(ep.series_name.as_deref(), Some("Some Show"));
-        assert_eq!(ep.chapters.len(), 2);
-        assert_eq!(ep.chapters[0].name.as_deref(), Some("Intro"));
-        assert_eq!(ep.chapters[1].start_position_ticks, 6_000_000_000);
     }
 }

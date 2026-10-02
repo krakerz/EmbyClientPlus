@@ -4,10 +4,7 @@ use super::EmbyClient;
 use super::models::{AuthenticateByNameRequest, AuthenticateByNameResponse};
 
 impl EmbyClient {
-    /// Fallback login path only — the primary path is reading the access
-    /// token out of the embedded webview's `localStorage` after the user
-    /// logs in through Emby's own web client (see `webview_bridge`).
-    #[allow(dead_code)] // fallback path, not yet wired up anywhere — see doc comment above
+    /// Logs in and keeps the returned token on this client.
     pub async fn authenticate_by_name(
         &mut self,
         username: &str,
@@ -22,5 +19,12 @@ impl EmbyClient {
             .await?;
         self.set_token(response.access_token.clone());
         Ok(response)
+    }
+
+    /// Ends this device's server session; best-effort, the token is
+    /// forgotten locally either way.
+    pub async fn logout(&self) -> Result<()> {
+        self.post_empty("/emby/Sessions/Logout", &serde_json::json!({}))
+            .await
     }
 }

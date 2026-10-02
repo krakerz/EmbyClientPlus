@@ -22,6 +22,26 @@ pub struct Settings {
 pub struct ServerSettings {
     #[serde(default)]
     pub url: String,
+    /// Logged-in user; the token itself lives in the keyring (`auth.rs`).
+    #[serde(default)]
+    pub user_id: String,
+    #[serde(default)]
+    pub username: String,
+    /// Stable per-install id so Emby sees one device across launches.
+    #[serde(default)]
+    pub device_id: String,
+}
+
+impl ServerSettings {
+    /// Generates the device id on first use; returns whether it was new
+    /// (and so needs saving).
+    pub fn ensure_device_id(&mut self) -> bool {
+        if !self.device_id.is_empty() {
+            return false;
+        }
+        self.device_id = uuid::Uuid::new_v4().to_string();
+        true
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -98,9 +118,10 @@ pub struct FrameGenSettings {
 #[serde(rename_all = "snake_case")]
 pub enum FrameGenBackend {
     /// `lsfg_vk` was a backend before 0.2.0; old configs map it to off.
-    #[default]
     #[serde(alias = "lsfg_vk")]
     Off,
+    /// The default: SVP attaches whenever SVP Manager is running.
+    #[default]
     Svp,
 }
 
@@ -138,6 +159,15 @@ impl Settings {
         toml::from_str(&contents).with_context(|| format!("failed to parse {}", path.display()))
     }
 
+    /// Re-reads the file, applies `change`, and writes it back, so edits
+    /// from different places (login, preferences) never clobber each other.
+    pub fn update(change: impl FnOnce(&mut Settings)) -> Result<Settings> {
+        let mut settings = Settings::load()?;
+        change(&mut settings);
+        settings.save()?;
+        Ok(settings)
+    }
+
     pub fn save(&self) -> Result<()> {
         let path = config_file_path()?;
         if let Some(parent) = path.parent() {
@@ -160,7 +190,7 @@ mod tests {
         let serialized = toml::to_string_pretty(&settings).unwrap();
         let parsed: Settings = toml::from_str(&serialized).unwrap();
         assert_eq!(parsed.playback.mode, PlaybackMode::DirectPlayPreferred);
-        assert_eq!(parsed.frame_gen.default_backend, FrameGenBackend::Off);
+        assert_eq!(parsed.frame_gen.default_backend, FrameGenBackend::Svp);
     }
 
     #[test]
@@ -178,6 +208,15 @@ mod tests {
     }
 
     #[test]
+    fn device_id_is_generated_once() {
+        let mut server = ServerSettings::default();
+        assert!(server.ensure_device_id());
+        let id = server.device_id.clone();
+        assert!(!server.ensure_device_id());
+        assert_eq!(server.device_id, id);
+    }
+
+    #[test]
     fn partial_toml_fills_in_defaults() {
         let partial = r#"
             [server]
@@ -188,6 +227,7 @@ mod tests {
         "#;
         let parsed: Settings = toml::from_str(partial).unwrap();
         assert_eq!(parsed.server.url, "http://192.168.1.3:8096");
+        assert!(parsed.server.user_id.is_empty());
         assert_eq!(parsed.frame_gen.default_backend, FrameGenBackend::Svp);
         // Untouched sections still get their defaults.
         assert_eq!(parsed.audio.preferred_language, "eng");
