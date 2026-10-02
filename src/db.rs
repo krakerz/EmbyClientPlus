@@ -32,15 +32,14 @@ impl ItemType {
 fn frame_gen_backend_as_str(backend: FrameGenBackend) -> &'static str {
     match backend {
         FrameGenBackend::Off => "off",
-        FrameGenBackend::LsfgVk => "lsfg_vk",
         FrameGenBackend::Svp => "svp",
     }
 }
 
 fn frame_gen_backend_from_str(s: &str) -> Result<FrameGenBackend> {
     match s {
-        "off" => Ok(FrameGenBackend::Off),
-        "lsfg_vk" => Ok(FrameGenBackend::LsfgVk),
+        // lsfg-vk was a backend before 0.2.0; existing rows fall back to off.
+        "off" | "lsfg_vk" => Ok(FrameGenBackend::Off),
         "svp" => Ok(FrameGenBackend::Svp),
         other => bail!("unknown frame_gen_backend {other:?} in db"),
     }
@@ -220,13 +219,27 @@ mod tests {
         };
         db.upsert_override(&entry).unwrap();
 
-        entry.frame_gen_backend = Some(FrameGenBackend::LsfgVk);
+        entry.frame_gen_backend = Some(FrameGenBackend::Svp);
         entry.frame_gen_multiplier = Some(3);
         db.upsert_override(&entry).unwrap();
 
         let fetched = db.get_override("movie-1").unwrap().unwrap();
-        assert_eq!(fetched.frame_gen_backend, Some(FrameGenBackend::LsfgVk));
+        assert_eq!(fetched.frame_gen_backend, Some(FrameGenBackend::Svp));
         assert_eq!(fetched.frame_gen_multiplier, Some(3));
+    }
+
+    #[test]
+    fn legacy_lsfg_row_reads_as_off() {
+        let db = Db::open_in_memory().unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO title_overrides (emby_item_id, item_type, frame_gen_backend)
+                 VALUES ('series-legacy', 'series', 'lsfg_vk')",
+                [],
+            )
+            .unwrap();
+        let fetched = db.get_override("series-legacy").unwrap().unwrap();
+        assert_eq!(fetched.frame_gen_backend, Some(FrameGenBackend::Off));
     }
 
     #[test]

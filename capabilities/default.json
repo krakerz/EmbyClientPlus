@@ -1,9 +1,0 @@
-{
-  "identifier": "default",
-  "description": "Capability for the main window, including the user's own remote Emby server (address only known at runtime, so this is a broad wildcard — see NOTES.md for the tradeoff)",
-  "windows": ["main"],
-  "remote": {
-    "urls": ["http://*:*/*", "https://*:*/*", "http://*/*", "https://*/*"]
-  },
-  "permissions": ["core:default", "allow-intercept-playback", "allow-set-server-url"]
-}

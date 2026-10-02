@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-10-02
+
+### Changed
+- Rebuilt as a native GTK4/libadwaita app with the video player embedded in the window
+- Bundles its own libmpv build with VapourSynth support for SVP
+
+### Removed
+- Embedded Emby web interface (native browsing comes in a later release)
+- lsfg-vk frame generation backend
+- Custom subtitle overlay (mpv renders subtitles directly)
+
+## [0.1.0] — 2026-09-10
+
 ### Added
 - Project scaffolding: Tauri app shell, build tooling, CI skeleton
 - Global settings (TOML), keyring-backed auth token storage with plaintext fallback, and a local SQLite store for per-series/movie playback overrides

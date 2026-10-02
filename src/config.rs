@@ -85,54 +85,23 @@ impl Default for SubtitleSettings {
     }
 }
 
+/// Interpolation settings themselves (multiplier, quality) live in SVP
+/// Manager, which attaches over mpv's IPC socket — we only decide whether
+/// to expose the socket at all.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FrameGenSettings {
     #[serde(default)]
     pub default_backend: FrameGenBackend,
-    #[serde(default)]
-    pub lsfg_vk: LsfgVkSettings,
-    #[serde(default)]
-    pub svp: SvpSettings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum FrameGenBackend {
+    /// `lsfg_vk` was a backend before 0.2.0; old configs map it to off.
     #[default]
+    #[serde(alias = "lsfg_vk")]
     Off,
-    LsfgVk,
     Svp,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LsfgVkSettings {
-    #[serde(default = "default_multiplier")]
-    pub multiplier: u32,
-    #[serde(default = "default_flow_scale")]
-    pub flow_scale: f64,
-}
-
-impl Default for LsfgVkSettings {
-    fn default() -> Self {
-        Self {
-            multiplier: default_multiplier(),
-            flow_scale: default_flow_scale(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SvpSettings {
-    #[serde(default = "default_multiplier")]
-    pub multiplier: u32,
-}
-
-impl Default for SvpSettings {
-    fn default() -> Self {
-        Self {
-            multiplier: default_multiplier(),
-        }
-    }
 }
 
 fn default_language() -> String {
@@ -141,14 +110,6 @@ fn default_language() -> String {
 
 fn default_true() -> bool {
     true
-}
-
-fn default_multiplier() -> u32 {
-    2
-}
-
-fn default_flow_scale() -> f64 {
-    1.0
 }
 
 /// Directory holding config.toml, the SQLite override db, and any other
@@ -200,7 +161,20 @@ mod tests {
         let parsed: Settings = toml::from_str(&serialized).unwrap();
         assert_eq!(parsed.playback.mode, PlaybackMode::DirectPlayPreferred);
         assert_eq!(parsed.frame_gen.default_backend, FrameGenBackend::Off);
-        assert_eq!(parsed.frame_gen.lsfg_vk.multiplier, 2);
+    }
+
+    #[test]
+    fn legacy_lsfg_config_still_parses_as_off() {
+        let legacy = r#"
+            [frame_gen]
+            default_backend = "lsfg_vk"
+
+            [frame_gen.lsfg_vk]
+            multiplier = 3
+            flow_scale = 0.8
+        "#;
+        let parsed: Settings = toml::from_str(legacy).unwrap();
+        assert_eq!(parsed.frame_gen.default_backend, FrameGenBackend::Off);
     }
 
     #[test]

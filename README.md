@@ -1,21 +1,17 @@
 # EmbyClientPlus
 
-A Linux-native Emby client with client-side frame interpolation and frame generation built into playback.
+A native Linux Emby client with SVP motion interpolation support.
 
 ## Description
 
-Emby's own web client handles library browsing well already, but no existing Emby client adds motion-smoothing or AI frame generation during playback. EmbyClientPlus embeds Emby's own web UI for browsing/login, then hands playback off to a native mpv-backed player that adds optional frame interpolation — either SVP-style motion interpolation (VapourSynth + mvtools) or lsfg-vk-style Vulkan frame generation — on top of a direct-play-first pipeline that lets mpv/ffmpeg handle far more codecs than a typical browser client.
+EmbyClientPlus is a native GTK4/libadwaita Emby client for Linux that embeds libmpv for playback with built-in VapourSynth support, enabling SVP (SmoothVideo Project) motion interpolation during playback. It provides a lightweight alternative to web-based Emby clients with superior codec support and frame smoothing capabilities.
 
-**Status: early development.** No playback pipeline exists yet — see `CHANGELOG.md` for what's actually implemented so far.
+**Status: early development.** Core playback is functional (`embyclientplus <file-or-url>` to play). Emby login and library browsing are coming next.
 
 ## Features
 
-- Emby library browsing and login via the server's own web client, embedded directly
-- Native mpv-backed playback with optional frame generation, switchable between two backends:
-  - SVP-style motion interpolation (VapourSynth + mvtools)
-  - lsfg-vk-style Vulkan frame generation
-- Per-title/series playback preference overrides (audio/subtitle language, frame-gen backend), on top of global defaults
-- Native subtitle rendering independent of mpv, avoiding frame-gen ghosting on subtitle text
+- Play local files or URLs in an embedded player
+- SVP motion interpolation support (requires SVP 4 installed at ~/SVP4 and running)
 
 ## Installation
 
@@ -23,12 +19,11 @@ Not yet available as a packaged release. Build from source (below) in the meanti
 
 ## Building from source
 
-Prerequisites: a Rust toolchain (stable, edition 2024 support) and the system packages Tauri's Linux backend needs (webkit2gtk, GTK3, and their `-dev` headers).
+Prerequisites: `meson`, `ninja`, a Rust toolchain, GTK4 and libadwaita development files, mpv's usual build dependencies, and SVP 4 at `~/SVP4`.
 
 ```sh
-git clone git@github.com:krakerz/EmbyClientPlus.git
-cd EmbyClientPlus
-cargo build
+./scripts/build-libmpv.sh
+cargo build --release
 ```
 
 ## Usage
