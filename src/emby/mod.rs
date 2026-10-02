@@ -10,7 +10,7 @@ pub mod trickplay;
 use anyhow::{Context, Result};
 use reqwest::header::{HeaderMap, HeaderValue};
 
-const DEVICE_NAME: &str = "EmbyClientPlus";
+const DEVICE_NAME: &str = crate::APP_NAME;
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Clone)]
@@ -264,7 +264,7 @@ mod tests {
         let client = EmbyClient::new("http://server", "my-device-id");
         let header = client.emby_authorization_header();
         assert!(header.contains("DeviceId=\"my-device-id\""));
-        assert!(header.contains("Client=\"EmbyClientPlus\""));
+        assert!(header.contains("Client=\"Emby Client+\""));
     }
 
     #[test]

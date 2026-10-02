@@ -30,5 +30,9 @@ while read -r name lucide style; do
     "$PICOSVG" "$input" > "$ICONS/$name.svg"
 done < "$ICONS/icons.txt"
 
+# Hand-drawn icons (data/icons/custom/) where a Lucide one renders badly at
+# 16 px, e.g. a pixel-aligned window-maximize.
+cp "$ICONS"/custom/*.svg "$ICONS"/ 2>/dev/null || true
+
 curl -fsSL -o "$ICONS/LICENSE" "https://raw.githubusercontent.com/lucide-icons/lucide/$LUCIDE_VERSION/LICENSE"
 echo "wrote $(ls "$ICONS"/*.svg | wc -l) icons to $ICONS"

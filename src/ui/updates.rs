@@ -24,7 +24,11 @@ pub fn check_on_startup(toasts: &adw::ToastOverlay) {
             return;
         };
         let toast = adw::Toast::builder()
-            .title(format!("EmbyClientPlus {} is available", found.version))
+            .title(format!(
+                "{} {} is available",
+                crate::APP_NAME,
+                found.version
+            ))
             .button_label("Update")
             .timeout(10)
             .build();

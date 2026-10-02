@@ -19,6 +19,8 @@ use adw::prelude::*;
 use gtk::{gdk, glib};
 
 const APP_ID: &str = "io.github.krakerz.EmbyClientPlus";
+/// The name people see (window titles, Emby's device list, media controls).
+pub const APP_NAME: &str = "Emby Client+";
 
 fn main() -> glib::ExitCode {
     gamescope::prepare_environment();
@@ -101,7 +103,7 @@ fn build_standalone_player(app: &adw::Application, target: &str) -> anyhow::Resu
     ui::window::apply_theme(window_settings.theme);
     let window = adw::ApplicationWindow::builder()
         .application(app)
-        .title("EmbyClientPlus")
+        .title(APP_NAME)
         .default_width(window_settings.width.max(640))
         .default_height(window_settings.height.max(400))
         .content(&video)

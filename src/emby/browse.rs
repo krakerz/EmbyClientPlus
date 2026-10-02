@@ -282,6 +282,34 @@ impl EmbyClient {
         .await
     }
 
+    /// People (cast and crew) whose name matches `term`.
+    pub async fn search_people(
+        &self,
+        user_id: &str,
+        term: &str,
+        limit: usize,
+    ) -> Result<QueryResult<BaseItem>> {
+        self.get(&format!(
+            "/emby/Persons?UserId={user_id}&SearchTerm={}&Limit={limit}&EnableTotalRecordCount=true&Fields={FIELDS}",
+            encode(term)
+        ))
+        .await
+    }
+
+    /// Music artists whose name matches `term`.
+    pub async fn search_artists(
+        &self,
+        user_id: &str,
+        term: &str,
+        limit: usize,
+    ) -> Result<QueryResult<BaseItem>> {
+        self.get(&format!(
+            "/emby/Artists?UserId={user_id}&SearchTerm={}&Limit={limit}&EnableTotalRecordCount=true&Fields={FIELDS}",
+            encode(term)
+        ))
+        .await
+    }
+
     /// Titles Emby considers similar to `item_id`.
     pub async fn similar(
         &self,
@@ -400,10 +428,11 @@ impl BaseItem {
         self.backdrop()
     }
 
+    /// Where to resume. Watched items count too: rewatching one keeps it
+    /// watched while Emby stores the new position (finishing resets it).
     pub fn resume_ticks(&self) -> i64 {
         self.user_data
             .as_ref()
-            .filter(|data| !data.played)
             .map_or(0, |data| data.playback_position_ticks)
     }
 
@@ -598,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    fn progress_ignores_played_items() {
+    fn rewatched_items_resume_too() {
         let mut ep = episode();
         ep.user_data = Some(UserItemData {
             playback_position_ticks: 250,
@@ -606,8 +635,12 @@ mod tests {
         });
         assert_eq!(ep.progress(), Some(0.25));
         assert_eq!(ep.resume_ticks(), 250);
+        // Watched before, stopped partway through a rewatch.
         ep.user_data.as_mut().unwrap().played = true;
-        assert_eq!(ep.progress(), None);
+        assert_eq!(ep.progress(), Some(0.25));
+        assert_eq!(ep.resume_ticks(), 250);
+        // Watched to the end: Emby resets the position.
+        ep.user_data.as_mut().unwrap().playback_position_ticks = 0;
         assert_eq!(ep.resume_ticks(), 0);
     }
 

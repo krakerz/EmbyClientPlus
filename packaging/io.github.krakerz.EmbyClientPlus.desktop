@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=EmbyClientPlus
+Name=Emby Client+
 Comment=Emby client with SVP frame interpolation
 Exec=embyclientplus
 Icon=io.github.krakerz.EmbyClientPlus

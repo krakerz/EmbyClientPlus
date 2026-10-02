@@ -7,8 +7,9 @@ use super::{Ui, library, open_card_menu, preferences};
 use crate::controller::{self, Action, Context, Pad};
 
 /// Handles one press for `window`; `ui` is the logged-in UI, if any (the
-/// login form only needs focus movement and activation).
-pub fn handle(window: &adw::ApplicationWindow, ui: Option<&Ui>, pad: Pad) {
+/// login form only needs focus movement and activation). `repeat`: a held
+/// direction repeating rather than a fresh press.
+pub fn handle(window: &adw::ApplicationWindow, ui: Option<&Ui>, pad: Pad, repeat: bool) {
     // Controller use means focus rings matter, like keyboard use.
     window.set_focus_visible(true);
 
@@ -34,7 +35,7 @@ pub fn handle(window: &adw::ApplicationWindow, ui: Option<&Ui>, pad: Pad) {
         }
         if !page.menu_open() {
             if let Some(action) = controller::action_for(pad, Context::Player) {
-                ui.player_page().controller_action(action);
+                ui.player_page().controller_action(action, repeat);
             }
             return;
         }

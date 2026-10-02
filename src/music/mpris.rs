@@ -238,7 +238,7 @@ impl Root {
 
     #[zbus(property)]
     fn identity(&self) -> &str {
-        "EmbyClientPlus"
+        crate::APP_NAME
     }
 
     #[zbus(property)]

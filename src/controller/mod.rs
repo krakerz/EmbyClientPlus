@@ -25,11 +25,14 @@ const POLL: Duration = Duration::from_millis(16);
 #[derive(Debug, Clone, PartialEq)]
 pub enum PadEvent {
     Pressed(Pad),
+    /// A held direction repeating (see `Repeater`).
+    Repeated(Pad),
     Connected(String),
     Disconnected,
 }
 
-type Handler = Box<dyn Fn(Pad)>;
+/// Gets each press; `true` for a held direction's repeats.
+type Handler = Box<dyn Fn(Pad, bool)>;
 type Capture = Box<dyn FnOnce(Pad)>;
 
 thread_local! {
@@ -48,7 +51,7 @@ struct Hub {
 }
 
 /// Starts reading controllers (once); presses go to `handler`.
-pub fn start(handler: impl Fn(Pad) + 'static) {
+pub fn start(handler: impl Fn(Pad, bool) + 'static) {
     HUB.with(|hub| {
         hub.handler.replace(Some(Box::new(handler)));
         hub.bindings.replace(load_bindings());
@@ -83,7 +86,15 @@ impl Hub {
                 if let Some(capture) = self.capture.take() {
                     capture(pad);
                 } else if let Some(handler) = self.handler.borrow().as_ref() {
-                    handler(pad);
+                    handler(pad, false);
+                }
+            }
+            // Remapping waits for a real press.
+            PadEvent::Repeated(pad) => {
+                if self.capture.borrow().is_none()
+                    && let Some(handler) = self.handler.borrow().as_ref()
+                {
+                    handler(pad, true);
                 }
             }
         }
@@ -183,7 +194,7 @@ fn read_pads(sender: &tokio::sync::mpsc::UnboundedSender<PadEvent>) {
             }
         }
         for pad in repeater.due(Instant::now()) {
-            if !send(PadEvent::Pressed(pad)) {
+            if !send(PadEvent::Repeated(pad)) {
                 return;
             }
         }

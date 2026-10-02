@@ -128,10 +128,11 @@ pub enum Action {
     AudioMenu,
     SubtitleMenu,
     ShowControls,
+    Skip,
 }
 
 impl Action {
-    pub const ALL: [Action; 25] = [
+    pub const ALL: [Action; 26] = [
         Action::Up,
         Action::Down,
         Action::Left,
@@ -157,6 +158,7 @@ impl Action {
         Action::AudioMenu,
         Action::SubtitleMenu,
         Action::ShowControls,
+        Action::Skip,
     ];
 
     pub fn context(self) -> Context {
@@ -195,6 +197,7 @@ impl Action {
             Action::AudioMenu => "audio_menu",
             Action::SubtitleMenu => "subtitle_menu",
             Action::ShowControls => "show_controls",
+            Action::Skip => "skip",
         }
     }
 
@@ -225,6 +228,7 @@ impl Action {
             Action::AudioMenu => "Audio menu",
             Action::SubtitleMenu => "Subtitle menu",
             Action::ShowControls => "Show controls",
+            Action::Skip => "Skip intro/credits",
         }
     }
 
@@ -247,7 +251,7 @@ impl Action {
             Action::NextTab | Action::NextEpisode => &[Pad::RB],
             Action::PreviousChapter => &[Pad::LT],
             Action::NextChapter => &[Pad::RT],
-            Action::Search => &[Pad::Select],
+            Action::Search | Action::Skip => &[Pad::Select],
             Action::Preferences | Action::ShowControls => &[Pad::Start],
         }
     }

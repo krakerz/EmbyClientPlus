@@ -31,7 +31,6 @@ ecp-sort-descending-symbolic    arrow-down-wide-narrow
 ecp-reset-symbolic              undo-2
 ecp-controller-symbolic         gamepad-2
 ecp-settings-symbolic           settings
-ecp-display-symbolic            monitor
 ecp-albums-symbolic             disc-3
 ecp-artists-symbolic            mic-vocal
 ecp-songs-symbolic              music
@@ -59,7 +58,6 @@ view-more-symbolic              ellipsis-vertical
 object-select-symbolic          check
 window-close-symbolic           x
 window-minimize-symbolic        minus
-window-maximize-symbolic        square
 window-restore-symbolic         copy
 edit-clear-symbolic             circle-x
 edit-find-symbolic              search
