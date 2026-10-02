@@ -42,7 +42,6 @@ pub const SORT_DESCENDING: &str = "ecp-sort-descending-symbolic";
 pub const RESET: &str = "ecp-reset-symbolic";
 pub const CONTROLLER: &str = "ecp-controller-symbolic";
 pub const SETTINGS: &str = "ecp-settings-symbolic";
-pub const DISPLAY: &str = "ecp-display-symbolic";
 pub const ALBUMS: &str = "ecp-albums-symbolic";
 pub const ARTISTS: &str = "ecp-artists-symbolic";
 pub const SONGS: &str = "ecp-songs-symbolic";
@@ -94,18 +93,28 @@ pub fn install() {
     }
 }
 
+/// The app's own icon (the AppImage/desktop one), for the login page and
+/// the window when the app isn't installed.
+pub const APP: &str = "io.github.krakerz.EmbyClientPlus";
+const APP_SVG: &[u8] = include_bytes!("../../packaging/io.github.krakerz.EmbyClientPlus.svg");
+
 fn write_theme(root: &std::path::Path) -> std::io::Result<()> {
     let theme = root.join(THEME);
     let icons: PathBuf = theme.join("scalable/actions");
+    let apps: PathBuf = theme.join("scalable/apps");
     std::fs::create_dir_all(&icons)?;
+    std::fs::create_dir_all(&apps)?;
     std::fs::write(
         theme.join("index.theme"),
         format!(
-            "[Icon Theme]\nName={THEME}\nComment=EmbyClientPlus icons (Lucide)\nInherits=Adwaita,hicolor\nDirectories=scalable/actions\n\n[scalable/actions]\nSize=16\nMinSize=8\nMaxSize=512\nType=Scalable\nContext=Actions\n"
+            "[Icon Theme]\nName={THEME}\nComment=Emby Client+ icons (Lucide)\nInherits=Adwaita,hicolor\nDirectories=scalable/actions,scalable/apps\n\n[scalable/actions]\nSize=16\nMinSize=8\nMaxSize=512\nType=Scalable\nContext=Actions\n\n[scalable/apps]\nSize=128\nMinSize=16\nMaxSize=512\nType=Scalable\nContext=Applications\n"
         ),
     )?;
-    for (name, svg) in ICONS {
-        let path = icons.join(format!("{name}.svg"));
+    let files = ICONS
+        .iter()
+        .map(|(name, svg)| (icons.join(format!("{name}.svg")), *svg))
+        .chain([(apps.join(format!("{APP}.svg")), APP_SVG)]);
+    for (path, svg) in files {
         // Skip unchanged files so the theme's cache stays valid.
         if std::fs::read(&path).ok().as_deref() != Some(svg) {
             std::fs::write(path, svg)?;

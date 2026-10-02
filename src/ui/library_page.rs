@@ -396,24 +396,27 @@ pub fn artist(ui: &Ui, artist: &BaseItem) -> adw::NavigationPage {
 }
 
 /// Shows the next/previous tab of `stack` (controller bumpers).
-fn step_stack(stack: &adw::ViewStack, forward: bool) {
-    let pages = stack.pages();
-    let count = pages.n_items();
-    let current = (0..count).find(|&i| {
-        pages
-            .item(i)
-            .and_downcast::<adw::ViewStackPage>()
-            .is_some_and(|page| Some(page.child()) == stack.visible_child())
-    });
-    let Some(current) = current else { return };
+/// Steps to the previous/next tab, skipping hidden ones.
+pub(super) fn step_stack(stack: &adw::ViewStack, forward: bool) {
+    let pages: Vec<adw::ViewStackPage> = {
+        let model = stack.pages();
+        (0..model.n_items())
+            .filter_map(|i| model.item(i).and_downcast::<adw::ViewStackPage>())
+            .filter(|page| page.is_visible())
+            .collect()
+    };
+    let Some(current) = pages
+        .iter()
+        .position(|page| Some(page.child()) == stack.visible_child())
+    else {
+        return;
+    };
     let next = if forward {
-        (current + 1).min(count.saturating_sub(1))
+        (current + 1).min(pages.len().saturating_sub(1))
     } else {
         current.saturating_sub(1)
     };
-    if let Some(page) = pages.item(next).and_downcast::<adw::ViewStackPage>() {
-        stack.set_visible_child(&page.child());
-    }
+    stack.set_visible_child(&pages[next].child());
 }
 
 /// A poster grid of `base` with a count, filter, sort and order bar above.
@@ -456,6 +459,33 @@ fn sortable_grid_of(ui: &Ui, base: ItemQuery, shape: Shape) -> gtk::Box {
     root.append(&bar);
     root.append(&scrolled);
 
+    // The last sort/filter used here, before any handler is connected.
+    let key = view_key(&base);
+    if let Some(prefs) = crate::db::Db::open_default()
+        .and_then(|db| db.get_view_prefs(&key))
+        .unwrap_or_else(|e| {
+            tracing::warn!("couldn't read view settings: {e:#}");
+            None
+        })
+    {
+        if let Some(index) = SORTS.iter().position(|(_, s, _)| *s == prefs.sort_by) {
+            sort.set_selected(index as u32);
+        }
+        if let Some(index) = FILTERS
+            .iter()
+            .position(|(_, f)| *f == prefs.filter.as_deref())
+        {
+            filter.set_selected(index as u32);
+        }
+        descending.set_active(prefs.descending);
+        descending.set_icon_name(if prefs.descending {
+            crate::ui::icons::SORT_DESCENDING
+        } else {
+            crate::ui::icons::SORT_ASCENDING
+        });
+    }
+    let opened = Rc::new(Cell::new(true));
+
     // Each reload bumps this; pages from an older query are dropped.
     let generation = Rc::new(Cell::new(0u64));
     let reload = Rc::new(glib::clone!(
@@ -473,18 +503,18 @@ fn sortable_grid_of(ui: &Ui, base: ItemQuery, shape: Shape) -> gtk::Box {
         generation,
         #[strong(rename_to = weak_ui)]
         ui.downgrade(),
-        move || reload_grid(
-            &weak_ui,
-            &store,
-            &count,
-            &base,
-            Choice {
+        move || {
+            let choice = Choice {
                 sort: SORTS[sort.selected() as usize].1,
                 descending: descending.is_active(),
                 filter: FILTERS[filter.selected() as usize].1,
-            },
-            &generation,
-        )
+            };
+            // Remembered for next time (not the first load: nothing changed).
+            if !opened.replace(false) {
+                remember(&key, &choice);
+            }
+            reload_grid(&weak_ui, &store, &count, &base, choice, &generation)
+        }
     ));
 
     descending.connect_toggled({
@@ -525,6 +555,27 @@ struct Choice {
     sort: &'static str,
     descending: bool,
     filter: Option<&'static str>,
+}
+
+/// Which grid a remembered sort/filter belongs to: the library (or folder)
+/// and the kind of items. Genre, tag and person views in a library share it.
+fn view_key(query: &ItemQuery) -> String {
+    format!(
+        "{}|{}",
+        query.parent_id.as_deref().unwrap_or("all"),
+        query.include_types.unwrap_or("any")
+    )
+}
+
+fn remember(key: &str, choice: &Choice) {
+    let prefs = crate::db::ViewPrefs {
+        sort_by: choice.sort.to_string(),
+        descending: choice.descending,
+        filter: choice.filter.map(str::to_string),
+    };
+    if let Err(e) = crate::db::Db::open_default().and_then(|db| db.set_view_prefs(key, &prefs)) {
+        tracing::warn!("couldn't save view settings: {e:#}");
+    }
 }
 
 fn reload_grid(

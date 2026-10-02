@@ -339,7 +339,8 @@ pub fn show(parent: &impl IsA<gtk::Widget>) {
     header.pack_start(
         &gtk::Label::builder()
             .label(format!(
-                "EmbyClientPlus {}",
+                "{} {}",
+                crate::APP_NAME,
                 crate::update::current_version()
             ))
             .margin_start(6)

@@ -74,11 +74,10 @@ jobs:
       - name: Release notes
         run: |
           version="${{ steps.version.outputs.version }}"
-          awk -v v="$version" '
-            $0 ~ "^## \\[" v "\\]" {f=1; next}
-            f && /^## \[/ {exit}
-            f {print}
-          ' CHANGELOG.md > release-notes.md
+          # The version's section plus anything still under [Unreleased]: a
+          # push without a version bump replaces this version's binaries,
+          # so its notes are refreshed with those changes too.
+          scripts/release-notes.sh "$version" > release-notes.md
           if ! grep -q '[^[:space:]]' release-notes.md; then
             git config --global --add safe.directory "$GITHUB_WORKSPACE"
             previous="$(git describe --tags --abbrev=0 2>/dev/null || true)"

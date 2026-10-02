@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-10-02
+
 ### Added
 - Dedicated music player (never uses SVP): mini player bar under every page, Now Playing sheet (cover, artist/album links, seek, shuffle, repeat off/all/one, volume), queue with play-now, move up/down, remove, clear upcoming; gapless playback.
 - Album Play/Shuffle; track and card menus: Play, Shuffle, Instant Mix, Play Next, Add to Queue, Add to Playlist…
@@ -19,17 +21,27 @@
 - Seek-bar preview: the frame at that point (Emby's trickplay thumbnails, else chapter images), chapter name and time, on hover, drag and controller/keyboard seeks.
 - Controller: Start in the player moves through the OSD buttons (D-pad/stick to move, A to press or open a menu, B or Start to leave); the OSD stays up meanwhile.
 - Preferences: trailer quality (best available by default, or capped at 4K/1440p/1080p/720p) and trailer captions in your subtitle language (on by default).
+- Controller: Select in the player skips the intro or credits when the Skip button shows.
+- Search results in tabs: Top Results, Movies, Shows, Episodes, People, Collections, Albums, Songs and Artists (tabs without matches stay hidden; LB/RB switch tabs).
+- Library grids remember their sort, order and filter.
+- Sign-in page shows the app icon; the server address field hints "https://your-server-url:8920".
 
 ### Changed
+- Holding Left/Right in the player for 1 s scrubs along the seek bar with the preview; the seek lands 2 s after the last move, instead of seeking on every repeat. A tap still seeks right away.
 - HDR titles start with SVP off unless turned on for that title.
 - In Steam Game Mode, SVP Manager runs inside a headless gamescope so it no longer steals focus.
 - Controller focus ring is thicker and in the accent colour; focused cards also highlight their title.
 - Series pages put the cursor on episode 1 (or the episode you last opened) so the controller starts there.
+- The app is now called "Emby Client+" (window title, launcher, Emby's device list, media controls).
 
 ### Fixed
+- The player's volume control showed 0% until the volume changed.
+- Watched items you'd partly rewatched restarted from the beginning instead of resuming.
 - The AppImage showed a light theme on Steam Deck.
 - Controller: a second press of a player button (e.g. Y for subtitles) closed the menu by going Home; player menus now keep the controller inside the player.
 - YouTube trailers failed with "Requested format is not available"; they now play as separate video and audio streams.
+- Crash when starting some 10-bit videos on AMD RDNA4 GPUs: hardware decoding now prefers VA-API over Vulkan video.
+- The window's maximize button icon was off-centre.
 
 ## [0.5.0] — 2026-10-02
 

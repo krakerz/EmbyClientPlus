@@ -29,6 +29,7 @@ pub struct LoginPage {
 impl LoginPage {
     pub fn new(device_id: String, on_login: impl Fn(LoggedIn) + 'static) -> Self {
         let server = adw::EntryRow::builder().title("Server address").build();
+        set_placeholder(&server, "https://your-server-url:8920");
         let username = adw::EntryRow::builder().title("Username").build();
         let password = adw::PasswordEntryRow::builder().title("Password").build();
         let group = adw::PreferencesGroup::new();
@@ -56,8 +57,8 @@ impl LoginPage {
         form.append(&group);
         form.append(&actions);
         let status = adw::StatusPage::builder()
-            .icon_name(crate::ui::icons::DISPLAY)
-            .title("EmbyClientPlus")
+            .icon_name(crate::ui::icons::APP)
+            .title(crate::APP_NAME)
             .description("Sign in to your Emby server")
             .child(&adw::Clamp::builder().maximum_size(420).child(&form).build())
             .vexpand(true)
@@ -182,6 +183,28 @@ pub fn normalize_server_url(input: &str) -> Option<String> {
         .unwrap_or(&with_scheme)
         .trim_end_matches('/');
     Some(base.to_string())
+}
+
+/// Shows `text` in an entry row while it's focused and still empty (the
+/// row's title stands in for a placeholder otherwise). Entry rows don't
+/// expose one, so it goes on the text field inside.
+fn set_placeholder(row: &adw::EntryRow, text: &str) {
+    fn find_text(widget: &gtk::Widget) -> Option<gtk::Text> {
+        if let Some(text) = widget.downcast_ref::<gtk::Text>() {
+            return Some(text.clone());
+        }
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            if let Some(found) = find_text(&current) {
+                return Some(found);
+            }
+            child = current.next_sibling();
+        }
+        None
+    }
+    if let Some(field) = find_text(row.upcast_ref()) {
+        field.set_placeholder_text(Some(text));
+    }
 }
 
 #[cfg(test)]

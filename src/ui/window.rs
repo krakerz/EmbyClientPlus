@@ -100,7 +100,7 @@ pub fn build(app: &adw::Application, player: Player) -> adw::ApplicationWindow {
     apply_theme(window_settings.theme);
     let window = adw::ApplicationWindow::builder()
         .application(app)
-        .title("EmbyClientPlus")
+        .title(crate::APP_NAME)
         .default_width(window_settings.width.max(640))
         .default_height(window_settings.height.max(400))
         .content(&toasts)
@@ -142,10 +142,10 @@ pub fn build(app: &adw::Application, player: Player) -> adw::ApplicationWindow {
     crate::controller::start({
         let state = Rc::downgrade(&state);
         let window = window.downgrade();
-        move |pad| {
+        move |pad, repeat| {
             if let (Some(state), Some(window)) = (state.upgrade(), window.upgrade()) {
                 let ui = state.ui.borrow().clone();
-                super::gamepad::handle(&window, ui.as_ref(), pad);
+                super::gamepad::handle(&window, ui.as_ref(), pad, repeat);
             }
         }
     });

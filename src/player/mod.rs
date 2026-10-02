@@ -155,6 +155,9 @@ pub struct Track {
     pub external_filename: Option<String>,
 }
 
+/// Hardware decoders, in order (copy-back: SVP needs frames in RAM).
+const HWDEC: &str = "vaapi-copy,auto-copy";
+
 /// Handle to the app's single libmpv instance.
 #[derive(Clone, Copy)]
 pub struct Player {
@@ -181,7 +184,10 @@ impl Player {
             // Mirrors SVP's own [svp] mpv.conf profile: vapoursynth needs
             // decoded frames in system memory, and frame-dropping hr-seeks
             // desync audio once the filter is active.
-            init.set_property("hwdec", "auto-copy")?;
+            // VA-API first: mpv's auto order now tries Vulkan video first,
+            // whose decoder faults on some AMD cards (RDNA4, 10-bit), and
+            // with SVP's ROCm OpenCL loaded a GPU fault aborts the app.
+            init.set_property("hwdec", HWDEC)?;
             init.set_property("hr-seek-framedrop", "no")?;
             // We pick tracks ourselves once the file is loaded.
             init.set_property("sub-auto", "no")?;

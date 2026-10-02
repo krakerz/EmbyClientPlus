@@ -28,6 +28,13 @@ const SEEK_STEP: i32 = 10;
 const ZOOM_STEP: f64 = 0.1;
 /// How often the SVP button re-checks whether SVP attached.
 const SVP_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+/// Holding seek this long starts scrubbing (a tap seeks right away).
+const HOLD_TO_SCRUB: Duration = Duration::from_secs(1);
+/// A scrub lands this long after the target last moved.
+const SCRUB_COMMIT: Duration = Duration::from_secs(2);
+/// Longest gap between auto-repeats of a held key (keyboard repeat
+/// delay is usually 250–600 ms, the rate 20–40 per second).
+const KEY_REPEAT_GAP: Duration = Duration::from_millis(1000);
 /// How long the volume pop-up stays after the last change.
 const VOLUME_OSD_TIME: Duration = Duration::from_millis(1500);
 /// Volume changes are reported to Emby once they settle.
@@ -90,6 +97,15 @@ struct Inner {
     /// Start pressed: the controller moves through the OSD's buttons
     /// instead of seeking, and the OSD stays up.
     controls_mode: Cell<bool>,
+    /// Held seek (controller/arrow repeat): where it's headed. mpv seeks
+    /// once, when the presses stop, instead of on every repeat.
+    scrub_target: Cell<Option<f64>>,
+    /// When the current seek press began (for hold detection).
+    hold_started: Cell<Option<Instant>>,
+    /// The arrow key held down (no release since its press) and when it
+    /// last fired, to tell auto-repeat from fresh presses.
+    key_held: Cell<Option<(gdk::Key, Instant)>>,
+    scrub_timer: RefCell<Option<glib::SourceId>>,
     volume_osd_timer: RefCell<Option<glib::SourceId>>,
     svp_checked_at: Cell<Option<Instant>>,
     /// The "SVP Manager isn't running" toast shows once per item.
@@ -159,6 +175,10 @@ impl PlayerPage {
             volume_report: RefCell::new(None),
             volume_seen: Cell::new(None),
             controls_mode: Cell::new(false),
+            scrub_target: Cell::new(None),
+            hold_started: Cell::new(None),
+            key_held: Cell::new(None),
+            scrub_timer: RefCell::new(None),
             volume_osd_timer: RefCell::new(None),
             svp_checked_at: Cell::new(None),
             svp_warned: Cell::new(false),
@@ -205,7 +225,8 @@ impl PlayerPage {
     }
 
     /// Runs a player-context controller action.
-    pub fn controller_action(&self, action: crate::controller::Action) {
+    /// `repeat`: a held direction repeating (held seeks scrub instead).
+    pub fn controller_action(&self, action: crate::controller::Action, repeat: bool) {
         use crate::controller::Action;
         let inner = &self.inner;
         let player = inner.player;
@@ -214,11 +235,11 @@ impl PlayerPage {
             Action::Leave => inner.pop(),
             Action::SeekBack => {
                 inner.show_osd();
-                inner.seek_by(-SEEK_STEP);
+                inner.seek_by(-SEEK_STEP, repeat);
             }
             Action::SeekForward => {
                 inner.show_osd();
-                inner.seek_by(SEEK_STEP);
+                inner.seek_by(SEEK_STEP, repeat);
             }
             Action::VolumeUp => warn(player.set_volume(player.volume() + VOLUME_STEP)),
             Action::VolumeDown => warn(player.set_volume(player.volume() - VOLUME_STEP)),
@@ -235,6 +256,11 @@ impl PlayerPage {
                 inner.osd.subtitles.popup();
             }
             // The OSD stays up and the controller moves through its buttons.
+            Action::Skip => {
+                if inner.osd.skip.is_visible() {
+                    inner.skip();
+                }
+            }
             Action::ShowControls => {
                 inner.controls_mode.set(true);
                 inner.show_osd();
@@ -250,6 +276,14 @@ impl PlayerPage {
     pub fn prepare(&self, item: &BaseItem, quality: Quality, handlers: Handlers) {
         self.inner.osd.preview.clear();
         self.inner.controls_mode.set(false);
+        // A scrub still waiting to land belongs to the previous video.
+        self.inner.scrub_target.set(None);
+        if let Some(pending) = self.inner.scrub_timer.take() {
+            pending.remove();
+        }
+        // mpv's volume carries over between files (and from music), and
+        // no change event comes until it changes again.
+        self.inner.sync_volume();
         let inner = &self.inner;
         inner.session.replace(None);
         inner.handlers.replace(Some(Rc::new(handlers)));
@@ -918,6 +952,17 @@ impl Inner {
                 None => glib::Propagation::Proceed,
             }
         ));
+        keys.connect_key_released(glib::clone!(
+            #[strong]
+            weak,
+            move |_, key, _, _| {
+                if let Some(inner) = weak.upgrade()
+                    && inner.key_held.get().is_some_and(|(held, _)| held == key)
+                {
+                    inner.key_held.set(None);
+                }
+            }
+        ));
         self.page.add_controller(keys);
 
         // Page lifecycle: tick only while shown; leaving stops playback.
@@ -975,14 +1020,7 @@ impl Inner {
             PlayerEvent::PlaylistPos(_) => {}
             PlayerEvent::Tracks => self.rebuild_menus(),
             PlayerEvent::Volume => {
-                self.osd.volume.set_value(self.player.volume());
-                self.osd
-                    .volume_button
-                    .set_icon_name(if self.player.is_muted() {
-                        crate::ui::icons::MUTED
-                    } else {
-                        crate::ui::icons::VOLUME
-                    });
+                self.sync_volume();
                 self.schedule_volume_report();
                 self.flash_volume();
             }
@@ -1152,10 +1190,12 @@ impl Inner {
         else {
             return;
         };
-        let dragging = self
-            .seeked_at
-            .get()
-            .is_some_and(|at| at.elapsed() < Duration::from_millis(500));
+        // Also while scrubbing: the bar shows the target, not the position.
+        let dragging = self.scrub_target.get().is_some()
+            || self
+                .seeked_at
+                .get()
+                .is_some_and(|at| at.elapsed() < Duration::from_millis(500));
         if !dragging {
             self.osd.seek.set_value(position);
         }
@@ -1254,6 +1294,18 @@ impl Inner {
         button.set_tooltip_text(Some(tooltip));
     }
 
+    /// The OSD's volume slider and icon, from mpv.
+    fn sync_volume(&self) {
+        self.osd.volume.set_value(self.player.volume());
+        self.osd
+            .volume_button
+            .set_icon_name(if self.player.is_muted() {
+                crate::ui::icons::MUTED
+            } else {
+                crate::ui::icons::VOLUME
+            });
+    }
+
     /// Shows the volume pop-up for a moment when volume or mute changed.
     fn flash_volume(self: &Rc<Self>) {
         let (volume, muted) = (self.player.volume(), self.player.is_muted());
@@ -1337,12 +1389,72 @@ impl Inner {
     }
 
     /// A relative seek (controller or arrow keys), previewed on the bar.
-    fn seek_by(&self, seconds: i32) {
-        warn(self.player.seek_relative(seconds));
-        if let (Some(position), Some(duration)) = (self.player.position(), self.player.duration()) {
-            let target = (position + f64::from(seconds)).clamp(0.0, duration);
-            self.preview_at(target, true);
+    /// A press seeks at once. Held for [`HOLD_TO_SCRUB`], it scrubs: the
+    /// target moves along the bar with the preview, and mpv seeks there
+    /// once nothing has moved it for [`SCRUB_COMMIT`]. Presses while
+    /// scrubbing move the target too.
+    fn seek_by(self: &Rc<Self>, seconds: i32, repeat: bool) {
+        let (Some(position), Some(duration)) = (self.player.position(), self.player.duration())
+        else {
+            if !repeat {
+                warn(self.player.seek_relative(seconds));
+            }
+            return;
+        };
+        let now = Instant::now();
+        if !repeat {
+            self.hold_started.set(Some(now));
         }
+        let scrubbing = self.scrub_target.get().is_some();
+        if !scrubbing {
+            if repeat {
+                // Not held long enough yet.
+                if self
+                    .hold_started
+                    .get()
+                    .is_none_or(|start| now.duration_since(start) < HOLD_TO_SCRUB)
+                {
+                    return;
+                }
+            } else {
+                warn(self.player.seek_relative(seconds));
+                let target = (position + f64::from(seconds)).clamp(0.0, duration);
+                self.preview_at(target, true);
+                return;
+            }
+        }
+        let from = self.scrub_target.get().unwrap_or(position);
+        let target = (from + f64::from(seconds)).clamp(0.0, duration);
+        self.scrub_target.set(Some(target));
+        self.osd.seek.set_value(target);
+        self.preview_at(target, false);
+        if let Some(pending) = self.scrub_timer.take() {
+            pending.remove();
+        }
+        let weak = Rc::downgrade(self);
+        let pending = glib::timeout_add_local_once(SCRUB_COMMIT, move || {
+            let Some(inner) = weak.upgrade() else { return };
+            inner.scrub_timer.take();
+            if let Some(target) = inner.scrub_target.take() {
+                inner.seeked_at.set(Some(Instant::now()));
+                warn(inner.player.seek_absolute(target));
+                inner.preview_at(target, true);
+            }
+        });
+        self.scrub_timer.replace(Some(pending));
+    }
+
+    /// Whether this press of `key` is auto-repeat: the key hasn't been
+    /// released since it last fired. A release lost to a focus change is
+    /// covered by the gap check (auto-repeat fires far more often).
+    fn key_repeating(&self, key: gdk::Key) -> bool {
+        let now = Instant::now();
+        let repeating = self
+            .key_held
+            .get()
+            .is_some_and(|(held, last)| held == key && now.duration_since(last) < KEY_REPEAT_GAP);
+        self.key_held.set(Some((key, now)));
+        repeating
     }
 
     fn seek_chapter(&self, forward: bool) {
@@ -1366,11 +1478,11 @@ impl Inner {
             gdk::Key::space | gdk::Key::k => warn(player.toggle_pause()),
             gdk::Key::Left => {
                 self.show_osd();
-                self.seek_by(-SEEK_STEP);
+                self.seek_by(-SEEK_STEP, self.key_repeating(key));
             }
             gdk::Key::Right => {
                 self.show_osd();
-                self.seek_by(SEEK_STEP);
+                self.seek_by(SEEK_STEP, self.key_repeating(key));
             }
             gdk::Key::Up => warn(player.set_volume(player.volume() + VOLUME_STEP)),
             gdk::Key::Down => warn(player.set_volume(player.volume() - VOLUME_STEP)),

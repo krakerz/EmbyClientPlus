@@ -67,6 +67,15 @@ pub struct TitleOverride {
     pub zoom: Option<f64>,
 }
 
+/// How a library grid was last sorted and filtered (Emby `SortBy` and
+/// `Filters` values).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewPrefs {
+    pub sort_by: String,
+    pub descending: bool,
+    pub filter: Option<String>,
+}
+
 pub struct Db {
     conn: Connection,
 }
@@ -107,6 +116,15 @@ impl Db {
             );",
         )
         .context("failed to initialize title_overrides schema")?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS view_prefs (
+                view_key    TEXT PRIMARY KEY,
+                sort_by     TEXT NOT NULL,
+                descending  INTEGER NOT NULL,
+                filter      TEXT
+            );",
+        )
+        .context("failed to initialize view_prefs schema")?;
         // Columns added after the first release; older databases lack them.
         for (column, kind) in [("aspect_mode", "TEXT"), ("zoom", "REAL")] {
             let exists = conn
@@ -179,6 +197,40 @@ impl Db {
                 entry.frame_gen_multiplier.map(|v| v as i64),
                 entry.aspect_mode,
                 entry.zoom,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// A library view's remembered sort and filter, if it was changed.
+    pub fn get_view_prefs(&self, view_key: &str) -> Result<Option<ViewPrefs>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT sort_by, descending, filter FROM view_prefs WHERE view_key = ?1")?;
+        let mut rows = statement.query([view_key])?;
+        Ok(match rows.next()? {
+            Some(row) => Some(ViewPrefs {
+                sort_by: row.get(0)?,
+                descending: row.get::<_, i64>(1)? != 0,
+                filter: row.get(2)?,
+            }),
+            None => None,
+        })
+    }
+
+    pub fn set_view_prefs(&self, view_key: &str, prefs: &ViewPrefs) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO view_prefs (view_key, sort_by, descending, filter)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(view_key) DO UPDATE SET
+                sort_by = excluded.sort_by,
+                descending = excluded.descending,
+                filter = excluded.filter",
+            rusqlite::params![
+                view_key,
+                prefs.sort_by,
+                prefs.descending as i64,
+                prefs.filter
             ],
         )?;
         Ok(())
@@ -341,5 +393,25 @@ mod tests {
         db.upsert_override(&changed).unwrap();
         assert_eq!(db.get_override("old").unwrap().unwrap().zoom, Some(0.2));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn view_prefs_round_trip_and_update() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.get_view_prefs("lib|Movie").unwrap(), None);
+        let prefs = ViewPrefs {
+            sort_by: "DateCreated".into(),
+            descending: true,
+            filter: Some("IsUnplayed".into()),
+        };
+        db.set_view_prefs("lib|Movie", &prefs).unwrap();
+        assert_eq!(db.get_view_prefs("lib|Movie").unwrap(), Some(prefs));
+        let changed = ViewPrefs {
+            sort_by: "SortName".into(),
+            descending: false,
+            filter: None,
+        };
+        db.set_view_prefs("lib|Movie", &changed).unwrap();
+        assert_eq!(db.get_view_prefs("lib|Movie").unwrap(), Some(changed));
     }
 }
