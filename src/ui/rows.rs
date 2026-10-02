@@ -16,6 +16,11 @@ use crate::emby::models::BaseItem;
 /// counting as a click).
 const DRAG_THRESHOLD: f64 = 8.0;
 
+/// Gap between cards in a row.
+pub const CARD_SPACING: i32 = 12;
+/// Space before the first and after the last card.
+pub const ROW_MARGIN: i32 = 18;
+
 /// Where a row's title leads, shown as a "Title >" link.
 pub enum More {
     None,
@@ -24,6 +29,8 @@ pub enum More {
     /// Next Up, optionally within one library.
     NextUp(Option<String>),
     Library(Box<BaseItem>),
+    /// A sortable grid of this query, titled.
+    Grid(&'static str, Box<crate::emby::browse::ItemQuery>),
 }
 
 /// Items in a full Continue Watching / Next Up page.
@@ -33,12 +40,13 @@ fn open_more(ui: &Ui, more: &More) {
     let page = match more {
         More::None => return,
         More::Library(view) => return ui.open(view),
+        More::Grid(title, query) => super::library_page::grid_page(ui, title, (**query).clone()),
         More::Resume(parent) => {
             let parent = parent.clone();
             library::list_page(
                 ui,
                 "Continue Watching",
-                Shape::Landscape,
+                Shape::for_episodes(),
                 |client, user_id| async move {
                     client
                         .resume(&user_id, parent.as_deref(), FULL_LIST_LIMIT)
@@ -51,7 +59,7 @@ fn open_more(ui: &Ui, more: &More) {
             library::list_page(
                 ui,
                 "Next Up",
-                Shape::Landscape,
+                Shape::for_episodes(),
                 |client, user_id| async move {
                     client
                         .next_up(&user_id, parent.as_deref(), FULL_LIST_LIMIT)
@@ -68,6 +76,8 @@ pub enum Click {
     Open,
     /// Continue Watching cards start playback right away.
     Resume,
+    /// Open in place of the current page (episode to episode).
+    Replace,
 }
 
 pub fn row(
@@ -79,9 +89,9 @@ pub fn row(
     more: More,
 ) -> gtk::Box {
     let cards = gtk::Box::builder()
-        .spacing(12)
-        .margin_start(18)
-        .margin_end(18)
+        .spacing(CARD_SPACING)
+        .margin_start(ROW_MARGIN)
+        .margin_end(ROW_MARGIN)
         .build();
     for item in items {
         let weak = ui.downgrade();
@@ -91,6 +101,7 @@ pub fn row(
                 match click {
                     Click::Open => ui.open(&target),
                     Click::Resume => ui.play(&target, target.resume_ticks()),
+                    Click::Replace => ui.open_replacing(&target),
                 }
             }
         }));
@@ -164,7 +175,7 @@ fn section_title(ui: &Ui, title: &str, more: More) -> gtk::Widget {
     }
     let content = gtk::Box::builder().spacing(6).build();
     content.append(&label);
-    content.append(&gtk::Image::from_icon_name("go-next-symbolic"));
+    content.append(&gtk::Image::from_icon_name(crate::ui::icons::NEXT));
     let button = gtk::Button::builder()
         .child(&content)
         .halign(gtk::Align::Start)

@@ -9,7 +9,7 @@ use adw::prelude::*;
 use anyhow::Result;
 use gtk::{gio, glib};
 
-use super::card::{Card, Shape};
+use super::card::{Card, Shape, attach_menu};
 use super::{Ui, scrolled_page};
 use crate::emby::EmbyClient;
 use crate::emby::browse::ItemQuery;
@@ -48,12 +48,23 @@ where
 pub fn grid(ui: &Ui, shape: Shape) -> (gtk::GridView, gio::ListStore) {
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
     let factory = gtk::SignalListItemFactory::new();
+    let weak = ui.downgrade();
     factory.connect_setup(move |_, list_item| {
         let card = Card::new(shape);
-        list_item
+        let list_item = list_item
             .downcast_ref::<gtk::ListItem>()
-            .expect("grid factory only creates ListItems")
-            .set_child(Some(&card.root));
+            .expect("grid factory only creates ListItems");
+        list_item.set_child(Some(&card.root));
+        if let Some(ui) = weak.upgrade() {
+            let cell = list_item.downgrade();
+            attach_menu(&ui, &card.root, move || {
+                let object = cell
+                    .upgrade()?
+                    .item()
+                    .and_downcast::<glib::BoxedAnyObject>()?;
+                Some(object.borrow::<BaseItem>().clone())
+            });
+        }
     });
     let weak = ui.downgrade();
     factory.connect_bind(move |_, list_item| {
@@ -68,6 +79,7 @@ pub fn grid(ui: &Ui, shape: Shape) -> (gtk::GridView, gio::ListStore) {
             return;
         };
         Card::from_root(&root).bind(&ui, &object.borrow::<BaseItem>(), shape);
+        set_grid_position(&root, list_item.position());
     });
 
     let grid = gtk::GridView::builder()
@@ -96,6 +108,57 @@ pub fn grid(ui: &Ui, shape: Shape) -> (gtk::GridView, gio::ListStore) {
         ui.open(&item);
     });
     (grid, store)
+}
+
+const POSITION_KEY: &str = "embyclientplus-grid-position";
+
+fn set_grid_position(root: &gtk::Box, position: u32) {
+    // SAFETY: this key is only ever stored and read as `u32`.
+    unsafe { root.set_data(POSITION_KEY, position) };
+}
+
+fn grid_position(widget: &gtk::Widget) -> Option<u32> {
+    // SAFETY: see `set_grid_position`.
+    unsafe { widget.data::<u32>(POSITION_KEY).map(|p| *p.as_ref()) }
+}
+
+/// Moves focus inside a grid by item position (GTK's directional focus
+/// doesn't step through grid cells). Returns false when `focus` isn't in
+/// a grid, or the move would leave it (the caller then moves normally).
+pub fn move_in_grid(focus: &gtk::Widget, direction: gtk::DirectionType) -> bool {
+    let Some(grid) = focus
+        .ancestor(gtk::GridView::static_type())
+        .and_downcast::<gtk::GridView>()
+    else {
+        return false;
+    };
+    // The focused cell, or the card inside it, carries the position.
+    let cell = if grid_position(focus).is_some() {
+        Some(focus.clone())
+    } else {
+        focus.first_child()
+    };
+    let (Some(cell), Some(model)) = (cell, grid.model()) else {
+        return false;
+    };
+    let Some(position) = grid_position(&cell) else {
+        return false;
+    };
+    let cell_width = cell.parent().map_or(cell.width(), |c| c.width()).max(1);
+    let columns = i64::from((grid.width() / cell_width).max(1));
+    let target = i64::from(position)
+        + match direction {
+            gtk::DirectionType::Left => -1,
+            gtk::DirectionType::Right => 1,
+            gtk::DirectionType::Up => -columns,
+            gtk::DirectionType::Down => columns,
+            _ => return false,
+        };
+    if target < 0 || target >= i64::from(model.n_items()) {
+        return false;
+    }
+    grid.scroll_to(target as u32, gtk::ListScrollFlags::FOCUS, None);
+    true
 }
 
 /// Appends pages of `query` to `store` until `max_items` are in, stopping

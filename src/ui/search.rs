@@ -29,7 +29,7 @@ pub fn page(ui: &Ui) -> adw::NavigationPage {
         .build();
 
     let empty = adw::StatusPage::builder()
-        .icon_name("system-search-symbolic")
+        .icon_name(crate::ui::icons::SEARCH)
         .title("Search your library")
         .vexpand(true)
         .build();

@@ -1,84 +1,93 @@
 # EmbyClientPlus
 
-A native Linux Emby client with SVP motion interpolation support.
+A native Linux Emby client with SVP frame interpolation, built for the desktop and Steam Game Mode.
 
 ## Description
 
-EmbyClientPlus is a native GTK4/libadwaita Emby client for Linux that embeds libmpv for playback with built-in VapourSynth support, enabling SVP (SmoothVideo Project) motion interpolation during playback. It provides a lightweight alternative to web-based Emby clients with superior codec support and frame smoothing capabilities.
+A GTK4/libadwaita Emby client with libmpv embedded in-process. Its libmpv is built with
+VapourSynth, so SVP 4 attaches just as it does to a standalone mpv.
 
 ## Features
 
-- Native Emby login and library browsing
-- Direct stream preferred with server transcode fallback
-- SVP motion interpolation support (requires SVP 4 installed at ~/SVP4 and running)
-- Session-persistent playback tracking and resume positions
+- Browsing:
+  - Home rows;
+  - tabbed libraries (genres, tags, collections, folders);
+  - series and episodes, music, favourites, search.
+- Plays the original file, with transcode presets; resume and watched state sync with Emby.
+- Player:
+  - chapters, track pickers remembered per title;
+  - Skip Intro/Credits, Up Next, previous/next.
+- SVP per title, with a status light. In Game Mode the app starts SVP Manager itself.
+- Controller navigation, remappable; fullscreen under gamescope.
+- Optional: your own `~/.config/mpv/mpv.conf`, and in-app trailers via `yt-dlp`.
+- Self-updates from GitHub releases.
 
 ## Installation
 
-Not yet available as a packaged release. Build from source (below) in the meantime.
+From [Releases](https://github.com/krakerz/EmbyClientPlus/releases):
+
+- **AppImage** (recommended, works on SteamOS): `chmod +x`, then run it.
+- **Archive** `embyclientplus-<version>-linux-x86_64.tar.gz`: extract it and run `./install.sh`.
+  - `./uninstall.sh` removes it and keeps your settings.
+  - It needs GTK 4.12+, libadwaita 1.6+, FFmpeg and libplacebo from your distro.
+
+Both formats update themselves (Preferences → Updates). SVP 4 is optional, found in
+`~/SVP4` or a folder you set; the app plays normally without it.
 
 ## Building from source
 
-Prerequisites: `meson`, `ninja`, a Rust toolchain, GTK4 and libadwaita development files, mpv's usual build dependencies, and SVP 4 at `~/SVP4`.
+You need Rust, `meson` and `ninja`, plus the GTK4, libadwaita, FFmpeg, libplacebo, libass
+and VapourSynth dev files.
 
 ```sh
-./scripts/build-libmpv.sh
-cargo build --release
+scripts/build-libmpv.sh && cargo build --release && target/release/embyclientplus
+EMBYCLIENTPLUS_PORTABLE=1 cargo build --release && packaging/package.sh   # release packages → dist/
 ```
 
 ## Usage
 
-### Launch the app
+1. Start `embyclientplus` and sign in. The login is remembered.
+2. Pick a title and press **Play** or **Resume**.
 
-Run `embyclientplus` to start:
-1. Log in with your server address, username, and password (token stored in system keyring)
-2. Browse Home (libraries, continue watching, next up, latest items) — tap the menu for Preferences
-3. Navigate series, search, and view item details
-4. Click Play to start playback inside the same window
+Settings are in Home's menu → **Preferences**: SVP, quality, languages, display, artwork,
+mpv.conf, controller, updates and logs.
 
-In Preferences you can set SVP and quality defaults, preferred audio and subtitle languages, clear per-title choices, and access logs.
+| Key | Action | Key | Action |
+|---|---|---|---|
+| Space / K | play/pause | N / P | next/previous episode |
+| ← / → | seek 10 s | PgDn / PgUp | next/previous chapter |
+| ↑ / ↓ / M | volume / mute | F / F11 | fullscreen |
+| Esc | leave fullscreen, then back | double-click | fullscreen |
 
-### Player controls
+**Controller defaults:**
 
-The player shows an auto-hiding on-screen display (OSD) with a toolbar, hide after 3 s idle while playing; stays visible while paused or a menu is open. The OSD includes a seek bar with chapter marks, audio/subtitle track pickers that remember your choice per series/movie, quality presets, and controls for next/previous episodes.
+- **Browsing:** D-pad/stick move, A select, B back, Y home, X item menu, LB/RB tabs, Select search, Start Preferences.
+- **Player:** A play/pause, D-pad seek/volume, LB/RB episode, LT/RT chapter, X/Y audio/subtitles.
 
-**Keyboard:**
-- **Space** or **K** — play/pause
-- **←/→** — seek ±10 seconds
-- **↑/↓** — volume
-- **M** — mute
-- **N/P** — next/previous episode
-- **Page Down/Up** — next/previous chapter
-- **F** or **F11** — toggle fullscreen
-- **Esc** — exit fullscreen, then go back
-- **Double-click** — toggle fullscreen
+**Steam Game Mode:** add the AppImage (or the installed `bin/embyclientplus`) as a non-Steam
+game, with the **Gamepad** layout.
 
-**Quality menu:** Original (direct stream, default), 20/10/6/3 Mbps. Capped presets request a server transcode and resume at the same position.
-
-**Skip Intro / Skip Credits:** buttons appear when the playback position reaches intro or credits markers (from Emby's metadata). Skip Credits plays the next episode.
-
-**Up Next card:** appears near the end of an episode with a 10 s countdown; auto-plays the next episode unless cancelled.
-
-**SVP per-title toggle:** in the OSD controls. The button shows green while interpolating, amber while waiting for SVP Manager, red (with a one-time notice) when SVP Manager isn't running, or disabled if SVP isn't installed. Your choice is remembered per series/movie; the global default is set in Preferences.
-
-### Standalone playback (file or URL)
-
-```sh
-embyclientplus <file-or-url>
-```
-
-Plays a local file or URL directly without Emby login. Useful for testing the player or SVP outside the client.
+`embyclientplus <file-or-url>` plays a file without Emby, for testing the player or SVP.
 
 ## FAQ
 
-**Does this work on Wayland?**
-Yes. The app uses native Wayland rendering with libmpv embedded in a GTK4 GLArea.
+**SVP doesn't kick in?** The SVP button shows the state:
 
-**How do I use SVP?**
-Ensure SVP 4 is installed at `~/SVP4` and SVP Manager is running. The app automatically attaches via `/tmp/mpvsocket`.
+- green: interpolating;
+- amber: waiting for SVP Manager;
+- red: SVP Manager isn't running;
+- grey: SVP not found.
+
+**Where are settings and logs?** In `~/.config/embyclientplus/`: `config.toml` and `logs/`
+(the newest 10 are kept).
+
+**Does it bundle SVP?** No. It uses your own SVP install.
 
 ---
 
 ### Notes
+
+Icons: [Lucide](https://lucide.dev/) (ISC, `data/icons/LICENSE`), converted for GTK by
+`scripts/update-icons.sh` (needs `picosvg`).
 
 Built and maintained with the help of AI.

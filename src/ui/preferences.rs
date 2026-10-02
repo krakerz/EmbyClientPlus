@@ -4,7 +4,8 @@
 use adw::prelude::*;
 use gtk::{gio, glib};
 
-use crate::config::{FrameGenBackend, Settings};
+use crate::config::{DEFAULT_SVP_SOCKET, EpisodeArt, FrameGenBackend, FullscreenMode, Settings};
+use crate::controller::{self, Action, Context};
 use crate::db::Db;
 use crate::playback::tracks::normalize_language;
 use crate::playback::{QUALITIES, Quality};
@@ -32,7 +33,10 @@ const LANGUAGES: [(&str, &str); 16] = [
 pub fn show(parent: &impl IsA<gtk::Widget>) {
     let settings = Settings::load().unwrap_or_default();
     let dialog = adw::PreferencesDialog::new();
-    let page = adw::PreferencesPage::new();
+    let page = adw::PreferencesPage::builder()
+        .title("General")
+        .icon_name(crate::ui::icons::SETTINGS)
+        .build();
     dialog.add(&page);
 
     // Playback.
@@ -56,6 +60,28 @@ pub fn show(parent: &impl IsA<gtk::Widget>) {
         save(|s| s.frame_gen.default_backend = backend);
     });
     playback.add(&svp);
+    let auto_start = adw::SwitchRow::builder()
+        .title("Start SVP Manager automatically")
+        .subtitle("When SVP is wanted and SVP Manager isn't running (on by default in Game Mode)")
+        .active(settings.frame_gen.auto_start_svp())
+        .build();
+    auto_start.connect_active_notify(|row| {
+        let on = row.is_active();
+        save(|s| s.frame_gen.auto_start_svp = Some(on));
+    });
+    playback.add(&auto_start);
+    let smooth = adw::SwitchRow::builder()
+        .title("Smooth motion without SVP")
+        .subtitle("mpv's frame blending, for titles where SVP is switched off")
+        .active(settings.frame_gen.smooth_without_svp)
+        .build();
+    smooth.connect_active_notify(|row| {
+        let on = row.is_active();
+        save(|s| s.frame_gen.smooth_without_svp = on);
+    });
+    playback.add(&smooth);
+    playback.add(&svp_folder_row(parent.upcast_ref()));
+    playback.add(&svp_socket_row(&settings));
 
     let labels: Vec<String> = QUALITIES.iter().map(|q| q.label()).collect();
     let quality = adw::ComboRow::builder()
@@ -74,7 +100,81 @@ pub fn show(parent: &impl IsA<gtk::Widget>) {
         }
     });
     playback.add(&quality);
+    let mpv_conf = adw::SwitchRow::builder()
+        .title("Use my mpv.conf")
+        .subtitle("Loads ~/.config/mpv/mpv.conf (shaders, scalers, …) on the next start; the app's socket, output and decoding options still win")
+        .active(settings.playback.use_mpv_conf)
+        .build();
+    mpv_conf.connect_active_notify(|row| {
+        let on = row.is_active();
+        save(|s| s.playback.use_mpv_conf = on);
+    });
+    playback.add(&mpv_conf);
     page.add(&playback);
+
+    // Display.
+    let display = adw::PreferencesGroup::builder()
+        .title("Display")
+        .description("Applies the next time the app starts")
+        .build();
+    let width = adw::SpinRow::with_range(640.0, 7680.0, 2.0);
+    width.set_title("Window width");
+    width.set_value(f64::from(settings.window.width));
+    width.connect_value_notify(|row| {
+        let value = row.value() as i32;
+        save(|s| s.window.width = value);
+    });
+    let height = adw::SpinRow::with_range(400.0, 4320.0, 2.0);
+    height.set_title("Window height");
+    height.set_value(f64::from(settings.window.height));
+    height.connect_value_notify(|row| {
+        let value = row.value() as i32;
+        save(|s| s.window.height = value);
+    });
+    let fullscreen = adw::ComboRow::builder()
+        .title("Start fullscreen")
+        .subtitle("Auto: fullscreen in Steam Game Mode (gamescope) only")
+        .model(&gtk::StringList::new(&["Auto", "Always", "Never"]))
+        .selected(match settings.window.fullscreen {
+            FullscreenMode::Auto => 0,
+            FullscreenMode::Always => 1,
+            FullscreenMode::Never => 2,
+        })
+        .build();
+    fullscreen.connect_selected_notify(|row| {
+        let mode = match row.selected() {
+            1 => FullscreenMode::Always,
+            2 => FullscreenMode::Never,
+            _ => FullscreenMode::Auto,
+        };
+        save(|s| s.window.fullscreen = mode);
+    });
+    display.add(&width);
+    display.add(&height);
+    display.add(&fullscreen);
+    page.add(&display);
+
+    // Home.
+    let home = adw::PreferencesGroup::builder().title("Home").build();
+    let art = adw::ComboRow::builder()
+        .title("Continue Watching artwork")
+        .subtitle("Series art avoids spoilers from episode stills")
+        .model(&gtk::StringList::new(&["Episode still", "Series art"]))
+        .selected(match settings.home.episode_art {
+            EpisodeArt::Episode => 0,
+            EpisodeArt::Series => 1,
+        })
+        .build();
+    art.connect_selected_notify(|row| {
+        let art = if row.selected() == 1 {
+            EpisodeArt::Series
+        } else {
+            EpisodeArt::Episode
+        };
+        save(|s| s.home.episode_art = art);
+    });
+    home.add(&art);
+    page.add(&home);
 
     // Languages.
     let languages = adw::PreferencesGroup::builder()
@@ -123,7 +223,12 @@ pub fn show(parent: &impl IsA<gtk::Widget>) {
                     format!("Couldn't clear them: {e}")
                 }
             };
-            dialog.add_toast(adw::Toast::new(&message));
+            dialog.add_toast(
+                adw::Toast::builder()
+                    .title(glib::markup_escape_text(&message))
+                    .timeout(crate::ui::TOAST_SECONDS)
+                    .build(),
+            );
         }
     ));
     forget.add_suffix(&forget_button);
@@ -156,8 +261,306 @@ pub fn show(parent: &impl IsA<gtk::Widget>) {
         diagnostics.add(&row);
     }
     page.add(&diagnostics);
+    page.add(&super::updates::preferences_group(&dialog));
 
+    dialog.add(&controller_page());
     dialog.present(Some(parent));
+}
+
+/// How long "Press a button…" waits before giving up.
+const CAPTURE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Controller status and remapping, one row per action.
+fn controller_page() -> adw::PreferencesPage {
+    let page = adw::PreferencesPage::builder()
+        .title("Controller")
+        .icon_name(crate::ui::icons::CONTROLLER)
+        .build();
+    let status = adw::PreferencesGroup::builder().title("Controller").build();
+    let connected = adw::ActionRow::builder()
+        .title(match controller::connected() {
+            Some(name) => name,
+            None => "No controller connected".to_string(),
+        })
+        .subtitle("In Steam Game Mode, use the \u{201c}Gamepad\u{201d} controller layout")
+        .build();
+    connected.add_prefix(&gtk::Image::from_icon_name(crate::ui::icons::CONTROLLER));
+    let reset = gtk::Button::builder()
+        .label("Reset to Defaults")
+        .valign(gtk::Align::Center)
+        .build();
+    connected.add_suffix(&reset);
+    status.add(&connected);
+    page.add(&status);
+
+    let mut rows: Vec<(Action, adw::ActionRow)> = Vec::new();
+    for (title, context) in [
+        ("While Browsing", Context::Browse),
+        ("In the Player", Context::Player),
+    ] {
+        let group = adw::PreferencesGroup::builder().title(title).build();
+        for action in Action::ALL.into_iter().filter(|a| a.context() == context) {
+            let row = adw::ActionRow::builder().title(action.label()).build();
+            let change = gtk::Button::builder()
+                .label("Change")
+                .valign(gtk::Align::Center)
+                .build();
+            row.add_suffix(&change);
+            group.add(&row);
+            let target = row.downgrade();
+            change.connect_clicked(move |_| {
+                if let Some(row) = target.upgrade() {
+                    capture_binding(action, &row);
+                }
+            });
+            rows.push((action, row));
+        }
+        page.add(&group);
+    }
+    let rows = std::rc::Rc::new(rows);
+    refresh_bindings(&rows);
+    reset.connect_clicked({
+        let rows = rows.clone();
+        move |_| {
+            controller::set_bindings(controller::Bindings::default());
+            refresh_bindings(&rows);
+        }
+    });
+    // Rows show the mapping as it changes (a remap can move a button off
+    // another action).
+    let refresh = glib::timeout_add_local(std::time::Duration::from_millis(300), {
+        let rows = std::rc::Rc::downgrade(&rows);
+        move || match rows.upgrade() {
+            Some(rows) => {
+                refresh_bindings(&rows);
+                glib::ControlFlow::Continue
+            }
+            None => glib::ControlFlow::Break,
+        }
+    });
+    let refresh = std::cell::RefCell::new(Some(refresh));
+    page.connect_unmap(move |_| {
+        if let Some(source) = refresh.take() {
+            source.remove();
+        }
+    });
+    page
+}
+
+fn refresh_bindings(rows: &[(Action, adw::ActionRow)]) {
+    let bindings = controller::bindings();
+    for (action, row) in rows {
+        if row.subtitle().is_some_and(|s| s.starts_with("Press")) {
+            continue; // capture in progress
+        }
+        let buttons = bindings.buttons(*action);
+        let text = if buttons.is_empty() {
+            "Not set".to_string()
+        } else {
+            buttons
+                .iter()
+                .map(|pad| pad.label())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        row.set_subtitle(&glib::markup_escape_text(&text));
+    }
+}
+
+/// "Press a button…": the next controller press becomes `action`'s.
+fn capture_binding(action: Action, row: &adw::ActionRow) {
+    row.set_subtitle("Press a button on the controller…");
+    let done = std::rc::Rc::new(std::cell::Cell::new(false));
+    controller::capture_next({
+        let done = done.clone();
+        let row = row.downgrade();
+        move |pad| {
+            done.set(true);
+            let mut bindings = controller::bindings();
+            bindings.set(action, pad);
+            controller::set_bindings(bindings);
+            if let Some(row) = row.upgrade() {
+                row.set_subtitle(&glib::markup_escape_text(pad.label()));
+            }
+        }
+    });
+    let row = row.downgrade();
+    glib::timeout_add_local_once(CAPTURE_TIMEOUT, move || {
+        if !done.get() {
+            controller::cancel_capture();
+            if let Some(row) = row.upgrade() {
+                row.set_subtitle("No button pressed");
+            }
+        }
+    });
+}
+
+/// "SVP folder" with Choose… and Reset. Only detection uses it: the
+/// VapourSynth libraries are linked from the folder given at build time.
+fn svp_folder_row(parent: &gtk::Widget) -> adw::ActionRow {
+    let row = adw::ActionRow::builder()
+        .title("SVP folder")
+        .tooltip_text(
+            "Where SVP 4 is installed. Used to detect SVP; the VapourSynth \
+             libraries come from the folder given when libmpv was built.",
+        )
+        .build();
+    let reset = gtk::Button::builder()
+        .icon_name(crate::ui::icons::RESET)
+        .tooltip_text("Back to ~/SVP4")
+        .valign(gtk::Align::Center)
+        .css_classes(["flat"])
+        .build();
+    let choose = gtk::Button::builder()
+        .label("Choose…")
+        .valign(gtk::Align::Center)
+        .build();
+    row.add_suffix(&reset);
+    row.add_suffix(&choose);
+    refresh_svp_folder(&row, &reset);
+
+    reset.connect_clicked(glib::clone!(
+        #[weak]
+        row,
+        move |reset| {
+            save(|s| s.frame_gen.svp_dir.clear());
+            refresh_svp_folder(&row, reset);
+        }
+    ));
+    let window = parent.root().and_downcast::<gtk::Window>();
+    choose.connect_clicked(glib::clone!(
+        #[weak]
+        row,
+        #[weak]
+        reset,
+        move |choose| {
+            // Portal file choosers don't show up in gamescope; type it instead.
+            if crate::gamescope::detected() {
+                ask_svp_folder(choose, &row, &reset);
+                return;
+            }
+            let dialog = gtk::FileDialog::builder()
+                .title("Choose the SVP 4 folder")
+                .modal(true)
+                .build();
+            if let Some(current) = crate::svp::install_dir().filter(|dir| dir.exists()) {
+                dialog.set_initial_folder(Some(&gio::File::for_path(current)));
+            }
+            dialog.select_folder(
+                window.as_ref(),
+                None::<&gio::Cancellable>,
+                glib::clone!(
+                    #[weak]
+                    row,
+                    #[weak]
+                    reset,
+                    move |result| {
+                        let Some(path) = result.ok().and_then(|folder| folder.path()) else {
+                            return; // cancelled
+                        };
+                        let value = path.to_string_lossy().into_owned();
+                        save(|s| s.frame_gen.svp_dir = value);
+                        refresh_svp_folder(&row, &reset);
+                    }
+                ),
+            );
+        }
+    ));
+    row
+}
+
+/// An in-window prompt for the SVP folder path (no file chooser).
+fn ask_svp_folder(anchor: &gtk::Button, row: &adw::ActionRow, reset: &gtk::Button) {
+    let current = crate::svp::install_dir()
+        .map(|dir| dir.display().to_string())
+        .unwrap_or_default();
+    let entry = gtk::Entry::builder()
+        .text(current)
+        .activates_default(true)
+        .build();
+    let dialog = adw::AlertDialog::builder()
+        .heading("SVP folder")
+        .body("Where SVP 4 is installed")
+        .extra_child(&entry)
+        .default_response("save")
+        .close_response("cancel")
+        .build();
+    dialog.add_responses(&[("cancel", "Cancel"), ("save", "Save")]);
+    dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
+    dialog.connect_response(
+        None,
+        glib::clone!(
+            #[weak]
+            row,
+            #[weak]
+            reset,
+            #[weak]
+            entry,
+            move |_, response| {
+                if response == "save" {
+                    let value = entry.text().trim().to_string();
+                    save(|s| s.frame_gen.svp_dir = value);
+                    refresh_svp_folder(&row, &reset);
+                }
+            }
+        ),
+    );
+    dialog.present(Some(anchor));
+}
+
+/// The IPC socket path SVP Manager connects to, for setups where SVP's
+/// mpv.conf was changed from /tmp/mpvsocket. Applies from the next playback.
+fn svp_socket_row(settings: &Settings) -> adw::EntryRow {
+    let row = adw::EntryRow::builder()
+        .title("SVP socket")
+        .text(settings.frame_gen.socket())
+        .show_apply_button(true)
+        .tooltip_text(
+            "Must match input-ipc-server in SVP's mpv.conf. Takes effect on the next playback.",
+        )
+        .build();
+    let reset = gtk::Button::builder()
+        .icon_name(crate::ui::icons::RESET)
+        .tooltip_text(format!("Back to {DEFAULT_SVP_SOCKET}"))
+        .valign(gtk::Align::Center)
+        .css_classes(["flat"])
+        .build();
+    row.add_suffix(&reset);
+    reset.connect_clicked(glib::clone!(
+        #[weak]
+        row,
+        move |_| {
+            row.set_text(DEFAULT_SVP_SOCKET);
+            save(|s| s.frame_gen.svp_socket = DEFAULT_SVP_SOCKET.to_string());
+        }
+    ));
+    row.connect_apply(|row| {
+        let socket = row.text().trim().to_string();
+        save(|s| s.frame_gen.svp_socket = socket);
+    });
+    row
+}
+
+fn refresh_svp_folder(row: &adw::ActionRow, reset: &gtk::Button) {
+    let custom = !Settings::load()
+        .unwrap_or_default()
+        .frame_gen
+        .svp_dir
+        .trim()
+        .is_empty();
+    reset.set_visible(custom);
+    let subtitle = match crate::svp::install_dir() {
+        Some(dir) => {
+            let status = if crate::svp::is_install(&dir) {
+                "SVP found"
+            } else {
+                "SVPManager not found here"
+            };
+            format!("{} — {status}", dir.display())
+        }
+        None => "No home folder".to_string(),
+    };
+    row.set_subtitle(&glib::markup_escape_text(&subtitle));
 }
 
 /// A language picker preselected on `current`; an unlisted configured

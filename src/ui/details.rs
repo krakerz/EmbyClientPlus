@@ -1,110 +1,52 @@
-//! Movie/episode details with Resume / Play buttons.
+//! Movie/episode details with Resume / Play buttons. Episodes also get
+//! previous/next links and a strip of their season's episodes.
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::glib;
 
-use super::{
-    Ui, clear, format_runtime, format_timestamp, images, reload_after_playback, scrolled_page,
-};
+use super::card::Shape;
+use super::hero::Hero;
+use super::rows::{Click, More, row};
+use super::{Ui, clear, format_timestamp, reload_on_change, scrolled_page};
 use crate::emby::models::BaseItem;
+use crate::playback::markers::neighbours;
 use crate::runtime::spawn_tokio;
 
 struct DetailsView {
-    backdrop: gtk::Picture,
-    poster: gtk::Picture,
-    series: gtk::Button,
-    /// The series button's click handler; replaced on each refresh.
-    series_handler: RefCell<Option<glib::SignalHandlerId>>,
-    title: gtk::Label,
-    meta: gtk::Label,
-    overview: gtk::Label,
-    buttons: gtk::Box,
+    hero: Hero,
+    /// Previous/next links and the season strip (episodes only).
+    episodes: gtk::Box,
+    /// Cast and similar titles.
+    related: gtk::Box,
 }
 
 pub fn page(ui: &Ui, item: &BaseItem) -> adw::NavigationPage {
-    let backdrop = gtk::Picture::builder()
-        .content_fit(gtk::ContentFit::Cover)
-        .height_request(320)
-        .build();
-    let poster = gtk::Picture::builder()
-        .content_fit(gtk::ContentFit::Cover)
-        .width_request(180)
-        .height_request(270)
-        .build();
-    let poster_frame = gtk::Overlay::builder()
-        .child(&poster)
-        .overflow(gtk::Overflow::Hidden)
-        .valign(gtk::Align::Start)
-        .css_classes(["card"])
-        .build();
-    let series = gtk::Button::builder()
-        .halign(gtk::Align::Start)
-        .css_classes(["flat", "heading"])
-        .visible(false)
-        .build();
-    let title = gtk::Label::builder()
-        .xalign(0.0)
-        .wrap(true)
-        .css_classes(["title-1"])
-        .build();
-    let meta = gtk::Label::builder()
-        .xalign(0.0)
-        .css_classes(["dim-label"])
-        .build();
-    let buttons = gtk::Box::builder().spacing(12).margin_top(6).build();
-    let overview = gtk::Label::builder()
-        .xalign(0.0)
-        .wrap(true)
-        .css_classes(["body"])
-        .build();
-
-    let info = gtk::Box::builder()
+    let hero = Hero::new();
+    let episodes = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
-        .spacing(8)
-        .hexpand(true)
+        .spacing(18)
         .build();
-    info.append(&series);
-    info.append(&title);
-    info.append(&meta);
-    info.append(&buttons);
-    info.append(&overview);
-    let body = gtk::Box::builder().spacing(24).build();
-    body.append(&poster_frame);
-    body.append(&info);
-
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    content.append(&backdrop);
-    content.append(
-        &adw::Clamp::builder()
-            .maximum_size(1080)
-            .margin_top(24)
-            .margin_bottom(24)
-            .margin_start(18)
-            .margin_end(18)
-            .child(&body)
-            .build(),
-    );
+    let related = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(18)
+        .build();
+    hero.extra.append(&episodes);
+    hero.extra.append(&related);
     let header = adw::HeaderBar::new();
-    let page = scrolled_page(&item.name, None, &header, &content);
-
+    let page = scrolled_page(&item.name, None, &header, &hero.root);
     let view = Rc::new(DetailsView {
-        backdrop,
-        poster,
-        series,
-        series_handler: RefCell::new(None),
-        title,
-        meta,
-        overview,
-        buttons,
+        hero,
+        episodes,
+        related,
     });
+
     // Show what we already have right away, then refresh from the server
     // (list results can lack the overview, and watch state may be stale).
     show(ui, &view, item);
     let item_id = item.id.clone();
-    reload_after_playback(ui, &page, {
+    reload_on_change(ui, &page, {
         let weak = ui.downgrade();
         let view = view.clone();
         let item_id = item_id.clone();
@@ -125,61 +67,230 @@ fn load(ui: &Ui, view: &Rc<DetailsView>, item_id: &str) {
     let ui = ui.clone();
     let view = view.clone();
     glib::spawn_future_local(async move {
-        match spawn_tokio(async move { client.item(&user_id, &item_id).await }).await {
-            Ok(item) => show(&ui, &view, &item),
+        let result = spawn_tokio(async move {
+            let item = client.item(&user_id, &item_id).await?;
+            // The whole series, for neighbours and the season strip.
+            let episodes = match &item.series_id {
+                Some(series_id) if item.item_type == "Episode" => client
+                    .series_episodes(series_id, &user_id)
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("episode list failed: {e:#}");
+                        Vec::new()
+                    }),
+                _ => Vec::new(),
+            };
+            Ok::<_, anyhow::Error>((item, episodes))
+        })
+        .await;
+        match result {
+            Ok((item, episodes)) => {
+                show(&ui, &view, &item);
+                show_episodes(&ui, &view, &item, &episodes);
+                super::hero::show_related(&ui, &view.related, &item);
+            }
             Err(e) => ui.report_error("Could not load details", &e),
         }
     });
 }
 
 fn show(ui: &Ui, view: &DetailsView, item: &BaseItem) {
-    view.title.set_label(&item.episode_label());
-    view.meta.set_label(&meta_line(item));
-    let overview = item.overview.clone().unwrap_or_default();
-    view.overview.set_label(&overview);
-    view.overview.set_visible(!overview.is_empty());
-    images::load(ui, &view.backdrop, item.backdrop(), 1920);
-    images::load(ui, &view.poster, item.poster(), 360);
+    let series = match (&item.series_name, &item.series_id) {
+        (Some(name), Some(id)) => Some(BaseItem {
+            id: id.clone(),
+            name: name.clone(),
+            item_type: "Series".into(),
+            ..Default::default()
+        }),
+        _ => None,
+    };
+    view.hero.show(ui, item, series);
 
-    match (&item.series_name, &item.series_id) {
-        (Some(name), Some(series_id)) => {
-            view.series.set_label(name);
-            view.series.set_visible(true);
-            let series = BaseItem {
-                id: series_id.clone(),
-                name: name.clone(),
-                item_type: "Series".into(),
-                ..Default::default()
-            };
-            let weak = ui.downgrade();
-            if let Some(id) = view.series_handler.take() {
-                view.series.disconnect(id);
-            }
-            let id = view.series.connect_clicked(move |_| {
-                if let Some(ui) = weak.upgrade() {
-                    ui.open(&series);
-                }
-            });
-            view.series_handler.replace(Some(id));
-        }
-        _ => view.series.set_visible(false),
-    }
-
-    clear(&view.buttons);
+    let buttons = &view.hero.buttons;
+    clear(buttons);
     let resume_ticks = item.resume_ticks();
     if resume_ticks > 0 {
-        view.buttons.append(&play_button(
+        buttons.append(&play_button(
             ui,
             item,
             &format!("Resume {}", format_timestamp(resume_ticks)),
             resume_ticks,
             true,
         ));
-        view.buttons
-            .append(&play_button(ui, item, "Play from Beginning", 0, false));
+        buttons.append(&play_button(ui, item, "Play from Beginning", 0, false));
     } else {
-        view.buttons.append(&play_button(ui, item, "Play", 0, true));
+        buttons.append(&play_button(ui, item, "Play", 0, true));
     }
+    if let Some(trailer) = trailer_button(ui, item) {
+        buttons.append(&trailer);
+    }
+    for toggle in super::hero::item_toggles(ui, item) {
+        buttons.append(&toggle);
+    }
+}
+
+/// Previous/next links and "More in Season N" for an episode.
+fn show_episodes(ui: &Ui, view: &DetailsView, item: &BaseItem, episodes: &[BaseItem]) {
+    clear(&view.episodes);
+    if episodes.is_empty() {
+        return;
+    }
+    let (previous, next) = neighbours(episodes, &item.id);
+    let nav = gtk::CenterBox::new();
+    if let Some(previous) = previous {
+        nav.set_start_widget(Some(&neighbour_button(ui, &previous, false)));
+    }
+    if let Some(next) = next {
+        nav.set_end_widget(Some(&neighbour_button(ui, &next, true)));
+    }
+    view.episodes.append(&nav);
+
+    let season: Vec<BaseItem> = episodes
+        .iter()
+        .filter(|e| e.season_id == item.season_id)
+        .cloned()
+        .collect();
+    if season.len() > 1 {
+        let title = match item.parent_index_number {
+            Some(number) => format!("More in Season {number}"),
+            None => "More Episodes".to_string(),
+        };
+        let series = item.series_id.clone().map(|id| {
+            Box::new(BaseItem {
+                id,
+                name: item.series_name.clone().unwrap_or_default(),
+                item_type: "Series".into(),
+                ..Default::default()
+            })
+        });
+        let more = series.map_or(More::None, More::Library);
+        let strip = row(ui, &title, &season, Shape::Landscape, Click::Replace, more);
+        view.episodes.append(&strip);
+        scroll_to_current(&strip, &season, &item.id);
+    }
+}
+
+/// Starts the season strip with the current episode centred. The scroll
+/// range only becomes real once the strip is laid out (and grows as card
+/// images arrive), so the position is set when the range changes, not at
+/// a guessed moment.
+fn scroll_to_current(strip: &gtk::Box, season: &[BaseItem], item_id: &str) {
+    let Some(index) = season.iter().position(|e| e.id == item_id) else {
+        return;
+    };
+    let Some(scroller) = strip.last_child().and_downcast::<gtk::ScrolledWindow>() else {
+        return;
+    };
+    let card = f64::from(Shape::Landscape.size().0);
+    let step = card + f64::from(super::rows::CARD_SPACING);
+    // Cards start after the row's side margin.
+    let card_start = f64::from(super::rows::ROW_MARGIN) + step * index as f64;
+    let adjustment = scroller.hadjustment();
+    let place = move |adjustment: &gtk::Adjustment| {
+        let page = adjustment.page_size();
+        if page <= 0.0 || adjustment.upper() < card_start + card {
+            return false; // not laid out yet
+        }
+        let centred = card_start - (page - card) / 2.0;
+        adjustment.set_value(centred.clamp(0.0, (adjustment.upper() - page).max(0.0)));
+        true
+    };
+    if place(&adjustment) {
+        return;
+    }
+    let handler = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let id = adjustment.connect_changed({
+        let handler = handler.clone();
+        move |adjustment| {
+            if place(adjustment)
+                && let Some(id) = handler.borrow_mut().take()
+            {
+                adjustment.disconnect(id);
+            }
+        }
+    });
+    handler.replace(Some(id));
+}
+
+/// "‹ S1:E3 · Title" / "S1:E5 · Title ›"; replaces this page rather than
+/// stacking another.
+fn neighbour_button(ui: &Ui, episode: &BaseItem, forward: bool) -> gtk::Button {
+    let label = gtk::Label::builder()
+        .label(episode.episode_label())
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .max_width_chars(36)
+        .build();
+    let icon = gtk::Image::from_icon_name(if forward {
+        crate::ui::icons::NEXT
+    } else {
+        crate::ui::icons::BACK
+    });
+    let content = gtk::Box::builder().spacing(6).build();
+    if forward {
+        content.append(&label);
+        content.append(&icon);
+    } else {
+        content.append(&icon);
+        content.append(&label);
+    }
+    let button = gtk::Button::builder()
+        .child(&content)
+        .tooltip_text(if forward {
+            "Next episode"
+        } else {
+            "Previous episode"
+        })
+        .css_classes(["flat"])
+        .build();
+    let weak = ui.downgrade();
+    let target = episode.clone();
+    button.connect_clicked(move |_| {
+        if let Some(ui) = weak.upgrade() {
+            ui.open_replacing(&target);
+        }
+    });
+    button
+}
+
+/// "Trailer": the movie's own trailer file if it has one, else its first
+/// web trailer.
+fn trailer_button(ui: &Ui, item: &BaseItem) -> Option<gtk::Button> {
+    let local = item.local_trailer_count.unwrap_or(0) > 0;
+    let remote = item.remote_trailers.first().map(|t| t.url.clone());
+    if !local && remote.is_none() {
+        return None;
+    }
+    let button = gtk::Button::builder()
+        .label("Trailer")
+        .css_classes(["pill"])
+        .build();
+    let weak = ui.downgrade();
+    let item = item.clone();
+    button.connect_clicked(move |_| {
+        let Some(ui) = weak.upgrade() else { return };
+        let title = format!("{} (Trailer)", item.name);
+        if !local {
+            if let Some(url) = &remote {
+                ui.play_link(&title, url);
+            }
+            return;
+        }
+        let client = ui.client();
+        let user_id = ui.user_id();
+        let id = item.id.clone();
+        let remote = remote.clone();
+        glib::spawn_future_local(async move {
+            let found =
+                spawn_tokio(async move { client.local_trailers(&user_id, &id).await }).await;
+            match (found, remote) {
+                (Ok(trailers), _) if !trailers.is_empty() => ui.play(&trailers[0], 0),
+                (_, Some(url)) => ui.play_link(&title, &url),
+                (Err(e), None) => ui.report_error("Couldn't find the trailer", &e),
+                (Ok(_), None) => ui.toast("No trailer found"),
+            }
+        });
+    });
+    Some(button)
 }
 
 fn play_button(
@@ -205,41 +316,4 @@ fn play_button(
         }
     });
     button
-}
-
-/// "2024 · 24 min · PG-13 · ★ 7.8"
-fn meta_line(item: &BaseItem) -> String {
-    let mut parts = Vec::new();
-    if let Some(year) = item.production_year {
-        parts.push(year.to_string());
-    }
-    if let Some(ticks) = item.run_time_ticks {
-        parts.push(format_runtime(ticks));
-    }
-    if let Some(rating) = &item.official_rating {
-        parts.push(rating.clone());
-    }
-    if let Some(score) = item.community_rating {
-        parts.push(format!("★ {score:.1}"));
-    }
-    if item.played() {
-        parts.push("Watched".to_string());
-    }
-    parts.join(" · ")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn meta_line_joins_available_parts() {
-        let item = BaseItem {
-            production_year: Some(2024),
-            run_time_ticks: Some(24 * 60 * crate::playback::TICKS_PER_SECOND),
-            community_rating: Some(7.84),
-            ..Default::default()
-        };
-        assert_eq!(meta_line(&item), "2024 · 24 min · ★ 7.8");
-    }
 }

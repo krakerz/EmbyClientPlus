@@ -1,0 +1,116 @@
+//! The app's icon set (Lucide, converted to fills; see
+//! scripts/update-icons.sh). Installed at startup as an icon theme that
+//! inherits Adwaita, so it also replaces the icons GTK and libadwaita use
+//! internally (back arrow, window buttons, dropdown arrows, ...).
+
+use std::path::PathBuf;
+
+use gtk::gdk;
+
+include!(concat!(env!("OUT_DIR"), "/icons.rs"));
+
+const THEME: &str = "EmbyClientPlus";
+
+pub const BACK: &str = "ecp-back-symbolic";
+pub const NEXT: &str = "ecp-next-symbolic";
+pub const HOME: &str = "ecp-home-symbolic";
+pub const SEARCH: &str = "ecp-search-symbolic";
+pub const MENU: &str = "ecp-menu-symbolic";
+pub const WATCHED: &str = "ecp-watched-symbolic";
+pub const FAVORITE: &str = "ecp-favorite-symbolic";
+pub const NOT_FAVORITE: &str = "ecp-not-favorite-symbolic";
+pub const MOVIES: &str = "ecp-movies-symbolic";
+pub const SHOWS: &str = "ecp-shows-symbolic";
+pub const SUGGESTIONS: &str = "ecp-suggestions-symbolic";
+pub const COLLECTIONS: &str = "ecp-collections-symbolic";
+pub const GENRES: &str = "ecp-genres-symbolic";
+pub const TAGS: &str = "ecp-tags-symbolic";
+pub const FOLDER: &str = "ecp-folder-symbolic";
+pub const PLAY: &str = "ecp-play-symbolic";
+pub const PAUSE: &str = "ecp-pause-symbolic";
+pub const SKIP_FORWARD: &str = "ecp-skip-forward-symbolic";
+pub const SKIP_BACK: &str = "ecp-skip-back-symbolic";
+pub const VOLUME: &str = "ecp-volume-symbolic";
+pub const MUTED: &str = "ecp-muted-symbolic";
+pub const AUDIO: &str = "ecp-audio-symbolic";
+pub const SUBTITLES: &str = "ecp-subtitles-symbolic";
+pub const QUALITY: &str = "ecp-quality-symbolic";
+pub const FULLSCREEN: &str = "ecp-fullscreen-symbolic";
+pub const UNFULLSCREEN: &str = "ecp-unfullscreen-symbolic";
+pub const SORT_ASCENDING: &str = "ecp-sort-ascending-symbolic";
+pub const SORT_DESCENDING: &str = "ecp-sort-descending-symbolic";
+pub const RESET: &str = "ecp-reset-symbolic";
+pub const CONTROLLER: &str = "ecp-controller-symbolic";
+pub const SETTINGS: &str = "ecp-settings-symbolic";
+pub const DISPLAY: &str = "ecp-display-symbolic";
+pub const ALBUMS: &str = "ecp-albums-symbolic";
+pub const ARTISTS: &str = "ecp-artists-symbolic";
+pub const SONGS: &str = "ecp-songs-symbolic";
+
+/// Writes the icons out as a theme and makes it the app's icon theme.
+/// Failures only cost the custom look; Adwaita's icons remain.
+pub fn install() {
+    let Some(root) = directories::ProjectDirs::from("com", "krakerz", "embyclientplus")
+        .map(|dirs| dirs.cache_dir().join("icons"))
+    else {
+        return;
+    };
+    if let Err(e) = write_theme(&root) {
+        tracing::warn!("couldn't install the icon theme: {e}");
+        return;
+    }
+    if let Some(display) = gdk::Display::default() {
+        gtk::IconTheme::for_display(&display).add_search_path(&root);
+    }
+    if let Some(settings) = gtk::Settings::default() {
+        settings.set_gtk_icon_theme_name(Some(THEME));
+    }
+}
+
+fn write_theme(root: &std::path::Path) -> std::io::Result<()> {
+    let theme = root.join(THEME);
+    let icons: PathBuf = theme.join("scalable/actions");
+    std::fs::create_dir_all(&icons)?;
+    std::fs::write(
+        theme.join("index.theme"),
+        format!(
+            "[Icon Theme]\nName={THEME}\nComment=EmbyClientPlus icons (Lucide)\nInherits=Adwaita,hicolor\nDirectories=scalable/actions\n\n[scalable/actions]\nSize=16\nMinSize=8\nMaxSize=512\nType=Scalable\nContext=Actions\n"
+        ),
+    )?;
+    for (name, svg) in ICONS {
+        let path = icons.join(format!("{name}.svg"));
+        // Skip unchanged files so the theme's cache stays valid.
+        if std::fs::read(&path).ok().as_deref() != Some(svg) {
+            std::fs::write(path, svg)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ICONS;
+
+    #[test]
+    fn every_constant_has_an_embedded_icon() {
+        for name in [
+            super::BACK,
+            super::HOME,
+            super::FAVORITE,
+            super::CONTROLLER,
+            super::SUBTITLES,
+            super::FOLDER,
+            super::SORT_DESCENDING,
+        ] {
+            assert!(
+                ICONS.iter().any(|(icon, _)| *icon == name),
+                "{name} missing"
+            );
+        }
+        assert!(
+            ICONS
+                .iter()
+                .any(|(icon, _)| *icon == "window-close-symbolic")
+        );
+    }
+}

@@ -1,9 +1,12 @@
 //! The poster/thumbnail card used by home rows and grids.
 
+use gtk::glib;
 use gtk::prelude::*;
 
 use super::{Ui, images};
+use crate::emby::browse::{ImageRef, ItemQuery};
 use crate::emby::models::BaseItem;
+use crate::runtime::spawn_tokio;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shape {
@@ -11,13 +14,36 @@ pub enum Shape {
     Poster,
     /// 16:9 still (episodes, libraries, continue watching).
     Landscape,
+    /// Round headshot (cast).
+    Person,
+    /// Square cover (music).
+    Square,
+    /// Like `Landscape`, but episodes show series art instead of their
+    /// still (spoiler-free Continue Watching / Next Up).
+    SeriesLandscape,
 }
 
 impl Shape {
-    fn size(self) -> (i32, i32) {
+    /// The shape for Continue Watching / Next Up, per Preferences.
+    pub fn for_episodes() -> Shape {
+        match crate::config::Settings::load()
+            .unwrap_or_default()
+            .home
+            .episode_art
+        {
+            crate::config::EpisodeArt::Episode => Shape::Landscape,
+            crate::config::EpisodeArt::Series => Shape::SeriesLandscape,
+        }
+    }
+}
+
+impl Shape {
+    pub fn size(self) -> (i32, i32) {
         match self {
             Shape::Poster => (150, 225),
-            Shape::Landscape => (260, 146),
+            Shape::Landscape | Shape::SeriesLandscape => (260, 146),
+            Shape::Person => (120, 120),
+            Shape::Square => (180, 180),
         }
     }
 }
@@ -38,9 +64,6 @@ impl Card {
         let (width, height) = shape.size();
         let picture = gtk::Picture::builder()
             .content_fit(gtk::ContentFit::Cover)
-            .can_shrink(true)
-            .width_request(width)
-            .height_request(height)
             .build();
         let progress = gtk::ProgressBar::builder()
             .valign(gtk::Align::End)
@@ -50,7 +73,7 @@ impl Card {
             .visible(false)
             .build();
         let watched = gtk::Image::builder()
-            .icon_name("object-select-symbolic")
+            .icon_name(crate::ui::icons::WATCHED)
             .halign(gtk::Align::End)
             .valign(gtk::Align::Start)
             .margin_top(6)
@@ -59,9 +82,13 @@ impl Card {
             .visible(false)
             .build();
         let frame = gtk::Overlay::builder()
-            .child(&picture)
+            .child(&super::fixed_picture(&picture, width, height))
             .overflow(gtk::Overflow::Hidden)
-            .css_classes(["card"])
+            .css_classes(if shape == Shape::Person {
+                vec!["card", "person-card"]
+            } else {
+                vec!["card"]
+            })
             .build();
         frame.add_overlay(&progress);
         frame.add_overlay(&watched);
@@ -98,8 +125,9 @@ impl Card {
 
     pub fn from_root(root: &gtk::Box) -> Self {
         let frame: gtk::Overlay = child(root.first_child());
-        let picture: gtk::Picture = child(frame.child());
-        let progress: gtk::ProgressBar = child(picture.next_sibling());
+        let sized = frame.child().expect("card frame has a picture");
+        let picture = super::fixed_picture_child(&sized).expect("card picture is pinned");
+        let progress: gtk::ProgressBar = child(sized.next_sibling());
         let watched: gtk::Image = child(progress.next_sibling());
         let title: gtk::Label = child(frame.next_sibling());
         let subtitle: gtk::Label = child(title.next_sibling());
@@ -127,11 +155,195 @@ impl Card {
         }
         self.watched.set_visible(item.played());
         let (image, width) = match shape {
-            Shape::Poster => (item.poster(), 300),
+            Shape::Poster | Shape::Person | Shape::Square => (item.poster(), 300),
             Shape::Landscape => (item.landscape().or_else(|| item.poster()), 520),
+            Shape::SeriesLandscape => (item.series_landscape().or_else(|| item.poster()), 520),
         };
-        images::load(ui, &self.picture, image, width);
+        if image.is_none() && item.is_folder() {
+            folder_cover(ui, &self.picture, &item.id, width);
+        } else {
+            // A recycled cell must not take a cover still loading for the
+            // folder it showed before.
+            // SAFETY: `FOLDER_KEY` is only ever stored and read as `String`.
+            unsafe { self.picture.set_data(FOLDER_KEY, String::new()) };
+            images::load(ui, &self.picture, image, width);
+        }
     }
+}
+
+/// Right-click / long-press menu for a card: play, watched, favourite,
+/// series. `item` is read at open time, since grid cells get recycled.
+pub fn attach_menu(
+    ui: &Ui,
+    widget: &impl IsA<gtk::Widget>,
+    item: impl Fn() -> Option<BaseItem> + 'static,
+) {
+    let item = std::rc::Rc::new(item);
+    let open = {
+        let ui = ui.downgrade();
+        let widget = widget.as_ref().downgrade();
+        move || {
+            if let (Some(ui), Some(widget), Some(item)) = (ui.upgrade(), widget.upgrade(), item()) {
+                show_menu(&ui, &widget, &item);
+            }
+        }
+    };
+    let open = std::rc::Rc::new(open);
+    super::set_menu_opener(widget.as_ref(), {
+        let open = open.clone();
+        move |()| open()
+    });
+    let right_click = gtk::GestureClick::builder()
+        .button(gtk::gdk::BUTTON_SECONDARY)
+        .build();
+    right_click.connect_pressed({
+        let open = open.clone();
+        move |gesture, _, _, _| {
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            open();
+        }
+    });
+    widget.add_controller(right_click);
+    let long_press = gtk::GestureLongPress::new();
+    long_press.connect_pressed(move |gesture, _, _| {
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        open();
+    });
+    widget.add_controller(long_press);
+}
+
+/// Opens the card menu for `item` anchored on `widget` (also used by the
+/// controller's context-menu button).
+pub fn show_menu(ui: &Ui, widget: &gtk::Widget, item: &BaseItem) {
+    let entries = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .build();
+    let popover = gtk::Popover::builder()
+        .child(&entries)
+        .has_arrow(true)
+        .build();
+    popover.set_parent(widget);
+    popover.connect_closed(|popover| {
+        // Parented per opening; let it go once closed.
+        let popover = popover.clone();
+        glib::idle_add_local_once(move || popover.unparent());
+    });
+    let add = |label: &str, action: Box<dyn Fn(&Ui)>| {
+        let button = gtk::Button::builder()
+            .label(label)
+            .css_classes(["flat"])
+            .build();
+        if let Some(child) = button.child().and_downcast::<gtk::Label>() {
+            child.set_xalign(0.0);
+        }
+        let ui = ui.downgrade();
+        let popover = popover.downgrade();
+        button.connect_clicked(move |_| {
+            if let Some(popover) = popover.upgrade() {
+                popover.popdown();
+            }
+            if let Some(ui) = ui.upgrade() {
+                action(&ui);
+            }
+        });
+        entries.append(&button);
+    };
+    if item.is_playable() {
+        let resume = item.resume_ticks();
+        let target = item.clone();
+        let label = if resume > 0 { "Resume" } else { "Play" };
+        add(label, Box::new(move |ui| ui.play(&target, resume)));
+    }
+    let target = item.clone();
+    add("Open", Box::new(move |ui| ui.open(&target)));
+    if item.item_type != "Person" {
+        let played = item.played();
+        let target = item.clone();
+        add(
+            if played {
+                "Mark as Unwatched"
+            } else {
+                "Mark as Watched"
+            },
+            Box::new(move |ui| ui.set_played(&target, !played)),
+        );
+    }
+    let favorite = item.is_favorite();
+    let target = item.clone();
+    add(
+        if favorite {
+            "Remove from Favourites"
+        } else {
+            "Add to Favourites"
+        },
+        Box::new(move |ui| ui.set_favorite(&target, !favorite)),
+    );
+    if let (Some(series_id), Some(series_name)) = (&item.series_id, &item.series_name) {
+        let series = BaseItem {
+            id: series_id.clone(),
+            name: series_name.clone(),
+            item_type: "Series".into(),
+            ..Default::default()
+        };
+        add("Go to Series", Box::new(move |ui| ui.open(&series)));
+    }
+    popover.popup();
+}
+
+thread_local! {
+    /// Folder id → the cover borrowed from its first title (`None`: none).
+    static FOLDER_COVERS: std::cell::RefCell<std::collections::HashMap<String, Option<ImageRef>>> =
+        Default::default();
+}
+
+const FOLDER_KEY: &str = "embyclientplus-folder-cover";
+
+/// A folder without its own image shows its first title's cover, the way
+/// Emby's web client does.
+fn folder_cover(ui: &Ui, picture: &gtk::Picture, folder_id: &str, width: u32) {
+    if let Some(cached) = FOLDER_COVERS.with(|c| c.borrow().get(folder_id).cloned()) {
+        images::load(ui, picture, cached, width);
+        return;
+    }
+    images::load(ui, picture, None, width);
+    // SAFETY: this key is only ever stored and read as `String`.
+    unsafe { picture.set_data(FOLDER_KEY, folder_id.to_string()) };
+    let client = ui.client();
+    let user_id = ui.user_id();
+    let query = ItemQuery {
+        parent_id: Some(folder_id.to_string()),
+        include_types: Some("Series,Movie"),
+        recursive: true,
+        image_types: Some("Primary"),
+        limit: 1,
+        ..Default::default()
+    };
+    let folder_id = folder_id.to_string();
+    let weak_ui = ui.downgrade();
+    let picture = picture.downgrade();
+    glib::spawn_future_local(async move {
+        let result = spawn_tokio(async move { client.items(&user_id, &query).await }).await;
+        let cover = match result {
+            Ok(page) => page.items.first().and_then(BaseItem::poster),
+            Err(e) => {
+                tracing::debug!("folder cover for {folder_id} failed: {e:#}");
+                return;
+            }
+        };
+        FOLDER_COVERS.with(|c| c.borrow_mut().insert(folder_id.clone(), cover.clone()));
+        let (Some(ui), Some(picture)) = (weak_ui.upgrade(), picture.upgrade()) else {
+            return;
+        };
+        // SAFETY: see above; the cell may have been recycled meanwhile.
+        let still_wanted = unsafe {
+            picture
+                .data::<String>(FOLDER_KEY)
+                .is_some_and(|id| *id.as_ref() == folder_id)
+        };
+        if still_wanted {
+            images::load(&ui, &picture, cover, width);
+        }
+    });
 }
 
 /// A card wrapped in a flat button, for home rows.
@@ -148,14 +360,25 @@ pub fn button(
         .css_classes(["flat", "card-button"])
         .build();
     button.connect_clicked(move |_| on_click());
+    let target = item.clone();
+    attach_menu(ui, &button, move || Some(target.clone()));
     button
 }
 
 /// Title and secondary line for a card: episodes show their series name
 /// over "S1:E4 · Name"; everything else shows its name over the year.
 fn labels(item: &BaseItem, shape: Shape) -> (String, String) {
+    if item.item_type == "Person" {
+        return (item.name.clone(), item.role.clone().unwrap_or_default());
+    }
+    if matches!(item.item_type.as_str(), "MusicAlbum" | "Audio") {
+        return (
+            item.name.clone(),
+            item.artist().unwrap_or_default().to_string(),
+        );
+    }
     match (item.item_type.as_str(), &item.series_name) {
-        ("Episode", Some(series)) if shape == Shape::Landscape => {
+        ("Episode", Some(series)) if matches!(shape, Shape::Landscape | Shape::SeriesLandscape) => {
             (series.clone(), item.episode_label())
         }
         _ => (

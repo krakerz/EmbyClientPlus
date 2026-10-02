@@ -2,37 +2,108 @@ name: Build
 
 on:
   push:
-    branches: [main, dev]
-  pull_request:
+    branches: [main]
+    paths-ignore: [README.md, CHANGELOG.md, LICENSE, INSTALL.txt, .gitignore]
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Hosted Ubuntu images lack libadwaita >= 1.6 and VapourSynth headers;
+    # Arch has current GTK/libadwaita/FFmpeg/libplacebo and matches the
+    # development machine.
+    container: archlinux:latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Cache apt packages
-        uses: actions/cache@v4
-        with:
-          path: /var/cache/apt/archives
-          key: apt-${{ hashFiles('.github/workflows/build.yml') }}
-
       - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev
+          pacman -Syu --noconfirm --needed \
+            base-devel git rust meson ninja pkgconf curl file patchelf \
+            gtk4 libadwaita ffmpeg libplacebo libass vapoursynth zimg lcms2 uchardet \
+            wayland wayland-protocols libxkbcommon libxpresent libxss libxv libxrandr \
+            libdrm mesa vulkan-headers vulkan-icd-loader libva libvdpau libdisplay-info \
+            pipewire libpulse alsa-lib systemd-libs desktop-file-utils
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
         with:
-          components: rustfmt, clippy
+          fetch-depth: 0
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-
 
-      - name: Format check
+      - name: Cache libmpv
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/mpv-src
+            third_party/mpv-build
+            third_party/mpv-prefix
+          key: libmpv-${{ hashFiles('scripts/build-libmpv.sh') }}
+
+      - name: Build libmpv
+        run: scripts/build-libmpv.sh
+
+      - name: Format
         run: cargo fmt -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
 
-      - name: Build
-        run: cargo build --verbose
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build release binary
+        env:
+          EMBYCLIENTPLUS_PORTABLE: "1"
+        run: cargo build --release --locked
+
+      - name: Resolve version
+        id: version
+        run: echo "version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)" >> "$GITHUB_OUTPUT"
+
+      - name: Release notes
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" {f=1; next}
+            f && /^## \[/ {exit}
+            f {print}
+          ' CHANGELOG.md > release-notes.md
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            git config --global --add safe.directory "$GITHUB_WORKSPACE"
+            previous="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+            {
+              echo "No CHANGELOG.md section for $version; commits since ${previous:-the beginning}:"
+              echo ""
+              git log --pretty='- %s' ${previous:+"$previous"..HEAD}
+            } > release-notes.md
+          fi
+          {
+            echo ""
+            echo "---"
+            echo "[Full changelog](${{ github.server_url }}/${{ github.repository }}/blob/main/CHANGELOG.md)"
+          } >> release-notes.md
+
+      - name: Package
+        run: packaging/package.sh
+
+      - name: Draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          tag_name: ${{ steps.version.outputs.version }}
+          name: ${{ steps.version.outputs.version }}
+          body_path: release-notes.md
+          files: |
+            dist/*-linux-x86_64.tar.gz
+            dist/*.AppImage

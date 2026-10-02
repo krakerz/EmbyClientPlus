@@ -1,0 +1,58 @@
+# GTK icon name                 Lucide icon               [filled]
+# App icons (referenced from src/ui/icons.rs).
+ecp-back-symbolic               arrow-left
+ecp-next-symbolic               chevron-right
+ecp-home-symbolic               house
+ecp-search-symbolic             search
+ecp-menu-symbolic               menu
+ecp-watched-symbolic            check
+ecp-favorite-symbolic           star                      filled
+ecp-not-favorite-symbolic       star
+ecp-movies-symbolic             film
+ecp-shows-symbolic              tv
+ecp-suggestions-symbolic        sparkles
+ecp-collections-symbolic        library
+ecp-genres-symbolic             shapes
+ecp-tags-symbolic               tag
+ecp-folder-symbolic             folder
+ecp-play-symbolic               play                      filled
+ecp-pause-symbolic              pause                     filled
+ecp-skip-forward-symbolic       skip-forward
+ecp-skip-back-symbolic          skip-back
+ecp-volume-symbolic             volume-2
+ecp-muted-symbolic              volume-x
+ecp-audio-symbolic              audio-lines
+ecp-subtitles-symbolic          captions
+ecp-quality-symbolic            sliders-horizontal
+ecp-fullscreen-symbolic         maximize-2
+ecp-unfullscreen-symbolic       minimize-2
+ecp-sort-ascending-symbolic     arrow-up-narrow-wide
+ecp-sort-descending-symbolic    arrow-down-wide-narrow
+ecp-reset-symbolic              undo-2
+ecp-controller-symbolic         gamepad-2
+ecp-settings-symbolic           settings
+ecp-display-symbolic            monitor
+ecp-albums-symbolic             disc-3
+ecp-artists-symbolic            mic-vocal
+ecp-songs-symbolic              music
+# Standard names, so GTK's and libadwaita's own widgets match too.
+go-previous-symbolic            arrow-left
+go-next-symbolic                chevron-right
+pan-start-symbolic              chevron-left
+pan-end-symbolic                chevron-right
+pan-down-symbolic               chevron-down
+pan-up-symbolic                 chevron-up
+open-menu-symbolic              menu
+view-more-symbolic              ellipsis-vertical
+object-select-symbolic          check
+window-close-symbolic           x
+window-minimize-symbolic        minus
+window-maximize-symbolic        square
+window-restore-symbolic         copy
+edit-clear-symbolic             circle-x
+edit-find-symbolic              search
+system-search-symbolic          search
+view-reveal-symbolic            eye
+view-conceal-symbolic           eye-off
+list-add-symbolic               plus
+list-remove-symbolic            minus

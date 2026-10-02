@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=EmbyClientPlus
+Comment=Emby client with SVP frame interpolation
+Exec=embyclientplus
+Icon=io.github.krakerz.EmbyClientPlus
+Terminal=false
+Categories=AudioVideo;Video;Player;
+Keywords=emby;media;video;svp;
+StartupWMClass=io.github.krakerz.EmbyClientPlus

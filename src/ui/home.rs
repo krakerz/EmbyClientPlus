@@ -5,7 +5,7 @@ use gtk::{gio, glib};
 
 use super::card::Shape;
 use super::rows::{Click, More, row};
-use super::{Ui, clear, loading, reload_after_playback, scrolled_page};
+use super::{Ui, clear, loading, reload_on_show, scrolled_page};
 use crate::emby::models::BaseItem;
 use crate::runtime::spawn_tokio;
 
@@ -15,7 +15,7 @@ const ROW_LIMIT: usize = 20;
 fn has_latest_row(view: &BaseItem) -> bool {
     matches!(
         view.collection_type.as_deref(),
-        Some("movies" | "tvshows" | "homevideos" | "musicvideos") | None
+        Some("movies" | "tvshows" | "homevideos" | "musicvideos" | "music") | None
     )
 }
 
@@ -37,17 +37,28 @@ pub fn page(ui: &Ui) -> adw::NavigationPage {
 
     let header = adw::HeaderBar::new();
     let search = gtk::Button::builder()
-        .icon_name("system-search-symbolic")
+        .icon_name(crate::ui::icons::SEARCH)
         .tooltip_text("Search")
         .build();
     header.pack_start(&search);
+    let favorites = gtk::Button::builder()
+        .icon_name(crate::ui::icons::FAVORITE)
+        .tooltip_text("Favorites")
+        .build();
+    header.pack_start(&favorites);
+    let weak = ui.downgrade();
+    favorites.connect_clicked(move |_| {
+        if let Some(ui) = weak.upgrade() {
+            ui.open_favorites();
+        }
+    });
     let menu = gio::Menu::new();
     menu.append(Some("Refresh"), Some("home.refresh"));
     menu.append(Some("Preferences"), Some("home.preferences"));
     menu.append(Some("Log Out"), Some("home.logout"));
     header.pack_end(
         &gtk::MenuButton::builder()
-            .icon_name("open-menu-symbolic")
+            .icon_name(crate::ui::icons::MENU)
             .menu_model(&menu)
             .build(),
     );
@@ -92,7 +103,8 @@ pub fn page(ui: &Ui) -> adw::NavigationPage {
     actions.add_action(&logout);
     page.insert_action_group("home", Some(&actions));
 
-    reload_after_playback(ui, &page, {
+    // Home always reloads when you come back to it.
+    reload_on_show(ui, &page, {
         let weak = ui.downgrade();
         let content = content.clone();
         move || {
@@ -186,7 +198,7 @@ fn show(ui: &Ui, content: &gtk::Box, data: HomeData) {
             ui,
             "Continue Watching",
             &data.resume,
-            Shape::Landscape,
+            Shape::for_episodes(),
             Click::Resume,
             More::Resume(None),
         ));
@@ -196,7 +208,7 @@ fn show(ui: &Ui, content: &gtk::Box, data: HomeData) {
             ui,
             "Next Up",
             &data.next_up,
-            Shape::Landscape,
+            Shape::for_episodes(),
             Click::Open,
             More::NextUp(None),
         ));
@@ -206,7 +218,11 @@ fn show(ui: &Ui, content: &gtk::Box, data: HomeData) {
             ui,
             &format!("Latest in {}", library.name),
             items,
-            Shape::Poster,
+            if library.collection_type.as_deref() == Some("music") {
+                Shape::Square
+            } else {
+                Shape::Poster
+            },
             Click::Open,
             More::Library(Box::new(library.clone())),
         ));

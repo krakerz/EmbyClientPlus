@@ -2,21 +2,58 @@
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-10-02
+
 ### Added
+- Music: music libraries open with Albums, Artists, Songs, Latest, Favorites and Folders tabs; album pages list tracks (disc/track numbers, durations) with Play; artist pages show their albums; tracks play in album order and the player shows the album cover. SVP stays off for music.
+- Favorites split by kind: a Favorites page from Home (Series, Movies, Episodes, Albums, Songs, Artists) and per-library Favorites tabs with the kinds that library holds; each row opens the full sortable grid.
+- Trailers: trailer items and a Trailer button on movie pages. YouTube trailers play in the app when yt-dlp is installed, otherwise they open in the browser.
+- Lucide icon set everywhere, including GTK's and libadwaita's own icons (back arrow, window buttons, dropdowns); fixes the missing Controller tab icon.
+- Genre and tag tabs show wide tiles with the name over a cover; the cover cycles through random titles from the category while hovered or focused.
+- Folder cards without their own image show their first title's cover.
+- Preferences > Home: Continue Watching / Next Up artwork can use series art instead of episode stills (no spoilers).
+- Preferences > Display: window width/height and start fullscreen (Auto = fullscreen in Steam Game Mode only).
+- Preferences > Playback: Use my mpv.conf — loads ~/.config/mpv/mpv.conf (shaders, scalers, subtitle styling); options the app manages (socket, video output, window, hwdec while SVP is on) are ignored and logged.
+- Self-update: Preferences > Updates (and a notice at start-up) download the latest published release and replace the installed copy or AppImage, then offer a restart.
+- Release archive with install.sh / uninstall.sh (installs to ~/.local/share/embyclientplus, adds a menu entry and ~/.local/bin/embyclientplus; uninstall keeps settings).
+- Home button next to Back on every page; Home always refreshes when you return to it.
+- Mark watched/unwatched and favourite from details and series pages, and from a right-click / long-press menu on any card (Play, Open, watched, favourite, Go to series).
+- Cast & Crew row (opens everything a person appears in) and a More Like This row on details and series pages.
+- Season chips replace the season dropdown.
+- SVP socket path setting (default `/tmp/mpvsocket`).
+- Gamescope / Steam Game Mode support: the app detects gamescope, runs fullscreen, and works around gamescope's Vulkan layer (GL renderer on Xwayland).
+- SVP in Game Mode: the app starts SVP Manager itself when SVP is wanted and it isn't running (Preferences > Start SVP Manager automatically; on by default in gamescope) and stops it on exit.
+- Smooth motion without SVP: optional mpv frame blending when SVP isn't interpolating.
+- Controller support (gilrs): navigate everything with the D-pad/left stick, A select, B back, Y home, X item menu, LB/RB tabs or seasons, Select search, Start preferences; in the player A play/pause, D-pad seek/volume, LB/RB episodes, LT/RT chapters, X/Y audio/subtitle menus. Every action is remappable in Preferences > Controller.
+- Release builds: GitHub Actions builds a draft release with a .tar.gz and an AppImage (bundles GTK4, libadwaita, FFmpeg and our libmpv; uses SVP's VapourSynth from the SVP folder when present).
 - Log files: each launch writes `~/.config/embyclientplus/logs/embyclientplus-YYYYMMDD-HHMMSS.log` (UTC); the newest 10 are kept. mpv's own messages and panics are included.
 - Preferences (Home menu): SVP by default, default quality, preferred audio and subtitle languages, forget all per-title choices, open the logs folder.
+- Preferences: choose the SVP folder (default `~/SVP4`).
 - The SVP button shows what SVP is doing: green while interpolating, amber while waiting for SVP Manager, red (plus a one-time notice) when SVP Manager isn't running; disabled when SVP isn't installed.
 - Posters are cached on disk (`~/.cache/embyclientplus/images`, trimmed to 512 MB), so they show instantly across launches.
+- Episode details show previous/next episode links and a "More in Season N" strip; stepping between episodes replaces the page instead of stacking it.
+- Series pages have a Play/Resume button for the next episode to watch, and show the unwatched count.
 
 ### Changed
+- Episode pages show the episode's own still instead of the series poster.
+- Notices disappear after 3 seconds.
+- Smooth motion without SVP only applies to titles with SVP switched off, and is never applied when the setting is off.
+- Release archive renamed to embyclientplus-<version>-linux-x86_64.tar.gz.
+- libmpv is built without JavaScript, Lua, CD/DVD/Blu-ray, libarchive, caca, sixel, JACK, sndio and Rubber Band, which the app doesn't use, so the bundle has fewer dependencies.
 - Search results keep the server's relevance order instead of A–Z.
 - The chosen quality carries over to the next episode.
+- Series and details pages share one header layout: fixed-height banner, poster, title, details, buttons.
 
 ### Fixed
+- Trailer items did nothing when opened.
+- The More in Season strip sometimes started at the first episode or with a card cut off after moving between episodes; it now centres the current episode once laid out.
+- Genre/tag tiles flashed a random cover mid-crossfade.
 - Doubled, overlapping subtitles on transcoded quality presets: Emby burned the subtitle into the video even when asked not to; the burn-in parameters are now stripped from the transcode URL.
 - Crash (abort) when changing quality or jumping to the previous/next episode from the player.
 - Closing the window during playback now waits briefly so Emby gets the final position.
 - Volume changes no longer send a report per step.
+- Turning SVP off in the player didn't detach SVP Manager: mpv keeps already-connected IPC clients when its socket option is cleared. The app now also disconnects those clients, then removes SVP's filter.
+- Banners and episode thumbnails no longer grow to the server image's size (layouts differed between series).
 
 ## [0.4.0] — 2026-10-02
 

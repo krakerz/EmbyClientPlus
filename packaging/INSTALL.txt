@@ -1,0 +1,36 @@
+EmbyClientPlus - quick start
+============================
+
+Two ways to run it:
+
+1. AppImage (works on SteamOS and most distros)
+   chmod +x EmbyClientPlus-*-x86_64.AppImage
+   ./EmbyClientPlus-*-x86_64.AppImage
+
+2. This archive (needs GTK 4.12+, libadwaita 1.6+, FFmpeg and libplacebo
+   from your distro, e.g. a current Arch/CachyOS/Fedora)
+   Install:    ./install.sh    (to ~/.local/share/embyclientplus, adds a menu
+                                entry and ~/.local/bin/embyclientplus)
+   Uninstall:  ./uninstall.sh  (keeps your settings)
+   Or run in place without installing:  bin/embyclientplus
+
+Updates: Preferences > Updates (or the notice at start-up) downloads the
+latest release and replaces the installed copy or the AppImage.
+
+First launch: enter your Emby server address, username and password.
+Settings are created automatically in ~/.config/embyclientplus/config.toml;
+nothing has to be edited by hand. Logs: ~/.config/embyclientplus/logs/
+
+SVP (frame interpolation, optional)
+- Install SVP 4 for Linux (default folder ~/SVP4). If it lives elsewhere,
+  set the folder in Preferences > Playback > SVP folder and restart the app.
+- On a desktop, start SVP Manager yourself. In Steam Game Mode the app
+  starts it for you (Preferences > Playback > Start SVP Manager
+  automatically).
+- Without SVP the app plays normally.
+
+Steam Game Mode
+- Add the AppImage as a non-Steam game and choose the "Gamepad" controller
+  layout. Controller buttons can be remapped in Preferences > Controller.
+
+Project page: https://github.com/krakerz/EmbyClientPlus

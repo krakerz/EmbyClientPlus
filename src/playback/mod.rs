@@ -132,6 +132,8 @@ impl PlaybackSession {
         let user_id = session.user_id.clone();
         let item_id = item.id.clone();
         let series_id = item.series_id.clone();
+        // Tracks queue up in album order, episodes in series order.
+        let album_id = item.is_audio().then(|| item.album_id.clone()).flatten();
         let request = StreamRequest {
             start_ticks,
             max_bitrate: quality.max_bitrate(),
@@ -141,9 +143,12 @@ impl PlaybackSession {
             let client = client.clone();
             async move {
                 let episodes = async {
-                    match &series_id {
-                        Some(series_id) => client.series_episodes(series_id, &user_id).await,
-                        None => Ok(Vec::new()),
+                    match (&album_id, &series_id) {
+                        (Some(album_id), _) => client.album_tracks(&user_id, album_id).await,
+                        (None, Some(series_id)) => {
+                            client.series_episodes(series_id, &user_id).await
+                        }
+                        (None, None) => Ok(Vec::new()),
                     }
                 };
                 let (item, episodes, info) = tokio::join!(
@@ -167,6 +172,14 @@ impl PlaybackSession {
             .next()
             .context("Emby returned no playable media source for this item")?;
         let url = match quality {
+            // Trailers and other links elsewhere play from their own URL.
+            _ if source.is_remote => {
+                let path = source.path.clone().context("this item has no address")?;
+                spawn_tokio(async move {
+                    tokio::task::spawn_blocking(move || crate::remote::resolve(&path)).await?
+                })
+                .await?
+            }
             Quality::Original => client.direct_stream_url(&item.id, &source.id)?,
             Quality::Mbps(_) => client.resolve_transcoding_url(&without_burned_subtitles(
                 source
@@ -200,7 +213,14 @@ impl PlaybackSession {
             stopped: Cell::new(false),
         });
 
-        player.set_svp(session.svp_enabled())?;
+        let settings = Settings::load().unwrap_or_default();
+        // Nothing to interpolate in music.
+        let svp = session.svp_enabled() && !session.item.is_audio();
+        if svp && settings.frame_gen.auto_start_svp() {
+            crate::svp::ensure_running();
+        }
+        player.set_svp(settings.frame_gen.socket(), svp)?;
+        apply_smoothing(player, svp);
         let subtitle_urls: Vec<&str> = session
             .external_subtitles
             .iter()
@@ -349,10 +369,11 @@ impl PlaybackSession {
     }
 
     pub fn set_svp(&self, enabled: bool) {
-        if let Err(e) = self.player.set_svp(enabled) {
+        if let Err(e) = self.player.set_svp(&svp_socket(), enabled) {
             tracing::warn!("{e:#}");
             return;
         }
+        apply_smoothing(self.player, enabled);
         let backend = if enabled {
             FrameGenBackend::Svp
         } else {
@@ -550,6 +571,30 @@ fn subtitle_format(codec: Option<&str>) -> &'static str {
         Some("webvtt" | "vtt") => "vtt",
         _ => "srt",
     }
+}
+
+/// "Smooth motion without SVP": mpv's frame blending, only for titles with
+/// SVP off. With the setting off it's never touched (only switched back off
+/// if an earlier playback turned it on).
+fn apply_smoothing(player: Player, svp: bool) {
+    let wanted = Settings::load()
+        .unwrap_or_default()
+        .frame_gen
+        .smooth_without_svp
+        && !svp;
+    if (wanted || player.smooth_motion())
+        && let Err(e) = player.set_smooth_motion(wanted)
+    {
+        tracing::warn!("{e:#}");
+    }
+}
+
+fn svp_socket() -> String {
+    Settings::load()
+        .unwrap_or_default()
+        .frame_gen
+        .socket()
+        .to_string()
 }
 
 fn seconds_to_ticks(seconds: f64) -> i64 {
