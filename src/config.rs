@@ -50,6 +50,19 @@ pub struct WindowSettings {
     pub height: i32,
     #[serde(default)]
     pub fullscreen: FullscreenMode,
+    #[serde(default)]
+    pub theme: Theme,
+}
+
+/// Colour scheme. Dark by default: SteamOS reports a light preference, so
+/// following the system would make Game Mode white.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Theme {
+    System,
+    Light,
+    #[default]
+    Dark,
 }
 
 impl Default for WindowSettings {
@@ -58,6 +71,7 @@ impl Default for WindowSettings {
             width: default_width(),
             height: default_height(),
             fullscreen: FullscreenMode::default(),
+            theme: Theme::default(),
         }
     }
 }
@@ -142,7 +156,7 @@ impl ServerSettings {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaybackSettings {
     #[serde(default)]
     pub mode: PlaybackMode,
@@ -152,6 +166,73 @@ pub struct PlaybackSettings {
     /// Load ~/.config/mpv/mpv.conf (minus options the app manages).
     #[serde(default)]
     pub use_mpv_conf: bool,
+    /// What fills the black bars: "off", "blur" or "glow".
+    #[serde(default = "default_bar_fill")]
+    pub bar_fill: String,
+    /// Web trailers (YouTube): the tallest picture to fetch.
+    #[serde(default)]
+    pub trailer_quality: TrailerQuality,
+    /// Web trailers: show captions in the preferred subtitle language.
+    #[serde(default = "default_true")]
+    pub trailer_captions: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TrailerQuality {
+    #[default]
+    Best,
+    #[serde(rename = "2160p")]
+    P2160,
+    #[serde(rename = "1440p")]
+    P1440,
+    #[serde(rename = "1080p")]
+    P1080,
+    #[serde(rename = "720p")]
+    P720,
+}
+
+impl TrailerQuality {
+    pub const ALL: [TrailerQuality; 5] = [
+        TrailerQuality::Best,
+        TrailerQuality::P2160,
+        TrailerQuality::P1440,
+        TrailerQuality::P1080,
+        TrailerQuality::P720,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TrailerQuality::Best => "Best available",
+            TrailerQuality::P2160 => "Up to 4K",
+            TrailerQuality::P1440 => "Up to 1440p",
+            TrailerQuality::P1080 => "Up to 1080p",
+            TrailerQuality::P720 => "Up to 720p",
+        }
+    }
+
+    pub fn max_height(self) -> Option<u32> {
+        match self {
+            TrailerQuality::Best => None,
+            TrailerQuality::P2160 => Some(2160),
+            TrailerQuality::P1440 => Some(1440),
+            TrailerQuality::P1080 => Some(1080),
+            TrailerQuality::P720 => Some(720),
+        }
+    }
+}
+
+impl Default for PlaybackSettings {
+    fn default() -> Self {
+        Self {
+            mode: PlaybackMode::default(),
+            bitrate_cap_mbps: 0,
+            use_mpv_conf: false,
+            bar_fill: default_bar_fill(),
+            trailer_quality: TrailerQuality::default(),
+            trailer_captions: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -270,6 +351,10 @@ pub enum FrameGenBackend {
     /// The default: SVP attaches whenever SVP Manager is running.
     #[default]
     Svp,
+}
+
+fn default_bar_fill() -> String {
+    "off".to_string()
 }
 
 fn default_language() -> String {

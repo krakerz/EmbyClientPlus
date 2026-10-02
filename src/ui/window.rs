@@ -23,6 +23,15 @@ const CSS: &str = "
     padding: 8px 14px;
     border-radius: 14px;
 }
+.scrub-preview {
+    padding: 8px;
+    border-radius: 12px;
+}
+.scrub-frame { border-radius: 8px; }
+.volume-osd {
+    padding: 12px 18px;
+    border-radius: 999px;
+}
 .up-next {
     padding: 12px;
     border-radius: 14px;
@@ -39,6 +48,7 @@ const CSS: &str = "
 .svp-waiting { color: @warning_color; }
 .svp-missing { color: @error_color; }
 .person-card { border-radius: 999px; }
+.art-placeholder { opacity: 0.45; }
 .category-tile { border-radius: 14px; }
 .tile-shade {
     background: linear-gradient(to top, rgba(0, 0, 0, 0.85), rgba(0, 0, 0, 0) 70%);
@@ -50,6 +60,17 @@ const CSS: &str = "
 }
 .tile-count { color: rgba(255, 255, 255, 0.75); }
 flowboxchild:focus-visible .category-tile { outline: 3px solid @accent_color; outline-offset: 2px; }
+/* Controller/keyboard focus: a solid accent ring, easy to spot from the couch. */
+button:focus-visible { outline: 3px solid @accent_color; outline-offset: 1px; }
+.card-button:focus-visible { outline: none; }
+.card-button:focus-visible .card,
+gridview > child:focus-visible .card {
+    outline: 4px solid @accent_color;
+    outline-offset: -4px;
+}
+.card-button:focus-visible .card-title,
+gridview > child:focus-visible .card-title { color: @accent_color; }
+row:focus-visible { outline: 3px solid @accent_color; outline-offset: -3px; }
 .watched-badge {
     background: alpha(@accent_bg_color, 0.9);
     color: @accent_fg_color;
@@ -76,6 +97,7 @@ pub fn build(app: &adw::Application, player: Player) -> adw::ApplicationWindow {
     let toasts = adw::ToastOverlay::new();
     toasts.set_child(Some(&stack));
     let window_settings = Settings::load().unwrap_or_default().window;
+    apply_theme(window_settings.theme);
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("EmbyClientPlus")
@@ -272,6 +294,16 @@ fn replace_child(stack: &gtk::Stack, name: &str, child: &impl IsA<gtk::Widget>) 
         stack.remove(&old);
     }
     stack.add_named(child, Some(name));
+}
+
+/// Applies the colour scheme from Preferences.
+pub fn apply_theme(theme: crate::config::Theme) {
+    let scheme = match theme {
+        crate::config::Theme::System => adw::ColorScheme::Default,
+        crate::config::Theme::Light => adw::ColorScheme::ForceLight,
+        crate::config::Theme::Dark => adw::ColorScheme::ForceDark,
+    };
+    adw::StyleManager::default().set_color_scheme(scheme);
 }
 
 fn load_css() {

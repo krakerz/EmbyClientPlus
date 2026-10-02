@@ -61,15 +61,40 @@ pub fn ensure_running() {
     let Some(dir) = install_dir().filter(|dir| is_install(dir)) else {
         return;
     };
-    let mut command = Command::new(dir.join("SVPManager"));
+    let manager = dir.join("SVPManager");
+    let in_gamescope = crate::gamescope::detected();
+    // In Game Mode, SVP Manager's windows would count as part of our app
+    // and steal focus. A headless gamescope gives it a private, invisible
+    // display; it still finds our player through the IPC socket.
+    let mut command = if in_gamescope && headless_gamescope_available() {
+        let mut command = Command::new("gamescope");
+        command
+            .args(["--backend", "headless", "-w", "640", "-h", "360", "--"])
+            .arg(&manager);
+        command
+    } else {
+        Command::new(&manager)
+    };
     command
         .current_dir(&dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    if crate::gamescope::detected() {
+    if in_gamescope {
         // Qt would otherwise try gamescope's Wayland socket.
         command.env("QT_QPA_PLATFORM", "xcb");
+        // Without Steam's game id and overlay, gamescope doesn't treat SVP
+        // Manager as part of this game.
+        for name in [
+            "SteamAppId",
+            "SteamGameId",
+            "SteamOverlayGameId",
+            "STEAM_GAME_DISPLAY_0",
+            "LD_PRELOAD",
+            "ENABLE_GAMESCOPE_WSI",
+        ] {
+            command.env_remove(name);
+        }
     }
     // Our own gamescope workarounds are for this process only.
     command.env_remove("GDK_BACKEND").env_remove("GSK_RENDERER");
@@ -84,16 +109,57 @@ pub fn ensure_running() {
     }
 }
 
+/// Whether this gamescope has a headless backend (3.14+).
+fn headless_gamescope_available() -> bool {
+    Command::new("gamescope")
+        .arg("--help")
+        .output()
+        .is_ok_and(|out| {
+            let text = String::from_utf8_lossy(&out.stdout) + String::from_utf8_lossy(&out.stderr);
+            text.contains("headless")
+        })
+}
+
 /// Stops the SVP Manager started by [`ensure_running`], at app exit.
 pub fn stop_started() {
     let Ok(mut started) = STARTED.lock() else {
         return;
     };
     if let Some(mut child) = started.take() {
+        // With the headless-gamescope wrapper, SVP Manager is its child.
+        for pid in managers_with_parent(child.id()) {
+            // SAFETY: plain signal to a process we started (indirectly).
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+        }
         let _ = child.kill();
         let _ = child.wait();
         tracing::info!("stopped the SVP Manager we started");
     }
+}
+
+/// SVPManager processes whose parent is `parent`.
+fn managers_with_parent(parent: u32) -> Vec<i32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let pid: i32 = entry.file_name().to_str()?.parse().ok()?;
+            let comm = std::fs::read_to_string(entry.path().join("comm")).ok()?;
+            if !is_manager(&comm) {
+                return None;
+            }
+            let status = std::fs::read_to_string(entry.path().join("status")).ok()?;
+            let ppid = status
+                .lines()
+                .find_map(|line| line.strip_prefix("PPid:"))?
+                .trim()
+                .parse::<u32>()
+                .ok()?;
+            (ppid == parent).then_some(pid)
+        })
+        .collect()
 }
 
 fn is_manager(comm: &str) -> bool {

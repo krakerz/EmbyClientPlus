@@ -23,6 +23,7 @@ pub struct Hero {
     pub root: gtk::Box,
     backdrop: gtk::Picture,
     poster: gtk::Picture,
+    poster_placeholder: gtk::Image,
     poster_frame: gtk::Overlay,
     still: gtk::Picture,
     still_frame: gtk::Overlay,
@@ -48,6 +49,8 @@ impl Hero {
             .valign(gtk::Align::Start)
             .css_classes(["card"])
             .build();
+        let poster_placeholder = super::placeholder_for(&poster, crate::ui::icons::IMAGE);
+        poster_frame.add_overlay(&poster_placeholder);
         let still = gtk::Picture::builder()
             .content_fit(gtk::ContentFit::Cover)
             .build();
@@ -58,6 +61,7 @@ impl Hero {
             .css_classes(["card"])
             .visible(false)
             .build();
+        still_frame.add_overlay(&super::placeholder_for(&still, crate::ui::icons::EPISODE));
         let kicker = gtk::Button::builder()
             .halign(gtk::Align::Start)
             .css_classes(["flat", "heading", "hero-kicker"])
@@ -121,6 +125,7 @@ impl Hero {
             root,
             backdrop,
             poster,
+            poster_placeholder,
             poster_frame,
             still,
             still_frame,
@@ -137,6 +142,8 @@ impl Hero {
     /// Fills in `item`; `kicker` is a page to link above the title.
     pub fn show(&self, ui: &Ui, item: &BaseItem, kicker: Option<BaseItem>) {
         self.title.set_label(&item.episode_label());
+        self.poster_placeholder
+            .set_icon_name(Some(crate::ui::icons::placeholder(&item.item_type)));
         self.meta.set_label(&meta_line(item));
         let overview = item.overview.clone().unwrap_or_default();
         self.overview.set_label(&overview);

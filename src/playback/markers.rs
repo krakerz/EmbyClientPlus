@@ -94,6 +94,7 @@ mod tests {
             start_position_ticks: seconds * TICKS_PER_SECOND,
             name: None,
             marker_type: Some(marker.into()),
+            image_tag: None,
         }
     }
 

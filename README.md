@@ -13,10 +13,13 @@ VapourSynth, so SVP 4 attaches just as it does to a standalone mpv.
   - Home rows;
   - tabbed libraries (genres, tags, collections, folders);
   - series and episodes, music, favourites, search.
+- Music player: queue, shuffle/repeat, gapless, Emby playlists, media keys; no SVP.
 - Plays the original file, with transcode presets; resume and watched state sync with Emby.
 - Player:
   - chapters, track pickers remembered per title;
-  - Skip Intro/Credits, Up Next, previous/next.
+  - Skip Intro/Credits, Up Next, previous/next;
+  - black-bar fill (blur/glow), aspect ratio and zoom per title.
+- Theme: Light, Dark, or Follow system.
 - SVP per title, with a status light. In Game Mode the app starts SVP Manager itself.
 - Controller navigation, remappable; fullscreen under gamescope.
 - Optional: your own `~/.config/mpv/mpv.conf`, and in-app trailers via `yt-dlp`.

@@ -1,3 +1,4 @@
+pub mod compositor;
 pub mod user_config;
 pub mod video_area;
 
@@ -22,7 +23,7 @@ const GEOMETRY_PROPERTIES: [&str; 4] = [
 /// Observed properties beyond geometry, with the formats they're read in.
 /// `time-pos` is deliberately absent: it changes every frame (120 fps under
 /// SVP), so the UI polls it instead.
-const STATE_PROPERTIES: [(&str, Format); 7] = [
+const STATE_PROPERTIES: [(&str, Format); 8] = [
     ("pause", Format::Flag),
     ("duration", Format::Double),
     ("track-list", Format::String),
@@ -30,6 +31,7 @@ const STATE_PROPERTIES: [(&str, Format); 7] = [
     ("sid", Format::String),
     ("volume", Format::Double),
     ("mute", Format::Flag),
+    ("playlist-pos", Format::Int64),
 ];
 
 pub const END_FILE_REASON_EOF: EndFileReason = 0;
@@ -47,9 +49,81 @@ pub enum PlayerEvent {
     /// Volume or mute changed.
     Volume,
     FileLoaded,
+    /// mpv moved to another playlist entry (music queue).
+    PlaylistPos(i64),
     /// Playback ended: end of file, error, or our own stop/replace.
     Finished(EndFileReason),
 }
+
+/// Extra zoom (log2) the user chose, added to the automatic fit.
+static USER_ZOOM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How the picture is shaped in the window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Aspect {
+    /// The whole picture, bars where needed.
+    #[default]
+    Fit,
+    /// Fill the window, cropping the overflow.
+    Fill,
+    /// Fill the window, distorting the picture.
+    Stretch,
+    Force16x9,
+    Force4x3,
+    Force21x9,
+}
+
+impl Aspect {
+    pub const ALL: [Aspect; 6] = [
+        Aspect::Fit,
+        Aspect::Fill,
+        Aspect::Stretch,
+        Aspect::Force16x9,
+        Aspect::Force4x3,
+        Aspect::Force21x9,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Aspect::Fit => "fit",
+            Aspect::Fill => "fill",
+            Aspect::Stretch => "stretch",
+            Aspect::Force16x9 => "16:9",
+            Aspect::Force4x3 => "4:3",
+            Aspect::Force21x9 => "21:9",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Aspect> {
+        Aspect::ALL.into_iter().find(|a| a.name() == name)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Aspect::Fit => "Fit",
+            Aspect::Fill => "Fill (crop)",
+            Aspect::Stretch => "Stretch",
+            Aspect::Force16x9 => "16:9",
+            Aspect::Force4x3 => "4:3",
+            Aspect::Force21x9 => "21:9",
+        }
+    }
+
+    /// (panscan, keepaspect, video-aspect-override) for mpv.
+    fn mpv_properties(self) -> (f64, bool, &'static str) {
+        match self {
+            Aspect::Fit => (0.0, true, "no"),
+            Aspect::Fill => (1.0, true, "no"),
+            Aspect::Stretch => (0.0, false, "no"),
+            Aspect::Force16x9 => (0.0, true, "16:9"),
+            Aspect::Force4x3 => (0.0, true, "4:3"),
+            Aspect::Force21x9 => (0.0, true, "2.39:1"),
+        }
+    }
+}
+
+/// The bar fill style (see `compositor`), read by the render callback.
+static BAR_FILL: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 /// Mirrors whether frame blending is on, since mpv keeps it across files.
 static SMOOTH_MOTION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -151,7 +225,8 @@ impl Player {
     /// (SVP assumes fullscreen); the glow then only shows in real spare space.
     pub fn fit_to_window(self, window_width: i32, window_height: i32) -> Result<()> {
         let Some([src_w, src_h, out_w, out_h]) = self.geometry() else {
-            return Ok(()); // no video yet
+            // No video yet; the user's zoom still applies.
+            return self.set("video-zoom", self.user_zoom());
         };
         let zoom = padding_zoom(
             (src_w as f64, src_h as f64),
@@ -159,7 +234,7 @@ impl Player {
             (window_width as f64, window_height as f64),
         );
         self.mpv
-            .set_property("video-zoom", zoom)
+            .set_property("video-zoom", zoom + self.user_zoom())
             .map_err(|e| anyhow!("failed to set video-zoom: {e:?}"))
     }
 
@@ -177,7 +252,14 @@ impl Player {
 
     /// Plays `target` from `start_seconds`, with extra subtitle files
     /// loaded alongside (they show up in `track-list` by URL).
-    pub fn load_at(self, target: &str, start_seconds: f64, subtitle_files: &[&str]) -> Result<()> {
+    /// `audio_file`: a separate audio stream to play with it (web trailers).
+    pub fn load_at(
+        self,
+        target: &str,
+        start_seconds: f64,
+        subtitle_files: &[&str],
+        audio_file: Option<&str>,
+    ) -> Result<()> {
         // mpv ≥ 0.38 takes the playlist index before the per-file options.
         self.command(
             "loadfile",
@@ -185,9 +267,38 @@ impl Player {
                 target,
                 "replace",
                 "-1",
-                &file_options(start_seconds, subtitle_files),
+                &file_options(start_seconds, subtitle_files, audio_file),
             ],
         )
+    }
+
+    /// Queues `target` after the current file (gapless with
+    /// `prefetch-playlist`).
+    pub fn append(self, target: &str) -> Result<()> {
+        self.command("loadfile", &[target, "append"])
+    }
+
+    pub fn playlist_remove(self, index: i64) -> Result<()> {
+        self.command("playlist-remove", &[&index.to_string()])
+    }
+
+    /// Music mode: no video track (cover art isn't decoded as video), the
+    /// next track preloaded for gapless playback.
+    pub fn set_audio_only(self, audio_only: bool) -> Result<()> {
+        self.set("vid", if audio_only { "no" } else { "auto" })?;
+        self.set(
+            "audio-display",
+            if audio_only { "no" } else { "embedded-first" },
+        )?;
+        self.set("prefetch-playlist", audio_only)
+    }
+
+    pub fn set_pause(self, paused: bool) -> Result<()> {
+        self.set("pause", paused)
+    }
+
+    pub fn set_loop_file(self, on: bool) -> Result<()> {
+        self.set("loop-file", if on { "inf" } else { "no" })
     }
 
     pub fn stop(self) -> Result<()> {
@@ -312,6 +423,62 @@ impl Player {
         }
     }
 
+    pub fn bar_fill(self) -> compositor::BarFill {
+        match BAR_FILL.load(std::sync::atomic::Ordering::Relaxed) {
+            1 => compositor::BarFill::Blur,
+            2 => compositor::BarFill::Glow,
+            _ => compositor::BarFill::Off,
+        }
+    }
+
+    /// While a fill is on, subtitles stay inside the picture (mpv would
+    /// otherwise place some in the bars, under the fill).
+    pub fn set_bar_fill(self, fill: compositor::BarFill) -> Result<()> {
+        let value = match fill {
+            compositor::BarFill::Off => 0,
+            compositor::BarFill::Blur => 1,
+            compositor::BarFill::Glow => 2,
+        };
+        BAR_FILL.store(value, std::sync::atomic::Ordering::Relaxed);
+        self.set("sub-use-margins", fill == compositor::BarFill::Off)
+    }
+
+    /// Where the picture sits in the render target, if there are bars.
+    pub fn video_rect(self) -> Option<compositor::VideoRect> {
+        let get = |key: &str| {
+            self.mpv
+                .get_property::<i64>(&format!("osd-dimensions/{key}"))
+                .ok()
+        };
+        compositor::VideoRect::from_osd(
+            get("w")?,
+            get("h")?,
+            get("ml")?,
+            get("mr")?,
+            get("mt")?,
+            get("mb")?,
+        )
+    }
+
+    pub fn set_aspect(self, aspect: Aspect) -> Result<()> {
+        let (panscan, keepaspect, override_) = aspect.mpv_properties();
+        self.set("panscan", panscan)?;
+        self.set("keepaspect", keepaspect)?;
+        self.set("video-aspect-override", override_)
+    }
+
+    pub fn user_zoom(self) -> f64 {
+        f64::from_bits(USER_ZOOM.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Takes effect at the next `fit_to_window`.
+    pub fn set_user_zoom(self, zoom: f64) {
+        USER_ZOOM.store(
+            zoom.clamp(-2.0, 2.0).to_bits(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
     /// Whether `set_smooth_motion(true)` is in effect.
     pub fn smooth_motion(self) -> bool {
         SMOOTH_MOTION.load(std::sync::atomic::Ordering::Relaxed)
@@ -394,10 +561,14 @@ fn unix_socket_path(fd: libc::c_int) -> Option<String> {
 
 /// Per-file `loadfile` options. Values use mpv's `%len%` quoting, since
 /// URLs can contain the `,` and `=` that separate options.
-fn file_options(start_seconds: f64, subtitle_files: &[&str]) -> String {
+fn file_options(start_seconds: f64, subtitle_files: &[&str], audio_file: Option<&str>) -> String {
     let mut options = vec![format!("start={start_seconds:.3}")];
     for file in subtitle_files {
         options.push(format!("sub-files-append=%{}%{file}", file.len()));
+    }
+    // %len% quoting: these URLs have commas of their own.
+    if let Some(file) = audio_file {
+        options.push(format!("audio-files-append=%{}%{file}", file.len()));
     }
     options.join(",")
 }
@@ -462,6 +633,7 @@ fn property_event(name: &str, change: &PropertyData) -> Option<PlayerEvent> {
         ("duration", PropertyData::Double(duration)) => Some(PlayerEvent::Duration(*duration)),
         ("track-list" | "aid" | "sid", _) => Some(PlayerEvent::Tracks),
         ("volume" | "mute", _) => Some(PlayerEvent::Volume),
+        ("playlist-pos", PropertyData::Int64(pos)) => Some(PlayerEvent::PlaylistPos(*pos)),
         (name, _) if GEOMETRY_PROPERTIES.contains(&name) => Some(PlayerEvent::Geometry),
         _ => None,
     }
@@ -510,12 +682,28 @@ mod tests {
     }
 
     #[test]
+    fn aspect_modes_round_trip_and_map_to_mpv() {
+        use super::Aspect;
+        for aspect in Aspect::ALL {
+            assert_eq!(Aspect::from_name(aspect.name()), Some(aspect));
+        }
+        assert_eq!(Aspect::Fill.mpv_properties(), (1.0, true, "no"));
+        assert_eq!(Aspect::Stretch.mpv_properties(), (0.0, false, "no"));
+        assert_eq!(Aspect::Force21x9.mpv_properties().2, "2.39:1");
+        assert_eq!(Aspect::from_name("nonsense"), None);
+    }
+
+    #[test]
     fn file_options_quote_subtitle_urls() {
         assert_eq!(
-            file_options(12.5, &["http://s/a.srt?x=1,2"]),
+            file_options(12.5, &["http://s/a.srt?x=1,2"], None),
             "start=12.500,sub-files-append=%20%http://s/a.srt?x=1,2"
         );
-        assert_eq!(file_options(0.0, &[]), "start=0.000");
+        assert_eq!(file_options(0.0, &[], None), "start=0.000");
+        assert_eq!(
+            file_options(0.0, &[], Some("http://a/b,c")),
+            "start=0.000,audio-files-append=%12%http://a/b,c"
+        );
     }
 
     #[test]

@@ -293,6 +293,12 @@ fn music(ui: &Ui, folder: &BaseItem) -> adw::NavigationPage {
             Box::new(move |ui| sortable_grid_of(ui, songs, Shape::Square).upcast()),
         ),
         (
+            "playlists",
+            "Playlists",
+            crate::ui::icons::PLAYLIST,
+            Box::new(super::playlists::grid),
+        ),
+        (
             "latest",
             "Latest",
             crate::ui::icons::SUGGESTIONS,
@@ -649,6 +655,121 @@ fn chips(ui: &Ui, library_id: &str, item_type: &'static str, kind: Chips) -> gtk
     scrolled.upcast()
 }
 
+/// How many recently watched series seed "Because you watched" rows.
+const SEED_SERIES: usize = 3;
+const SUGGESTION_GENRES: usize = 2;
+
+/// TV has no server-side recommendations, so build them from what you
+/// watched: titles similar to your recent series, and unwatched series
+/// from the genres you watch most. Rows never repeat a title.
+async fn tv_suggestions(
+    client: &crate::emby::EmbyClient,
+    user_id: &str,
+    library_id: &str,
+) -> anyhow::Result<Vec<Recommendation>> {
+    // Recently played episodes give the series you've been watching.
+    let recent = client
+        .items(
+            user_id,
+            &ItemQuery {
+                parent_id: Some(library_id.to_string()),
+                include_types: Some("Episode"),
+                recursive: true,
+                filters: vec!["IsPlayed"],
+                sort_by: Some("DatePlayed"),
+                descending: true,
+                limit: 60,
+                ..Default::default()
+            },
+        )
+        .await?
+        .items;
+    let mut series_ids: Vec<(String, String)> = Vec::new();
+    for episode in &recent {
+        if let (Some(id), Some(name)) = (&episode.series_id, &episode.series_name)
+            && !series_ids.iter().any(|(seen, _)| seen == id)
+        {
+            series_ids.push((id.clone(), name.clone()));
+        }
+    }
+
+    let mut seen: std::collections::HashSet<String> =
+        series_ids.iter().map(|(id, _)| id.clone()).collect();
+    let mut rows = Vec::new();
+    for (id, name) in series_ids.iter().take(SEED_SERIES) {
+        let similar = client.similar(user_id, id, 16).await.unwrap_or_default();
+        let items = fresh(similar, &mut seen);
+        if !items.is_empty() {
+            rows.push(Recommendation {
+                recommendation_type: "SimilarToRecentlyPlayed".into(),
+                baseline_item_name: Some(name.clone()),
+                items,
+            });
+        }
+    }
+
+    // Genres of the series you watch, most common first.
+    let mut watched_series = Vec::new();
+    for (id, _) in series_ids.iter().take(12) {
+        if let Ok(series) = client.item(user_id, id).await {
+            watched_series.push(series);
+        }
+    }
+    for (genre_id, genre) in top_genres(&watched_series, SUGGESTION_GENRES) {
+        let page = client
+            .items(
+                user_id,
+                &ItemQuery {
+                    parent_id: Some(library_id.to_string()),
+                    include_types: Some("Series"),
+                    recursive: true,
+                    genre_id: Some(genre_id),
+                    filters: vec!["IsUnplayed"],
+                    sort_by: Some("Random"),
+                    limit: 16,
+                    ..Default::default()
+                },
+            )
+            .await;
+        let items = fresh(page.map(|p| p.items).unwrap_or_default(), &mut seen);
+        if !items.is_empty() {
+            rows.push(Recommendation {
+                recommendation_type: "Genre".into(),
+                baseline_item_name: Some(genre),
+                items,
+            });
+        }
+    }
+    Ok(rows)
+}
+
+/// Unwatched items not shown in an earlier row (marking them shown).
+fn fresh(items: Vec<BaseItem>, seen: &mut std::collections::HashSet<String>) -> Vec<BaseItem> {
+    items
+        .into_iter()
+        .filter(|item| !item.played() && seen.insert(item.id.clone()))
+        .take(12)
+        .collect()
+}
+
+/// The `limit` most common genres across `items`, as (id, name).
+fn top_genres(items: &[BaseItem], limit: usize) -> Vec<(String, String)> {
+    let mut counts: Vec<(String, String, usize)> = Vec::new();
+    for genre in items.iter().flat_map(|item| &item.genre_items) {
+        match counts.iter_mut().find(|(id, _, _)| *id == genre.id) {
+            Some(entry) => entry.2 += 1,
+            None => counts.push((genre.id.clone(), genre.name.clone(), 1)),
+        }
+    }
+    // Most common first; ties keep first-seen order (recent series first).
+    counts.sort_by_key(|entry| std::cmp::Reverse(entry.2));
+    counts
+        .into_iter()
+        .take(limit)
+        .map(|(id, name, _)| (id, name))
+        .collect()
+}
+
 struct Suggestions {
     resume: Vec<BaseItem>,
     next_up: Vec<BaseItem>,
@@ -701,7 +822,7 @@ fn suggestions(ui: &Ui, folder: &BaseItem, kind: Kind) -> gtk::Widget {
                                 )
                                 .await
                         }
-                        Kind::Shows => Ok(Vec::new()),
+                        Kind::Shows => tv_suggestions(&client, &user_id, &fetch_library).await,
                     }
                 },
             );
@@ -786,4 +907,52 @@ fn suggestions(ui: &Ui, folder: &BaseItem, kind: Kind) -> gtk::Widget {
         }
     });
     scrolled.upcast()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{fresh, top_genres};
+    use crate::emby::models::{BaseItem, NameId, UserItemData};
+
+    fn series(id: &str, genres: &[&str]) -> BaseItem {
+        BaseItem {
+            id: id.into(),
+            genre_items: genres
+                .iter()
+                .map(|g| NameId {
+                    id: format!("g-{g}"),
+                    name: g.to_string(),
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn top_genres_counts_across_watched_series() {
+        let watched = [
+            series("a", &["Fantasy", "Comedy"]),
+            series("b", &["Comedy"]),
+            series("c", &["Action", "Comedy", "Fantasy"]),
+        ];
+        let top: Vec<String> = top_genres(&watched, 2)
+            .into_iter()
+            .map(|(_, n)| n)
+            .collect();
+        assert_eq!(top, ["Comedy", "Fantasy"]);
+        assert!(top_genres(&[], 2).is_empty());
+    }
+
+    #[test]
+    fn rows_skip_watched_and_repeated_titles() {
+        let mut seen = std::collections::HashSet::from(["a".to_string()]);
+        let mut watched = series("w", &[]);
+        watched.user_data = Some(UserItemData {
+            played: true,
+            ..Default::default()
+        });
+        let row = fresh(vec![series("a", &[]), watched, series("x", &[])], &mut seen);
+        assert_eq!(row.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), ["x"]);
+        assert!(fresh(vec![series("x", &[])], &mut seen).is_empty());
+    }
 }

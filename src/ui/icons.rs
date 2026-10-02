@@ -46,6 +46,33 @@ pub const DISPLAY: &str = "ecp-display-symbolic";
 pub const ALBUMS: &str = "ecp-albums-symbolic";
 pub const ARTISTS: &str = "ecp-artists-symbolic";
 pub const SONGS: &str = "ecp-songs-symbolic";
+pub const EPISODE: &str = "ecp-episode-symbolic";
+pub const PERSON: &str = "ecp-person-symbolic";
+pub const PLAYLIST: &str = "ecp-playlist-symbolic";
+pub const IMAGE: &str = "ecp-image-symbolic";
+pub const PICTURE: &str = "ecp-picture-symbolic";
+pub const SHUFFLE: &str = "ecp-shuffle-symbolic";
+pub const REPEAT: &str = "ecp-repeat-symbolic";
+pub const REPEAT_ONE: &str = "ecp-repeat-one-symbolic";
+pub const MOVE_UP: &str = "ecp-move-up-symbolic";
+pub const MOVE_DOWN: &str = "ecp-move-down-symbolic";
+pub const REMOVE: &str = "ecp-remove-symbolic";
+pub const COLLAPSE: &str = "ecp-collapse-symbolic";
+
+/// The placeholder for an item that has no artwork.
+pub fn placeholder(item_type: &str) -> &'static str {
+    match item_type {
+        "MusicAlbum" | "Audio" => SONGS,
+        "Movie" | "Trailer" | "Video" => MOVIES,
+        "Series" | "Season" => SHOWS,
+        "Episode" => EPISODE,
+        "Folder" | "CollectionFolder" | "BoxSet" | "UserView" => FOLDER,
+        "MusicArtist" => ARTISTS,
+        "Person" => PERSON,
+        "Playlist" => PLAYLIST,
+        _ => IMAGE,
+    }
+}
 
 /// Writes the icons out as a theme and makes it the app's icon theme.
 /// Failures only cost the custom look; Adwaita's icons remain.
@@ -90,6 +117,28 @@ fn write_theme(root: &std::path::Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::ICONS;
+
+    #[test]
+    fn placeholders_cover_each_type() {
+        assert_eq!(super::placeholder("MusicAlbum"), super::SONGS);
+        assert_eq!(super::placeholder("Episode"), super::EPISODE);
+        assert_eq!(super::placeholder("Photo"), super::IMAGE);
+        for kind in [
+            "Movie",
+            "Series",
+            "Folder",
+            "MusicArtist",
+            "Person",
+            "Playlist",
+            "?",
+        ] {
+            let name = super::placeholder(kind);
+            assert!(
+                ICONS.iter().any(|(icon, _)| *icon == name),
+                "{name} missing"
+            );
+        }
+    }
 
     #[test]
     fn every_constant_has_an_embedded_icon() {

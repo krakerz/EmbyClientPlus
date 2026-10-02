@@ -35,6 +35,18 @@ ecp-display-symbolic            monitor
 ecp-albums-symbolic             disc-3
 ecp-artists-symbolic            mic-vocal
 ecp-songs-symbolic              music
+ecp-episode-symbolic            clapperboard
+ecp-person-symbolic             user
+ecp-playlist-symbolic           list-music
+ecp-image-symbolic              image
+ecp-picture-symbolic            crop
+ecp-shuffle-symbolic            shuffle
+ecp-repeat-symbolic             repeat
+ecp-repeat-one-symbolic         repeat-1
+ecp-move-up-symbolic            arrow-up
+ecp-move-down-symbolic          arrow-down
+ecp-remove-symbolic             x
+ecp-collapse-symbolic           chevron-down
 # Standard names, so GTK's and libadwaita's own widgets match too.
 go-previous-symbolic            arrow-left
 go-next-symbolic                chevron-right

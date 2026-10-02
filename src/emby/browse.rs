@@ -4,8 +4,8 @@ use super::EmbyClient;
 use super::models::{BaseItem, QueryResult, Recommendation};
 
 /// Extra fields every browse request asks for, on top of Emby's defaults.
-const FIELDS: &str =
-    "Overview,ProductionYear,OfficialRating,CommunityRating,PrimaryImageAspectRatio";
+pub(super) const FIELDS: &str =
+    "Overview,ProductionYear,OfficialRating,CommunityRating,PrimaryImageAspectRatio,Genres";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageKind {
@@ -476,7 +476,7 @@ fn image(item_id: &str, kind: ImageKind, tag: &str) -> ImageRef {
 }
 
 /// Percent-encodes a query value (RFC 3986 unreserved characters pass).
-fn encode(value: &str) -> String {
+pub(super) fn encode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
         match byte {

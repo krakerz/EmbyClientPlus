@@ -6,6 +6,7 @@ mod emby;
 mod frame_gen;
 mod gamescope;
 mod logging;
+mod music;
 mod playback;
 mod player;
 mod remote;
@@ -32,8 +33,10 @@ fn main() -> glib::ExitCode {
         ui::icons::install();
         let result = match &target {
             Some(target) => build_standalone_player(app, target),
-            None => player::Player::new(mpv_config_dir().as_deref())
-                .map(|player| ui::window::build(app, player).present()),
+            None => player::Player::new(mpv_config_dir().as_deref()).map(|player| {
+                apply_bar_fill(player);
+                ui::window::build(app, player).present()
+            }),
         };
         if let Err(e) = result {
             tracing::error!("{e:#}");
@@ -65,8 +68,20 @@ fn mpv_config_dir() -> Option<std::path::PathBuf> {
     }
 }
 
+/// The saved black-bar fill, applied once the player exists.
+fn apply_bar_fill(player: player::Player) {
+    let name = config::Settings::load()
+        .unwrap_or_default()
+        .playback
+        .bar_fill;
+    if let Err(e) = player.set_bar_fill(ui::player_page::bar_fill_from_name(&name)) {
+        tracing::warn!("{e:#}");
+    }
+}
+
 fn build_standalone_player(app: &adw::Application, target: &str) -> anyhow::Result<()> {
     let player = player::Player::new(mpv_config_dir().as_deref())?;
+    apply_bar_fill(player);
     // Standalone mode always offers itself to SVP.
     let settings = config::Settings::load().unwrap_or_default();
     player.set_svp(settings.frame_gen.socket(), true)?;
@@ -82,13 +97,18 @@ fn build_standalone_player(app: &adw::Application, target: &str) -> anyhow::Resu
             });
         }
     });
+    let window_settings = config::Settings::load().unwrap_or_default().window;
+    ui::window::apply_theme(window_settings.theme);
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("EmbyClientPlus")
-        .default_width(1280)
-        .default_height(720)
+        .default_width(window_settings.width.max(640))
+        .default_height(window_settings.height.max(400))
         .content(&video)
         .build();
+    if window_settings.start_fullscreen(gamescope::detected()) {
+        window.connect_map(|window| window.fullscreen());
+    }
 
     let keys = gtk::EventControllerKey::new();
     keys.connect_key_pressed(move |_, key, _, _| {
@@ -113,5 +133,8 @@ fn build_standalone_player(app: &adw::Application, target: &str) -> anyhow::Resu
     });
 
     window.present();
-    player.load(target)
+    // Video-site pages go through yt-dlp, as trailers do in the app.
+    let stream = remote::resolve(target, &remote::Options::from_settings(&settings))?;
+    let subtitles: Vec<&str> = stream.subtitle.as_deref().into_iter().collect();
+    player.load_at(&stream.url, 0.0, &subtitles, stream.audio.as_deref())
 }

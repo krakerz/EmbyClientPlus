@@ -140,3 +140,23 @@ fn requested(picture: &gtk::Picture) -> Option<String> {
             .and_then(|path| path.as_ref().clone())
     }
 }
+
+/// The on-disk copy of `image` (fetched first if needed), for handing to
+/// other programs: MPRIS cover art.
+pub async fn file(
+    client: Arc<EmbyClient>,
+    image: ImageRef,
+    max_width: u32,
+) -> Option<std::path::PathBuf> {
+    spawn_tokio(async move {
+        let path = EmbyClient::image_path(&image, max_width);
+        let cache_key = client.url(&path);
+        let file = image_disk_cache::file_for(&cache_key)?;
+        if !file.is_file() {
+            let bytes = client.fetch_bytes(&path).await.ok()?;
+            image_disk_cache::write(&cache_key, &bytes);
+        }
+        file.is_file().then_some(file)
+    })
+    .await
+}

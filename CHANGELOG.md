@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+### Added
+- Dedicated music player (never uses SVP): mini player bar under every page, Now Playing sheet (cover, artist/album links, seek, shuffle, repeat off/all/one, volume), queue with play-now, move up/down, remove, clear upcoming; gapless playback.
+- Album Play/Shuffle; track and card menus: Play, Shuffle, Instant Mix, Play Next, Add to Queue, Add to Playlist…
+- Emby playlists: Playlists tab in music libraries, playlist page (play, shuffle, reorder, remove), Add-to-playlist dialog with "New playlist".
+- MPRIS: desktop media controls and media keys.
+- Black-bar fill in the player: Off / Blurred picture / Edge glow, for side and top/bottom bars (e.g. 1920×1200 handhelds); subtitles stay inside the picture.
+- Picture menu: aspect (Fit, Fill, Stretch, 16:9, 4:3, 21:9) and zoom, remembered per title.
+- Volume pop-up when the volume changes (keyboard or controller).
+- TV Suggestions built from your library: "Because you watched …" and "More {genre}".
+- Placeholder icons per item type for items without artwork.
+- Theme setting: Follow system / Light / Dark (default Dark).
+- App version shown in the Preferences header.
+- Search starts in Home's header; Enter or the search button opens the results, with the cursor on the first result.
+- Controller: Left/Right change settings in Preferences (options, numbers, switches, sliders); A steps through a setting's options.
+- Seek-bar preview: the frame at that point (Emby's trickplay thumbnails, else chapter images), chapter name and time, on hover, drag and controller/keyboard seeks.
+- Controller: Start in the player moves through the OSD buttons (D-pad/stick to move, A to press or open a menu, B or Start to leave); the OSD stays up meanwhile.
+- Preferences: trailer quality (best available by default, or capped at 4K/1440p/1080p/720p) and trailer captions in your subtitle language (on by default).
+
+### Changed
+- HDR titles start with SVP off unless turned on for that title.
+- In Steam Game Mode, SVP Manager runs inside a headless gamescope so it no longer steals focus.
+- Controller focus ring is thicker and in the accent colour; focused cards also highlight their title.
+- Series pages put the cursor on episode 1 (or the episode you last opened) so the controller starts there.
+
+### Fixed
+- The AppImage showed a light theme on Steam Deck.
+- Controller: a second press of a player button (e.g. Y for subtitles) closed the menu by going Home; player menus now keep the controller inside the player.
+- YouTube trailers failed with "Requested format is not available"; they now play as separate video and audio streams.
+
 ## [0.5.0] — 2026-10-02
 
 ### Added

@@ -18,7 +18,7 @@ fn dir() -> Option<PathBuf> {
 }
 
 /// Cache file for an image URL (full URL, so different servers never mix).
-fn file_for(url: &str) -> Option<PathBuf> {
+pub fn file_for(url: &str) -> Option<PathBuf> {
     let mut hasher = DefaultHasher::new();
     url.hash(&mut hasher);
     Some(dir()?.join(format!("{:016x}", hasher.finish())))

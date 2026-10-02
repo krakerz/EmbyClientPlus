@@ -4,7 +4,10 @@
 use adw::prelude::*;
 use gtk::{gio, glib};
 
-use crate::config::{DEFAULT_SVP_SOCKET, EpisodeArt, FrameGenBackend, FullscreenMode, Settings};
+use crate::config::{
+    DEFAULT_SVP_SOCKET, EpisodeArt, FrameGenBackend, FullscreenMode, Settings, Theme,
+    TrailerQuality,
+};
 use crate::controller::{self, Action, Context};
 use crate::db::Db;
 use crate::playback::tracks::normalize_language;
@@ -32,12 +35,13 @@ const LANGUAGES: [(&str, &str); 16] = [
 
 pub fn show(parent: &impl IsA<gtk::Widget>) {
     let settings = Settings::load().unwrap_or_default();
-    let dialog = adw::PreferencesDialog::new();
+    // A plain dialog rather than AdwPreferencesDialog, whose header has no
+    // room for the version label.
+    let toasts = adw::ToastOverlay::new();
     let page = adw::PreferencesPage::builder()
         .title("General")
         .icon_name(crate::ui::icons::SETTINGS)
         .build();
-    dialog.add(&page);
 
     // Playback.
     let playback = adw::PreferencesGroup::builder()
@@ -110,6 +114,35 @@ pub fn show(parent: &impl IsA<gtk::Widget>) {
         save(|s| s.playback.use_mpv_conf = on);
     });
     playback.add(&mpv_conf);
+
+    let trailer_labels: Vec<&str> = TrailerQuality::ALL.iter().map(|q| q.label()).collect();
+    let trailer_quality = adw::ComboRow::builder()
+        .title("Trailer quality")
+        .subtitle("For web trailers (YouTube); needs yt-dlp")
+        .model(&gtk::StringList::new(&trailer_labels))
+        .build();
+    trailer_quality.set_selected(
+        TrailerQuality::ALL
+            .iter()
+            .position(|q| *q == settings.playback.trailer_quality)
+            .unwrap_or(0) as u32,
+    );
+    trailer_quality.connect_selected_notify(|row| {
+        if let Some(&chosen) = TrailerQuality::ALL.get(row.selected() as usize) {
+            save(|s| s.playback.trailer_quality = chosen);
+        }
+    });
+    playback.add(&trailer_quality);
+    let trailer_captions = adw::SwitchRow::builder()
+        .title("Trailer captions")
+        .subtitle("Shows web trailers' captions in your subtitle language, when they have them")
+        .active(settings.playback.trailer_captions)
+        .build();
+    trailer_captions.connect_active_notify(|row| {
+        let on = row.is_active();
+        save(|s| s.playback.trailer_captions = on);
+    });
+    playback.add(&trailer_captions);
     page.add(&playback);
 
     // Display.
@@ -149,6 +182,25 @@ pub fn show(parent: &impl IsA<gtk::Widget>) {
         };
         save(|s| s.window.fullscreen = mode);
     });
+    let theme = adw::ComboRow::builder()
+        .title("Theme")
+        .model(&gtk::StringList::new(&["Follow system", "Light", "Dark"]))
+        .selected(match settings.window.theme {
+            Theme::System => 0,
+            Theme::Light => 1,
+            Theme::Dark => 2,
+        })
+        .build();
+    theme.connect_selected_notify(|row| {
+        let theme = match row.selected() {
+            0 => Theme::System,
+            1 => Theme::Light,
+            _ => Theme::Dark,
+        };
+        super::window::apply_theme(theme);
+        save(|s| s.window.theme = theme);
+    });
+    display.add(&theme);
     display.add(&width);
     display.add(&height);
     display.add(&fullscreen);
@@ -212,7 +264,7 @@ pub fn show(parent: &impl IsA<gtk::Widget>) {
         .build();
     forget_button.connect_clicked(glib::clone!(
         #[weak]
-        dialog,
+        toasts,
         move |_| {
             let message = match Db::open_default().and_then(|db| db.clear_overrides()) {
                 Ok(0) => "Nothing was remembered".to_string(),
@@ -223,7 +275,7 @@ pub fn show(parent: &impl IsA<gtk::Widget>) {
                     format!("Couldn't clear them: {e}")
                 }
             };
-            dialog.add_toast(
+            toasts.add_toast(
                 adw::Toast::builder()
                     .title(glib::markup_escape_text(&message))
                     .timeout(crate::ui::TOAST_SECONDS)
@@ -261,9 +313,49 @@ pub fn show(parent: &impl IsA<gtk::Widget>) {
         diagnostics.add(&row);
     }
     page.add(&diagnostics);
-    page.add(&super::updates::preferences_group(&dialog));
+    page.add(&super::updates::preferences_group(&toasts));
 
-    dialog.add(&controller_page());
+    let stack = adw::ViewStack::new();
+    stack.add_titled_with_icon(
+        &page,
+        Some("general"),
+        "General",
+        crate::ui::icons::SETTINGS,
+    );
+    stack.add_titled_with_icon(
+        &controller_page(),
+        Some("controller"),
+        "Controller",
+        crate::ui::icons::CONTROLLER,
+    );
+    let header = adw::HeaderBar::builder()
+        .title_widget(
+            &adw::ViewSwitcher::builder()
+                .stack(&stack)
+                .policy(adw::ViewSwitcherPolicy::Wide)
+                .build(),
+        )
+        .build();
+    header.pack_start(
+        &gtk::Label::builder()
+            .label(format!(
+                "EmbyClientPlus {}",
+                crate::update::current_version()
+            ))
+            .margin_start(6)
+            .css_classes(["dim-label", "caption-heading"])
+            .build(),
+    );
+    let toolbar = adw::ToolbarView::new();
+    toolbar.add_top_bar(&header);
+    toolbar.set_content(Some(&stack));
+    toasts.set_child(Some(&toolbar));
+    let dialog = adw::Dialog::builder()
+        .title("Preferences")
+        .content_width(680)
+        .content_height(820)
+        .child(&toasts)
+        .build();
     dialog.present(Some(parent));
 }
 
