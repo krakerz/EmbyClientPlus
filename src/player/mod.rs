@@ -1,3 +1,4 @@
+pub mod user_config;
 pub mod video_area;
 
 use std::sync::OnceLock;
@@ -5,10 +6,6 @@ use std::sync::OnceLock;
 use anyhow::{Result, anyhow};
 use libmpv2::events::{Event, PropertyData};
 use libmpv2::{EndFileReason, Format, Mpv};
-
-/// Fixed path SVP Manager looks for (see `~/SVP4/mpv/mpv.conf`); it attaches
-/// here and injects its vapoursynth filter over JSON IPC.
-const SVP_IPC_SOCKET: &str = "/tmp/mpvsocket";
 
 /// Label SVP Manager gives the vapoursynth filter it adds.
 const SVP_FILTER_LABEL: &str = "@svp";
@@ -54,6 +51,9 @@ pub enum PlayerEvent {
     Finished(EndFileReason),
 }
 
+/// Mirrors whether frame blending is on, since mpv keeps it across files.
+static SMOOTH_MOTION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 static EVENT_HANDLER: OnceLock<Box<dyn Fn(PlayerEvent) + Send + Sync>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,10 +90,16 @@ pub struct Player {
 impl Player {
     /// Must run after GTK init: GTK applies the user's locale, and libmpv
     /// refuses to initialize unless LC_NUMERIC is "C".
-    pub fn new() -> Result<Self> {
+    /// `config_dir`: an mpv config directory to load (the user's mpv.conf,
+    /// filtered; see `user_config`), or `None` for mpv's defaults only.
+    pub fn new(config_dir: Option<&std::path::Path>) -> Result<Self> {
         // SAFETY: called on the GTK main thread before any mpv threads exist.
         unsafe { libc::setlocale(libc::LC_NUMERIC, c"C".as_ptr()) };
         let mpv = Mpv::with_initializer(|init| {
+            if let Some(dir) = config_dir {
+                init.set_property("config-dir", dir.to_string_lossy().as_ref())?;
+                init.set_property("config", "yes")?;
+            }
             // Render-API output only; without this mpv may open its own window.
             init.set_property("vo", "libmpv")?;
             // mpv's messages go through `tracing` (and the log file) instead.
@@ -285,18 +291,47 @@ impl Player {
         }
     }
 
-    /// Exposes (or closes) the socket SVP Manager attaches to. Turning it
-    /// off also drops the filter SVP already added; turning it on lets SVP
-    /// Manager find us again.
-    pub fn set_svp(self, enabled: bool) -> Result<()> {
+    /// Exposes (or closes) `socket`, the IPC path SVP Manager attaches to
+    /// (its default is /tmp/mpvsocket). Turning it off also drops the
+    /// filter SVP already added; turning it on lets SVP Manager find us.
+    pub fn set_svp(self, socket: &str, enabled: bool) -> Result<()> {
         if enabled {
-            self.set("input-ipc-server", SVP_IPC_SOCKET)
+            self.set("input-ipc-server", socket)
         } else {
+            // Clearing the option only closes the listening socket; mpv
+            // keeps serving clients already connected, so SVP Manager
+            // would stay attached and re-add its filter on the next file.
             self.set("input-ipc-server", "")?;
+            let dropped = disconnect_ipc_clients(socket);
+            if dropped > 0 {
+                tracing::info!("disconnected {dropped} SVP client(s)");
+            }
             // Not an error when SVP never attached.
             let _ = self.command("vf", &["remove", SVP_FILTER_LABEL]);
             Ok(())
         }
+    }
+
+    /// Whether `set_smooth_motion(true)` is in effect.
+    pub fn smooth_motion(self) -> bool {
+        SMOOTH_MOTION.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// mpv's own frame blending to the display rate: smoother motion than
+    /// plain playback, though not real interpolation like SVP.
+    pub fn set_smooth_motion(self, enabled: bool) -> Result<()> {
+        SMOOTH_MOTION.store(enabled, std::sync::atomic::Ordering::Relaxed);
+        let (interpolation, video_sync) = if enabled {
+            ("yes", "display-resample")
+        } else {
+            ("no", "audio")
+        };
+        self.set("interpolation", interpolation)?;
+        self.set("video-sync", video_sync)?;
+        if enabled {
+            self.set("tscale", "oversample")?;
+        }
+        Ok(())
     }
 
     /// Whether SVP Manager has added its filter to this playback.
@@ -321,6 +356,40 @@ impl Player {
             .command(name, args)
             .map_err(|e| anyhow!("mpv command {name} failed: {e:?}"))
     }
+}
+
+/// Shuts down every socket in this process whose local address is
+/// `path`: the IPC connections mpv accepted on it. mpv's client thread
+/// then sees EOF and drops the client. Returns how many were shut down.
+fn disconnect_ipc_clients(path: &str) -> usize {
+    let Ok(fds) = std::fs::read_dir("/proc/self/fd") else {
+        return 0;
+    };
+    fds.filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<libc::c_int>().ok())
+        .filter(|&fd| unix_socket_path(fd).as_deref() == Some(path))
+        // SAFETY: shutdown on a socket fd we own; mpv's thread still owns
+        // closing it, which shutdown doesn't do.
+        .filter(|&fd| unsafe { libc::shutdown(fd, libc::SHUT_RDWR) } == 0)
+        .count()
+}
+
+/// The local path of a Unix socket fd, if it is one.
+fn unix_socket_path(fd: libc::c_int) -> Option<String> {
+    // SAFETY: zeroed sockaddr_un is valid; getsockname writes at most `len` bytes.
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+    let status = unsafe { libc::getsockname(fd, (&raw mut addr).cast(), &mut len) };
+    if status != 0 || addr.sun_family != libc::AF_UNIX as libc::sa_family_t {
+        return None;
+    }
+    let bytes: Vec<u8> = addr
+        .sun_path
+        .iter()
+        .take_while(|&&c| c != 0)
+        .map(|&c| c as u8)
+        .collect();
+    String::from_utf8(bytes).ok()
 }
 
 /// Per-file `loadfile` options. Values use mpv's `%len%` quoting, since
@@ -421,6 +490,24 @@ fn padding_zoom(source: (f64, f64), output: (f64, f64), window: (f64, f64)) -> f
 mod tests {
     use super::{PlayerEvent, file_options, padding_zoom, property_event};
     use libmpv2::events::PropertyData;
+
+    #[test]
+    fn finds_and_disconnects_unix_sockets_by_path() {
+        use std::os::unix::net::{UnixListener, UnixStream};
+        let path = std::env::temp_dir().join(format!("embyclientplus-ipc-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let client = UnixStream::connect(&path).unwrap();
+        let (accepted, _) = listener.accept().unwrap();
+        drop(listener);
+        let dropped = super::disconnect_ipc_clients(path.to_str().unwrap());
+        assert_eq!(dropped, 1);
+        // The far end sees EOF.
+        let mut buf = [0u8; 1];
+        assert_eq!(std::io::Read::read(&mut &client, &mut buf).unwrap(), 0);
+        drop(accepted);
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn file_options_quote_subtitle_urls() {

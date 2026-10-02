@@ -1,9 +1,15 @@
 //! The browse UI: one `Ui` per logged-in session, owning the navigation
 //! stack that Home, Library, Series, Details, Search and the player live in.
 
+mod album;
 mod card;
+mod category_tile;
 mod details;
+mod favorites;
+mod gamepad;
+mod hero;
 mod home;
+pub mod icons;
 mod image_disk_cache;
 mod images;
 mod library;
@@ -14,6 +20,7 @@ mod preferences;
 mod rows;
 mod search;
 mod series;
+mod updates;
 pub mod window;
 
 use std::cell::{Cell, RefCell};
@@ -21,7 +28,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use adw::prelude::*;
-use gtk::glib;
+use gtk::{gio, glib};
 
 use crate::config::Settings;
 use crate::emby::EmbyClient;
@@ -29,6 +36,9 @@ use crate::emby::models::BaseItem;
 use crate::playback::{PlaybackSession, Quality};
 use crate::player::Player;
 use player_page::{Handlers, PlayerPage};
+
+/// How long notices stay on screen.
+pub const TOAST_SECONDS: u32 = 3;
 
 /// An authenticated connection to the server, shared by every page.
 #[derive(Clone)]
@@ -49,9 +59,13 @@ struct Inner {
     player: Player,
     player_page: PlayerPage,
     playback: RefCell<Option<Rc<PlaybackSession>>>,
-    /// Bumped whenever playback stops, so pages that show watch state know
-    /// to reload when they come back into view.
-    playback_generation: Cell<u64>,
+    /// Bumped whenever watch state may have changed (playback stopped, an
+    /// item marked watched or favourite), so pages showing it reload.
+    data_generation: Cell<u64>,
+    /// Each page's reload hook, so the visible one refreshes at once.
+    reloaders: RefCell<Vec<Reloader>>,
+    /// A web link (trailer) is playing outside any Emby session.
+    playing_link: Cell<bool>,
     on_logout: Box<dyn Fn(bool)>,
 }
 
@@ -73,11 +87,25 @@ impl Ui {
                 player,
                 player_page,
                 playback: RefCell::new(None),
-                playback_generation: Cell::new(0),
+                data_generation: Cell::new(0),
+                reloaders: RefCell::new(Vec::new()),
+                playing_link: Cell::new(false),
                 on_logout: Box::new(on_logout),
             }),
         };
         ui.inner.nav.add(&home::page(&ui));
+
+        // `nav.home` is reachable from every page's header (see `add_home_button`).
+        let actions = gio::SimpleActionGroup::new();
+        let home = gio::SimpleAction::new("home", None);
+        let nav = ui.inner.nav.downgrade();
+        home.connect_activate(move |_, _| {
+            if let Some(nav) = nav.upgrade() {
+                nav.pop_to_tag("home");
+            }
+        });
+        actions.add_action(&home);
+        ui.inner.nav.insert_action_group("nav", Some(&actions));
         ui
     }
 
@@ -98,7 +126,12 @@ impl Ui {
     }
 
     pub fn toast(&self, message: &str) {
-        self.inner.toasts.add_toast(adw::Toast::new(message));
+        self.inner.toasts.add_toast(
+            adw::Toast::builder()
+                .title(glib::markup_escape_text(message))
+                .timeout(TOAST_SECONDS)
+                .build(),
+        );
     }
 
     /// Reports a failed request: an expired token logs out, anything else
@@ -123,8 +156,35 @@ impl Ui {
     /// Opens whatever page fits the item: series overview, playable item
     /// details, or a folder/library listing.
     pub fn open(&self, item: &BaseItem) {
+        // A song card plays right away (with its album as the queue).
+        if item.is_audio() {
+            return self.play(item, 0);
+        }
+        self.push(&self.page_for(item));
+    }
+
+    /// Like [`open`](Self::open), but swaps out the current page, so
+    /// stepping episode to episode doesn't pile up the back stack.
+    pub fn open_replacing(&self, item: &BaseItem) {
+        let nav = &self.inner.nav;
+        let stack = nav.navigation_stack();
+        let mut pages: Vec<adw::NavigationPage> = (0..stack.n_items())
+            .filter_map(|i| stack.item(i).and_downcast())
+            .collect();
+        if pages.len() < 2 {
+            return self.open(item);
+        }
+        pages.pop();
+        pages.push(self.page_for(item));
+        nav.replace(&pages);
+    }
+
+    fn page_for(&self, item: &BaseItem) -> adw::NavigationPage {
         match item.item_type.as_str() {
-            "Series" => self.push(&series::page(self, item)),
+            "Series" => series::page(self, item),
+            "Person" => library_page::person(self, item),
+            "MusicAlbum" => album::page(self, item),
+            "MusicArtist" => library_page::artist(self, item),
             "Season" => match &item.series_id {
                 Some(series_id) => {
                     let series = BaseItem {
@@ -133,12 +193,12 @@ impl Ui {
                         item_type: "Series".into(),
                         ..Default::default()
                     };
-                    self.push(&series::page(self, &series));
+                    series::page(self, &series)
                 }
-                None => self.push(&library_page::page(self, item)),
+                None => library_page::page(self, item),
             },
-            _ if item.is_playable() => self.push(&details::page(self, item)),
-            _ => self.push(&library_page::page(self, item)),
+            _ if item.is_playable() => details::page(self, item),
+            _ => library_page::page(self, item),
         }
     }
 
@@ -146,8 +206,73 @@ impl Ui {
         self.push(&search::page(self));
     }
 
-    pub fn playback_generation(&self) -> u64 {
-        self.inner.playback_generation.get()
+    pub fn open_favorites(&self) {
+        self.push(&favorites::page(self));
+    }
+
+    pub fn data_generation(&self) -> u64 {
+        self.inner.data_generation.get()
+    }
+
+    /// Watch state changed: reload the visible page now; the others reload
+    /// when they're shown again.
+    pub fn data_changed(&self) {
+        let generation = self.inner.data_generation.get() + 1;
+        self.inner.data_generation.set(generation);
+        let visible = self.inner.nav.visible_page();
+        let reloaders: Vec<Reloader> = {
+            let mut list = self.inner.reloaders.borrow_mut();
+            list.retain(|r| r.page.upgrade().is_some());
+            list.clone()
+        };
+        for reloader in reloaders {
+            if reloader.page.upgrade() == visible {
+                reloader.seen.set(generation);
+                (reloader.reload)();
+            }
+        }
+    }
+
+    /// Marks `item` watched/unwatched on the server, then refreshes.
+    pub fn set_played(&self, item: &BaseItem, played: bool) {
+        let (client, user_id, id) = (self.client(), self.user_id(), item.id.clone());
+        self.update_item(
+            async move { client.set_played(&user_id, &id, played).await },
+            if played {
+                "Marked as watched"
+            } else {
+                "Marked as unwatched"
+            },
+        );
+    }
+
+    pub fn set_favorite(&self, item: &BaseItem, favorite: bool) {
+        let (client, user_id, id) = (self.client(), self.user_id(), item.id.clone());
+        self.update_item(
+            async move { client.set_favorite(&user_id, &id, favorite).await },
+            if favorite {
+                "Added to favourites"
+            } else {
+                "Removed from favourites"
+            },
+        );
+    }
+
+    fn update_item(
+        &self,
+        request: impl std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+        done: &'static str,
+    ) {
+        let ui = self.clone();
+        glib::spawn_future_local(async move {
+            match crate::runtime::spawn_tokio(request).await {
+                Ok(()) => {
+                    ui.toast(done);
+                    ui.data_changed();
+                }
+                Err(e) => ui.report_error("Couldn't update the item", &e),
+            }
+        });
     }
 
     /// Plays `item` from `start_ticks` in the player page.
@@ -201,6 +326,13 @@ impl Ui {
                 Ok(session) => {
                     ui.inner.playback.replace(Some(session.clone()));
                     ui.inner.player_page.attach(session, &ui.client());
+                }
+                Err(e) if e.downcast_ref::<crate::remote::NeedsYtDlp>().is_some() => {
+                    ui.open_in_browser(
+                        e.downcast_ref::<crate::remote::NeedsYtDlp>()
+                            .map(|n| n.0.clone()),
+                    );
+                    ui.inner.nav.pop();
                 }
                 Err(e) if quality != Quality::Original => {
                     tracing::warn!("transcode failed: {e:#}");
@@ -256,6 +388,56 @@ impl Ui {
         self.play_with(&item, position, quality, audio);
     }
 
+    /// Plays a web link (a movie's YouTube trailer) without an Emby session.
+    pub fn play_link(&self, title: &str, url: &str) {
+        self.stop_playback();
+        let item = BaseItem {
+            name: title.to_string(),
+            item_type: "Trailer".into(),
+            ..Default::default()
+        };
+        let page = &self.inner.player_page;
+        page.prepare(&item, Quality::Original, self.player_handlers());
+        if self.inner.nav.visible_page().as_ref() != Some(page.page()) {
+            self.push(page.page());
+        }
+        let ui = self.clone();
+        let url = url.to_string();
+        glib::spawn_future_local(async move {
+            let link = url.clone();
+            let resolved = crate::runtime::spawn_tokio(async move {
+                tokio::task::spawn_blocking(move || crate::remote::resolve(&link)).await?
+            })
+            .await;
+            match resolved {
+                Ok(stream) => match ui.inner.player.load_at(&stream, 0.0, &[]) {
+                    Ok(()) => ui.inner.playing_link.set(true),
+                    Err(e) => {
+                        ui.report_error("Playback failed", &e);
+                        ui.inner.nav.pop();
+                    }
+                },
+                Err(e) if e.downcast_ref::<crate::remote::NeedsYtDlp>().is_some() => {
+                    ui.open_in_browser(Some(url));
+                    ui.inner.nav.pop();
+                }
+                Err(e) => {
+                    ui.report_error("Playback failed", &e);
+                    ui.inner.nav.pop();
+                }
+            }
+        });
+    }
+
+    /// Falls back to the browser for links mpv can't open without yt-dlp.
+    fn open_in_browser(&self, url: Option<String>) {
+        let Some(url) = url else { return };
+        match gio::AppInfo::launch_default_for_uri(&url, None::<&gio::AppLaunchContext>) {
+            Ok(()) => self.toast("Opened in your browser; install yt-dlp to play trailers here"),
+            Err(e) => self.toast(&format!("Couldn't open {url}: {e}")),
+        }
+    }
+
     /// Stops playback and waits briefly for Emby to get the final
     /// position, for window close.
     pub fn stop_playback_and_wait(&self) {
@@ -266,24 +448,61 @@ impl Ui {
 
     /// Stops the current playback session, if any, and reports it.
     pub fn stop_playback(&self) {
+        if self.inner.playing_link.replace(false)
+            && let Err(e) = self.inner.player.stop()
+        {
+            tracing::warn!("{e:#}");
+        }
         if let Some(session) = self.inner.playback.take() {
             session.stop();
-            let generation = &self.inner.playback_generation;
+            let generation = &self.inner.data_generation;
             generation.set(generation.get() + 1);
         }
     }
 }
 
-/// Re-runs `reload` whenever `page` is shown again after a playback ended,
-/// so resume positions and watched marks stay current.
-fn reload_after_playback(ui: &Ui, page: &adw::NavigationPage, reload: impl Fn() + 'static) {
-    let seen = Cell::new(ui.playback_generation());
+#[derive(Clone)]
+struct Reloader {
+    page: glib::WeakRef<adw::NavigationPage>,
+    reload: Rc<dyn Fn()>,
+    /// The data generation this page last loaded at.
+    seen: Rc<Cell<u64>>,
+}
+
+/// Like [`reload_on_change`], but also reloads every time `page` comes
+/// back into view (Home: something new may have been added or watched).
+fn reload_on_show(ui: &Ui, page: &adw::NavigationPage, reload: impl Fn() + 'static) {
+    let reload = Rc::new(reload);
+    let reloader = Reloader {
+        page: page.downgrade(),
+        reload: reload.clone(),
+        seen: Rc::new(Cell::new(ui.data_generation())),
+    };
+    ui.inner.reloaders.borrow_mut().push(reloader);
+    // The first showing is the page's initial load, done by its builder.
+    let first = Cell::new(true);
+    page.connect_showing(move |_| {
+        if !first.replace(false) {
+            reload();
+        }
+    });
+}
+
+/// Re-runs `reload` when watch state changed: immediately if `page` is
+/// visible, otherwise when it's shown again (e.g. after playback).
+fn reload_on_change(ui: &Ui, page: &adw::NavigationPage, reload: impl Fn() + 'static) {
+    let reloader = Reloader {
+        page: page.downgrade(),
+        reload: Rc::new(reload),
+        seen: Rc::new(Cell::new(ui.data_generation())),
+    };
+    ui.inner.reloaders.borrow_mut().push(reloader.clone());
     let ui = ui.downgrade();
     page.connect_showing(move |_| {
         if let Some(ui) = ui.upgrade() {
-            let generation = ui.playback_generation();
-            if seen.replace(generation) != generation {
-                reload();
+            let generation = ui.data_generation();
+            if reloader.seen.replace(generation) != generation {
+                (reloader.reload)();
             }
         }
     });
@@ -317,6 +536,9 @@ fn scrolled_page(
         .child(content)
         .vexpand(true)
         .build();
+    if tag != Some("home") {
+        add_home_button(header);
+    }
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(header);
     toolbar.set_content(Some(&scrolled));
@@ -325,6 +547,150 @@ fn scrolled_page(
         page.set_tag(Some(tag));
     }
     page
+}
+
+const TAB_STEP_KEY: &str = "embyclientplus-tab-step";
+const MENU_KEY: &str = "embyclientplus-card-menu";
+
+type Hook<T> = Rc<dyn Fn(T)>;
+
+/// Lets the controller's previous/next-tab buttons step through `page`'s
+/// tabs or seasons.
+fn set_tab_stepper(page: &adw::NavigationPage, step: impl Fn(bool) + 'static) {
+    let hook: Hook<bool> = Rc::new(step);
+    // SAFETY: this key is only ever stored and read as `Hook<bool>`.
+    unsafe { page.set_data(TAB_STEP_KEY, hook) };
+}
+
+fn tab_stepper(page: &adw::NavigationPage) -> Option<Hook<bool>> {
+    // SAFETY: see `set_tab_stepper`; cloned out immediately.
+    unsafe {
+        page.data::<Hook<bool>>(TAB_STEP_KEY)
+            .map(|hook| hook.as_ref().clone())
+    }
+}
+
+/// Lets the controller's menu button open a card's context menu.
+fn set_menu_opener(widget: &gtk::Widget, open: impl Fn(()) + 'static) {
+    let hook: Hook<()> = Rc::new(open);
+    // SAFETY: this key is only ever stored and read as `Hook<()>`.
+    unsafe { widget.set_data(MENU_KEY, hook) };
+}
+
+fn menu_opener(widget: &gtk::Widget) -> Option<Hook<()>> {
+    // SAFETY: see `set_menu_opener`; cloned out immediately.
+    unsafe {
+        widget
+            .data::<Hook<()>>(MENU_KEY)
+            .map(|hook| hook.as_ref().clone())
+    }
+}
+
+impl Ui {
+    pub fn nav(&self) -> &adw::NavigationView {
+        &self.inner.nav
+    }
+
+    pub fn player_visible(&self) -> bool {
+        self.inner.nav.visible_page().as_ref() == Some(self.inner.player_page.page())
+    }
+
+    pub fn player_page(&self) -> &PlayerPage {
+        &self.inner.player_page
+    }
+
+    /// Steps the visible page's tabs/seasons, if it has any.
+    pub fn step_tabs(&self, forward: bool) {
+        if let Some(page) = self.inner.nav.visible_page()
+            && let Some(step) = tab_stepper(&page)
+        {
+            step(forward);
+        }
+    }
+}
+
+/// Opens the context menu of the card `widget` belongs to, if any.
+pub fn open_card_menu(widget: &gtk::Widget) -> bool {
+    // The focus may be the grid cell around the card, or inside the card.
+    let mut candidates = vec![widget.clone()];
+    let mut child = widget.first_child();
+    for _ in 0..2 {
+        if let Some(c) = child {
+            candidates.push(c.clone());
+            child = c.first_child();
+        }
+    }
+    let mut ancestor = widget.parent();
+    while let Some(a) = ancestor {
+        candidates.push(a.clone());
+        ancestor = a.parent();
+    }
+    for candidate in candidates {
+        if let Some(open) = menu_opener(&candidate) {
+            open(());
+            return true;
+        }
+    }
+    false
+}
+
+/// A Home button beside the header's back button, so a deep trail of pages
+/// doesn't have to be walked back one by one.
+fn add_home_button(header: &adw::HeaderBar) {
+    header.pack_start(
+        &gtk::Button::builder()
+            .icon_name(crate::ui::icons::HOME)
+            .tooltip_text("Home")
+            .action_name("nav.home")
+            .build(),
+    );
+}
+
+/// Height of the fan-art banner on series and details pages.
+const BANNER_HEIGHT: i32 = 360;
+
+/// Pins `picture` to exactly `width`×`height`. A `gtk::Picture` reports
+/// its image's own size as its natural size, so without a cap the layout
+/// grows it to whatever resolution the server sent.
+fn fixed_picture(picture: &gtk::Picture, width: i32, height: i32) -> adw::Clamp {
+    picture.set_size_request(width, height);
+    let clamp = |orientation, size, child: &gtk::Widget| {
+        adw::Clamp::builder()
+            .orientation(orientation)
+            .maximum_size(size)
+            .tightening_threshold(size)
+            .child(child)
+            .build()
+    };
+    let horizontal = clamp(gtk::Orientation::Horizontal, width, picture.upcast_ref());
+    clamp(gtk::Orientation::Vertical, height, horizontal.upcast_ref())
+}
+
+/// The picture inside a [`fixed_picture`] wrapper.
+fn fixed_picture_child(wrapper: &gtk::Widget) -> Option<gtk::Picture> {
+    wrapper
+        .downcast_ref::<adw::Clamp>()?
+        .child()?
+        .downcast_ref::<adw::Clamp>()?
+        .child()?
+        .downcast()
+        .ok()
+}
+
+/// A full-width fan-art banner of fixed height.
+fn banner() -> (gtk::Picture, adw::Clamp) {
+    let picture = gtk::Picture::builder()
+        .content_fit(gtk::ContentFit::Cover)
+        .height_request(BANNER_HEIGHT)
+        .hexpand(true)
+        .build();
+    let clamp = adw::Clamp::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .maximum_size(BANNER_HEIGHT)
+        .tightening_threshold(BANNER_HEIGHT)
+        .child(&picture)
+        .build();
+    (picture, clamp)
 }
 
 /// Centered spinner shown while a page's first request is in flight.

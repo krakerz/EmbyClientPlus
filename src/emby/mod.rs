@@ -139,6 +139,18 @@ impl EmbyClient {
         Ok(())
     }
 
+    async fn delete(&self, path: &str) -> Result<()> {
+        self.http
+            .delete(self.url(path))
+            .headers(self.headers()?)
+            .send()
+            .await
+            .with_context(|| format!("DELETE {path} failed"))?
+            .error_for_status()
+            .with_context(|| format!("DELETE {path} returned an error status"))?;
+        Ok(())
+    }
+
     /// Raw response body, e.g. image bytes.
     pub async fn fetch_bytes(&self, path: &str) -> Result<Vec<u8>> {
         let response = self

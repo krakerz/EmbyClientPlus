@@ -38,6 +38,18 @@ const CSS: &str = "
 .svp-active { color: @success_color; }
 .svp-waiting { color: @warning_color; }
 .svp-missing { color: @error_color; }
+.person-card { border-radius: 999px; }
+.category-tile { border-radius: 14px; }
+.tile-shade {
+    background: linear-gradient(to top, rgba(0, 0, 0, 0.85), rgba(0, 0, 0, 0) 70%);
+}
+.tile-name {
+    color: white;
+    font-weight: 800;
+    font-size: 1.35em;
+}
+.tile-count { color: rgba(255, 255, 255, 0.75); }
+flowboxchild:focus-visible .category-tile { outline: 3px solid @accent_color; outline-offset: 2px; }
 .watched-badge {
     background: alpha(@accent_bg_color, 0.9);
     color: @accent_fg_color;
@@ -63,13 +75,20 @@ pub fn build(app: &adw::Application, player: Player) -> adw::ApplicationWindow {
         .build();
     let toasts = adw::ToastOverlay::new();
     toasts.set_child(Some(&stack));
+    let window_settings = Settings::load().unwrap_or_default().window;
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("EmbyClientPlus")
-        .default_width(1280)
-        .default_height(800)
+        .default_width(window_settings.width.max(640))
+        .default_height(window_settings.height.max(400))
         .content(&toasts)
         .build();
+
+    // The window gets a real size first (above), so a cold-launch
+    // fullscreen in gamescope doesn't fall back to 800×600.
+    if window_settings.start_fullscreen(crate::gamescope::detected()) {
+        window.connect_map(|window| window.fullscreen());
+    }
 
     let settings = Settings::update(|settings| {
         settings.server.ensure_device_id();
@@ -95,6 +114,20 @@ pub fn build(app: &adw::Application, player: Player) -> adw::ApplicationWindow {
         None => show_login(&state, None),
     }
 
+    super::updates::check_on_startup(&state.toasts);
+
+    // Controller presses go to whatever is on screen.
+    crate::controller::start({
+        let state = Rc::downgrade(&state);
+        let window = window.downgrade();
+        move |pad| {
+            if let (Some(state), Some(window)) = (state.upgrade(), window.upgrade()) {
+                let ui = state.ui.borrow().clone();
+                super::gamepad::handle(&window, ui.as_ref(), pad);
+            }
+        }
+    });
+
     window.connect_close_request({
         let state = state.clone();
         move |_| {
@@ -104,6 +137,7 @@ pub fn build(app: &adw::Application, player: Player) -> adw::ApplicationWindow {
             if let Err(e) = player.quit() {
                 tracing::warn!("{e:#}");
             }
+            crate::svp::stop_started();
             glib::Propagation::Proceed
         }
     });
@@ -221,6 +255,16 @@ fn logout(state: &Rc<State>, expired: bool) {
     if let Some(child) = state.stack.child_by_name("main") {
         state.stack.remove(&child);
     }
+}
+
+/// Whether the app keeps the whole window fullscreen (gamescope with the
+/// default "auto" setting, or "always"), so the player never shrinks it.
+pub fn fullscreen_locked() -> bool {
+    crate::gamescope::detected()
+        && Settings::load()
+            .unwrap_or_default()
+            .window
+            .start_fullscreen(true)
 }
 
 fn replace_child(stack: &gtk::Stack, name: &str, child: &impl IsA<gtk::Widget>) {

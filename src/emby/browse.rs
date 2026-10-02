@@ -48,6 +48,10 @@ pub struct ItemQuery {
     pub filters: Vec<&'static str>,
     pub genre_id: Option<String>,
     pub tag_id: Option<String>,
+    pub person_id: Option<String>,
+    /// Only items that have these images, e.g. "Primary".
+    pub image_types: Option<&'static str>,
+    pub artist_id: Option<String>,
     pub start: usize,
     pub limit: usize,
 }
@@ -92,6 +96,15 @@ impl ItemQuery {
         }
         if let Some(tag_id) = &self.tag_id {
             params.push(("TagIds", tag_id.clone()));
+        }
+        if let Some(person_id) = &self.person_id {
+            params.push(("PersonIds", person_id.clone()));
+        }
+        if let Some(artist_id) = &self.artist_id {
+            params.push(("ArtistIds", artist_id.clone()));
+        }
+        if let Some(image_types) = self.image_types {
+            params.push(("ImageTypes", image_types.to_string()));
         }
         params
             .iter()
@@ -233,11 +246,74 @@ impl EmbyClient {
         Ok(result.items)
     }
 
+    /// One item with its cast (`People`).
     pub async fn item(&self, user_id: &str, item_id: &str) -> Result<BaseItem> {
         self.get(&format!(
-            "/emby/Users/{user_id}/Items/{item_id}?Fields={FIELDS}"
+            "/emby/Users/{user_id}/Items/{item_id}?Fields={FIELDS},People,RemoteTrailers,LocalTrailerCount"
         ))
         .await
+    }
+
+    /// A music library's album artists.
+    pub async fn album_artists(&self, user_id: &str, parent_id: &str) -> Result<Vec<BaseItem>> {
+        let result: QueryResult<BaseItem> = self
+            .get(&format!(
+                "/emby/Artists/AlbumArtists?UserId={user_id}&ParentId={parent_id}&SortBy=SortName&Fields={FIELDS}"
+            ))
+            .await?;
+        Ok(result.items)
+    }
+
+    /// An album's tracks in disc/track order.
+    pub async fn album_tracks(&self, user_id: &str, album_id: &str) -> Result<Vec<BaseItem>> {
+        let result: QueryResult<BaseItem> = self
+            .get(&format!(
+                "/emby/Users/{user_id}/Items?ParentId={album_id}&IncludeItemTypes=Audio&Recursive=true&SortBy=ParentIndexNumber,IndexNumber,SortName&Fields={FIELDS}"
+            ))
+            .await?;
+        Ok(result.items)
+    }
+
+    /// Trailer files stored alongside a movie.
+    pub async fn local_trailers(&self, user_id: &str, item_id: &str) -> Result<Vec<BaseItem>> {
+        self.get(&format!(
+            "/emby/Users/{user_id}/Items/{item_id}/LocalTrailers"
+        ))
+        .await
+    }
+
+    /// Titles Emby considers similar to `item_id`.
+    pub async fn similar(
+        &self,
+        user_id: &str,
+        item_id: &str,
+        limit: usize,
+    ) -> Result<Vec<BaseItem>> {
+        let result: QueryResult<BaseItem> = self
+            .get(&format!(
+                "/emby/Items/{item_id}/Similar?UserId={user_id}&Limit={limit}&Fields={FIELDS}"
+            ))
+            .await?;
+        Ok(result.items)
+    }
+
+    /// Marks an item (or every episode of a series/season) watched or not.
+    pub async fn set_played(&self, user_id: &str, item_id: &str, played: bool) -> Result<()> {
+        let path = format!("/emby/Users/{user_id}/PlayedItems/{item_id}");
+        if played {
+            self.post_empty(&path, &serde_json::json!({})).await
+        } else {
+            self.delete(&path).await
+        }
+    }
+
+    pub async fn set_favorite(&self, user_id: &str, item_id: &str, favorite: bool) -> Result<()> {
+        let path = format!("/emby/Users/{user_id}/FavoriteItems/{item_id}");
+        if favorite {
+            self.post_empty(&path, &serde_json::json!({})).await
+        } else {
+            self.delete(&path).await
+        }
     }
 
     /// Server-relative image path, resized server-side to `max_width`.
@@ -264,10 +340,14 @@ impl BaseItem {
             _ => None,
         };
         if self.item_type == "Episode" {
-            series.or(own)
-        } else {
-            own.or(series)
+            return series.or(own);
         }
+        // Tracks usually carry their album's cover rather than their own.
+        let album = match (&self.album_id, &self.album_primary_image_tag) {
+            (Some(album_id), Some(tag)) => Some(image(album_id, ImageKind::Primary, tag)),
+            _ => None,
+        };
+        own.or(series).or(album)
     }
 
     /// Wide fan art: the item's own, else its parent's (episodes/seasons).
@@ -282,6 +362,23 @@ impl BaseItem {
             (Some(parent_id), Some(tag)) => Some(image(parent_id, ImageKind::Backdrop, tag)),
             _ => None,
         }
+    }
+
+    /// 16:9 series art for an episode (no spoilers): the series thumb,
+    /// then its backdrop, then the episode's own landscape art.
+    pub fn series_landscape(&self) -> Option<ImageRef> {
+        if let (Some(parent_id), Some(tag)) =
+            (&self.parent_thumb_item_id, &self.parent_thumb_image_tag)
+        {
+            return Some(image(parent_id, ImageKind::Thumb, tag));
+        }
+        if let (Some(parent_id), Some(tag)) = (
+            &self.parent_backdrop_item_id,
+            self.parent_backdrop_image_tags.first(),
+        ) {
+            return Some(image(parent_id, ImageKind::Backdrop, tag));
+        }
+        self.landscape()
     }
 
     /// 16:9 card art. Episodes use their own still (their Primary image);
@@ -321,11 +418,35 @@ impl BaseItem {
         self.user_data.as_ref().is_some_and(|data| data.played)
     }
 
+    pub fn is_favorite(&self) -> bool {
+        self.user_data.as_ref().is_some_and(|data| data.is_favorite)
+    }
+
+    /// Containers whose cover may have to come from their contents.
+    pub fn is_folder(&self) -> bool {
+        matches!(
+            self.item_type.as_str(),
+            "Folder" | "CollectionFolder" | "BoxSet" | "UserView"
+        )
+    }
+
     pub fn is_playable(&self) -> bool {
         matches!(
             self.item_type.as_str(),
-            "Movie" | "Episode" | "Video" | "MusicVideo"
+            "Movie" | "Episode" | "Video" | "MusicVideo" | "Trailer" | "Audio"
         )
+    }
+
+    pub fn is_audio(&self) -> bool {
+        self.item_type == "Audio"
+    }
+
+    /// The first album artist, for album/track subtitles and links.
+    pub fn artist(&self) -> Option<&str> {
+        self.album_artist
+            .as_deref()
+            .or_else(|| self.album_artists.first().map(|a| a.name.as_str()))
+            .or_else(|| self.artist_items.first().map(|a| a.name.as_str()))
     }
 
     /// "S1:E4 · Name" for episodes, the plain name otherwise.
@@ -453,6 +574,27 @@ mod tests {
         assert_eq!(ep.landscape(), Some(image("ep", ImageKind::Primary, "own")));
         // Portrait slots still get the series poster, not the cropped still.
         assert_eq!(ep.poster(), Some(image("series", ImageKind::Primary, "sp")));
+    }
+
+    #[test]
+    fn series_art_skips_the_episode_still() {
+        let mut ep = episode();
+        ep.image_tags.insert("Primary".into(), "still".into());
+        // No series thumb: falls back to the series backdrop.
+        assert_eq!(
+            ep.series_landscape(),
+            Some(image("series", ImageKind::Backdrop, "sb"))
+        );
+        ep.parent_thumb_item_id = Some("series".into());
+        ep.parent_thumb_image_tag = Some("st".into());
+        assert_eq!(
+            ep.series_landscape(),
+            Some(image("series", ImageKind::Thumb, "st"))
+        );
+        assert_eq!(
+            ep.landscape(),
+            Some(image("ep", ImageKind::Primary, "still"))
+        );
     }
 
     #[test]

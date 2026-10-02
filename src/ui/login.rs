@@ -56,7 +56,7 @@ impl LoginPage {
         form.append(&group);
         form.append(&actions);
         let status = adw::StatusPage::builder()
-            .icon_name("video-display-symbolic")
+            .icon_name(crate::ui::icons::DISPLAY)
             .title("EmbyClientPlus")
             .description("Sign in to your Emby server")
             .child(&adw::Clamp::builder().maximum_size(420).child(&form).build())

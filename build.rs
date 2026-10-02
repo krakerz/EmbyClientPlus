@@ -1,8 +1,35 @@
 use std::path::PathBuf;
 
+/// Embeds data/icons/*.svg (see scripts/update-icons.sh) as a table the
+/// app installs into its icon theme at startup.
+fn embed_icons() {
+    let dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("data/icons");
+    println!("cargo:rerun-if-changed={}", dir.display());
+    let mut entries: Vec<_> = std::fs::read_dir(&dir)
+        .expect("data/icons is missing")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "svg"))
+        .collect();
+    entries.sort();
+    let mut table = String::from("pub static ICONS: &[(&str, &[u8])] = &[\n");
+    for path in &entries {
+        let name = path.file_stem().unwrap().to_string_lossy();
+        table.push_str(&format!(
+            "    ({name:?}, include_bytes!({:?})),\n",
+            path.display().to_string()
+        ));
+    }
+    table.push_str("];\n");
+    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("icons.rs");
+    std::fs::write(out, table).expect("failed to write the icon table");
+}
+
 fn main() {
+    embed_icons();
     println!("cargo:rerun-if-env-changed=MPV_PREFIX");
     println!("cargo:rerun-if-env-changed=SVP_DIR");
+    println!("cargo:rerun-if-env-changed=EMBYCLIENTPLUS_PORTABLE");
     println!("cargo:rerun-if-changed=build.rs");
 
     let third_party =
@@ -29,6 +56,14 @@ fn main() {
         return;
     }
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
+
+    // Release packages carry libmpv next to the binary and find SVP's
+    // VapourSynth at launch (packaging/embyclientplus.sh), so no absolute
+    // paths from the build machine may end up in the binary.
+    if std::env::var_os("EMBYCLIENTPLUS_PORTABLE").is_some() {
+        println!("cargo:rustc-link-arg=-Wl,--disable-new-dtags,-rpath,$ORIGIN/../lib");
+        return;
+    }
 
     // SVP's bundled VapourSynth R73 must win over the system R80 (its plugins
     // need API 3), plus the Python 3.12 that R73 embeds. This needs DT_RPATH,

@@ -171,6 +171,9 @@ pub struct MediaSource {
     pub transcoding_url: Option<String>,
     #[serde(default)]
     pub media_streams: Vec<MediaStream>,
+    /// A link elsewhere (trailers), played from `path` directly.
+    #[serde(default)]
+    pub is_remote: bool,
 }
 
 #[allow(dead_code)]
@@ -235,6 +238,70 @@ pub struct BaseItem {
     pub parent_thumb_image_tag: Option<String>,
     pub user_data: Option<UserItemData>,
     pub chapters: Vec<ChapterInfo>,
+    pub people: Vec<Person>,
+    pub local_trailer_count: Option<i32>,
+    // Music.
+    pub album: Option<String>,
+    pub album_id: Option<String>,
+    pub album_artist: Option<String>,
+    pub album_primary_image_tag: Option<String>,
+    pub artist_items: Vec<NameId>,
+    pub album_artists: Vec<NameId>,
+    pub child_count: Option<i32>,
+    pub remote_trailers: Vec<RemoteTrailer>,
+    /// A person's role in the title they're listed for (cast cards only).
+    #[serde(skip)]
+    pub role: Option<String>,
+}
+
+/// A linked item by name and id (album artists).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "PascalCase", default)]
+pub struct NameId {
+    pub name: String,
+    pub id: String,
+}
+
+/// A trailer hosted elsewhere (usually a YouTube page).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "PascalCase", default)]
+pub struct RemoteTrailer {
+    pub url: String,
+    pub name: Option<String>,
+}
+
+/// Cast/crew entry on an item (`Fields=People`).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "PascalCase", default)]
+pub struct Person {
+    pub id: String,
+    pub name: String,
+    pub role: Option<String>,
+    #[serde(rename = "Type")]
+    pub kind: Option<String>,
+    pub primary_image_tag: Option<String>,
+}
+
+impl Person {
+    /// As a card-able item, so cast rows reuse the normal card widgets.
+    pub fn as_item(&self) -> BaseItem {
+        let mut image_tags = HashMap::new();
+        if let Some(tag) = &self.primary_image_tag {
+            image_tags.insert("Primary".to_string(), tag.clone());
+        }
+        BaseItem {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            item_type: "Person".into(),
+            image_tags,
+            role: self
+                .role
+                .clone()
+                .filter(|r| !r.is_empty())
+                .or(self.kind.clone()),
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -244,6 +311,7 @@ pub struct UserItemData {
     pub played: bool,
     pub played_percentage: Option<f64>,
     pub unplayed_item_count: Option<i32>,
+    pub is_favorite: bool,
 }
 
 /// One "Because you watched X" row from `/Movies/Recommendations`.

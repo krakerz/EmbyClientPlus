@@ -60,19 +60,36 @@ if [ ! -d "$SRC_DIR/.git" ]; then
     git clone --depth 1 --branch "$MPV_VERSION" https://github.com/mpv-player/mpv.git "$SRC_DIR"
 fi
 
-if [ ! -f "$BUILD_DIR/build.ninja" ]; then
-    meson setup "$BUILD_DIR" "$SRC_DIR" \
-        --prefix="$PREFIX" \
-        --buildtype=release \
-        -Dlibmpv=true \
-        -Dcplayer=true \
-        -Dvapoursynth=enabled \
-        -Dvulkan=enabled \
-        -Dwayland=enabled \
-        -Degl=enabled \
-        -Degl-wayland=enabled \
-        -Dgl=enabled \
-        -Dplain-gl=enabled
+# Only what the app uses: features that drag in extra libraries (and, for
+# mujs, an absolute library path) would make the bundled libmpv unportable.
+meson_options=(
+    --prefix="$PREFIX"
+    --buildtype=release
+    -Dlibmpv=true
+    -Dcplayer=true
+    -Dvapoursynth=enabled
+    -Dvulkan=enabled
+    -Dwayland=enabled
+    -Degl=enabled
+    -Degl-wayland=enabled
+    -Dgl=enabled
+    -Dplain-gl=enabled
+    -Djavascript=disabled
+    -Dlua=disabled
+    -Dcdda=disabled
+    -Ddvdnav=disabled
+    -Dlibbluray=disabled
+    -Dlibarchive=disabled
+    -Dcaca=disabled
+    -Dsixel=disabled
+    -Djack=disabled
+    -Dsndio=disabled
+    -Drubberband=disabled
+)
+if [ -f "$BUILD_DIR/build.ninja" ]; then
+    meson setup --reconfigure "$BUILD_DIR" "$SRC_DIR" "${meson_options[@]}"
+else
+    meson setup "$BUILD_DIR" "$SRC_DIR" "${meson_options[@]}"
 fi
 
 ninja -C "$BUILD_DIR"

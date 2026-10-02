@@ -108,6 +108,9 @@ struct Osd {
     up_next_countdown: gtk::Label,
     up_next_play: gtk::Button,
     up_next_cancel: gtk::Button,
+    /// Album cover shown while music plays (there's no video).
+    cover: gtk::Picture,
+    cover_frame: gtk::Overlay,
 }
 
 impl PlayerPage {
@@ -156,6 +159,42 @@ impl PlayerPage {
         &self.inner.page
     }
 
+    /// Whether one of the OSD's menus (audio, subtitles, ...) is open, so
+    /// controller directions should move through it instead of seeking.
+    pub fn menu_open(&self) -> bool {
+        self.inner.osd.menu_open()
+    }
+
+    /// Runs a player-context controller action.
+    pub fn controller_action(&self, action: crate::controller::Action) {
+        use crate::controller::Action;
+        let inner = &self.inner;
+        let player = inner.player;
+        match action {
+            Action::PlayPause => warn(player.toggle_pause()),
+            Action::Leave => inner.pop(),
+            Action::SeekBack => warn(player.seek_relative(-SEEK_STEP)),
+            Action::SeekForward => warn(player.seek_relative(SEEK_STEP)),
+            Action::VolumeUp => warn(player.set_volume(player.volume() + VOLUME_STEP)),
+            Action::VolumeDown => warn(player.set_volume(player.volume() - VOLUME_STEP)),
+            Action::PreviousEpisode => inner.play_neighbour(false),
+            Action::NextEpisode => inner.play_neighbour(true),
+            Action::PreviousChapter => inner.seek_chapter(false),
+            Action::NextChapter => inner.seek_chapter(true),
+            Action::AudioMenu => {
+                inner.show_osd();
+                inner.osd.audio.popup();
+            }
+            Action::SubtitleMenu => {
+                inner.show_osd();
+                inner.osd.subtitles.popup();
+            }
+            Action::ShowControls => {}
+            _ => return,
+        }
+        inner.show_osd();
+    }
+
     /// Readies the page for `item` before its stream is negotiated.
     pub fn prepare(&self, item: &BaseItem, quality: Quality, handlers: Handlers) {
         let inner = &self.inner;
@@ -170,6 +209,7 @@ impl PlayerPage {
         inner.osd.title.set_label(&title);
         inner.osd.subtitle.set_label(&subtitle);
         inner.osd.subtitle.set_visible(!subtitle.is_empty());
+        inner.osd.cover_frame.set_visible(item.is_audio());
         inner.osd.seek.set_range(0.0, 1.0);
         inner.osd.seek.set_value(0.0);
         inner.osd.seek.clear_marks();
@@ -187,6 +227,9 @@ impl PlayerPage {
         inner.osd.previous.set_sensitive(session.previous.is_some());
         inner.osd.next.set_sensitive(session.next.is_some());
         inner.osd.svp.set_active(session.svp_enabled());
+        if session.item.is_audio() {
+            images::load_with_client(client, &inner.osd.cover, session.item.poster(), 720);
+        }
         if let Some(next) = &session.next {
             inner.osd.up_next_title.set_label(&next.episode_label());
             images::load_with_client(client, &inner.osd.up_next_picture, next.landscape(), 384);
@@ -216,7 +259,7 @@ impl Osd {
         };
 
         // Top: back + title.
-        let back = icon_button("go-previous-symbolic", "Back");
+        let back = icon_button(crate::ui::icons::BACK, "Back");
         back.set_action_name(Some("player.back"));
         let title = gtk::Label::builder()
             .xalign(0.0)
@@ -265,10 +308,10 @@ impl Osd {
         seek_row.append(&seek);
         seek_row.append(&remaining);
 
-        let previous = icon_button("media-skip-backward-symbolic", "Previous episode (P)");
-        let play = icon_button("media-playback-pause-symbolic", "Play/Pause (Space)");
+        let previous = icon_button(crate::ui::icons::SKIP_BACK, "Previous episode (P)");
+        let play = icon_button(crate::ui::icons::PAUSE, "Play/Pause (Space)");
         play.add_css_class("large-button");
-        let next = icon_button("media-skip-forward-symbolic", "Next episode (N)");
+        let next = icon_button(crate::ui::icons::SKIP_FORWARD, "Next episode (N)");
         let volume = gtk::Scale::builder()
             .orientation(gtk::Orientation::Horizontal)
             .width_request(180)
@@ -277,7 +320,7 @@ impl Osd {
         volume.set_range(0.0, 130.0);
         volume.add_mark(100.0, gtk::PositionType::Bottom, None);
         let mute = gtk::Button::builder()
-            .icon_name("audio-volume-muted-symbolic")
+            .icon_name(crate::ui::icons::MUTED)
             .tooltip_text("Mute (M)")
             .action_name("player.mute")
             .css_classes(["flat"])
@@ -285,17 +328,17 @@ impl Osd {
         let volume_box = gtk::Box::builder().spacing(6).build();
         volume_box.append(&mute);
         volume_box.append(&volume);
-        let volume_button = menu_button("audio-volume-high-symbolic", "Volume");
+        let volume_button = menu_button(crate::ui::icons::VOLUME, "Volume");
         volume_button.set_popover(Some(&gtk::Popover::builder().child(&volume_box).build()));
-        let audio = menu_button("audio-x-generic-symbolic", "Audio");
-        let subtitles = menu_button("media-view-subtitles-symbolic", "Subtitles");
-        let quality = menu_button("preferences-system-symbolic", "Quality");
+        let audio = menu_button(crate::ui::icons::AUDIO, "Audio");
+        let subtitles = menu_button(crate::ui::icons::SUBTITLES, "Subtitles");
+        let quality = menu_button(crate::ui::icons::QUALITY, "Quality");
         let svp = gtk::ToggleButton::builder()
             .label("SVP")
             .tooltip_text("Frame interpolation through SVP (remembered for this title)")
             .css_classes(["flat"])
             .build();
-        let fullscreen = icon_button("view-fullscreen-symbolic", "Fullscreen (F)");
+        let fullscreen = icon_button(crate::ui::icons::FULLSCREEN, "Fullscreen (F)");
 
         let buttons = gtk::CenterBox::new();
         let start = gtk::Box::builder().spacing(6).build();
@@ -341,11 +384,9 @@ impl Osd {
         // Up Next card.
         let up_next_picture = gtk::Picture::builder()
             .content_fit(gtk::ContentFit::Cover)
-            .width_request(192)
-            .height_request(108)
             .build();
         let picture_frame = gtk::Overlay::builder()
-            .child(&up_next_picture)
+            .child(&super::fixed_picture(&up_next_picture, 192, 108))
             .overflow(gtk::Overflow::Hidden)
             .css_classes(["card"])
             .build();
@@ -401,6 +442,19 @@ impl Osd {
         overlay.add_overlay(&bottom);
         overlay.add_overlay(&skip);
         overlay.add_overlay(&up_next);
+        let cover = gtk::Picture::builder()
+            .content_fit(gtk::ContentFit::Cover)
+            .build();
+        let cover_frame = gtk::Overlay::builder()
+            .child(&super::fixed_picture(&cover, 360, 360))
+            .overflow(gtk::Overflow::Hidden)
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Center)
+            .css_classes(["card"])
+            .can_target(false)
+            .visible(false)
+            .build();
+        overlay.add_overlay(&cover_frame);
 
         let osd = Osd {
             top,
@@ -427,6 +481,8 @@ impl Osd {
             up_next_countdown,
             up_next_play,
             up_next_cancel,
+            cover,
+            cover_frame,
         };
         (osd, overlay)
     }
@@ -737,9 +793,9 @@ impl Inner {
             PlayerEvent::Geometry => player::video_area::refit(self.player, &self.video),
             PlayerEvent::Pause(paused) => {
                 self.osd.play.set_icon_name(if paused {
-                    "media-playback-start-symbolic"
+                    crate::ui::icons::PLAY
                 } else {
-                    "media-playback-pause-symbolic"
+                    crate::ui::icons::PAUSE
                 });
                 self.show_osd();
                 if let Some(session) = self.session() {
@@ -753,9 +809,9 @@ impl Inner {
                 self.osd
                     .volume_button
                     .set_icon_name(if self.player.is_muted() {
-                        "audio-volume-muted-symbolic"
+                        crate::ui::icons::MUTED
                     } else {
-                        "audio-volume-high-symbolic"
+                        crate::ui::icons::VOLUME
                     });
                 self.schedule_volume_report();
             }
@@ -932,7 +988,10 @@ impl Inner {
             self.update_svp_status();
         }
         let markers = &session.markers;
-        let up_next_due = session.next.is_some() && position >= markers.up_next_at(duration);
+        // Music just moves on to the next track; the countdown is for episodes.
+        let up_next_due = session.next.is_some()
+            && !session.item.is_audio()
+            && position >= markers.up_next_at(duration);
         let skip_label = if markers.in_intro(position) {
             Some("Skip Intro")
         } else if markers.in_credits(position) && !up_next_due {
@@ -1018,18 +1077,22 @@ impl Inner {
         self.volume_report.replace(Some(pending));
     }
 
+    fn seek_chapter(&self, forward: bool) {
+        let (Some(session), Some(position)) = (self.session(), self.player.position()) else {
+            return;
+        };
+        let target = if forward {
+            session.markers.next_chapter(position)
+        } else {
+            session.markers.previous_chapter(position)
+        };
+        if let Some(target) = target {
+            warn(self.player.seek_absolute(target));
+        }
+    }
+
     fn key(self: &Rc<Self>, key: gdk::Key) -> glib::Propagation {
         let player = self.player;
-        let position = player.position();
-        let chapter = |forward: bool| {
-            let session = self.session()?;
-            let position = position?;
-            if forward {
-                session.markers.next_chapter(position)
-            } else {
-                session.markers.previous_chapter(position)
-            }
-        };
         match key {
             gdk::Key::space | gdk::Key::k => warn(player.toggle_pause()),
             gdk::Key::Left => warn(player.seek_relative(-SEEK_STEP)),
@@ -1039,16 +1102,8 @@ impl Inner {
             gdk::Key::m => warn(player.toggle_mute()),
             gdk::Key::n | gdk::Key::N => self.play_neighbour(true),
             gdk::Key::p | gdk::Key::P => self.play_neighbour(false),
-            gdk::Key::Page_Down => {
-                if let Some(target) = chapter(true) {
-                    warn(player.seek_absolute(target));
-                }
-            }
-            gdk::Key::Page_Up => {
-                if let Some(target) = chapter(false) {
-                    warn(player.seek_absolute(target));
-                }
-            }
+            gdk::Key::Page_Down => self.seek_chapter(true),
+            gdk::Key::Page_Up => self.seek_chapter(false),
             gdk::Key::F11 | gdk::Key::f => self.toggle_fullscreen(),
             gdk::Key::Escape => self.leave(),
             _ => return glib::Propagation::Proceed,
@@ -1094,19 +1149,24 @@ impl Inner {
     }
 
     fn set_fullscreen(&self, fullscreen: bool) {
-        if let Some(window) = self.window() {
+        // In gamescope the whole app stays fullscreen; never shrink it.
+        if let Some(window) = self.window()
+            && !super::window::fullscreen_locked()
+        {
             window.set_fullscreened(fullscreen);
         }
         self.osd.fullscreen.set_icon_name(if fullscreen {
-            "view-restore-symbolic"
+            crate::ui::icons::UNFULLSCREEN
         } else {
-            "view-fullscreen-symbolic"
+            crate::ui::icons::FULLSCREEN
         });
     }
 
     /// Esc: leave fullscreen first, then the page.
     fn leave(&self) {
-        if self.window().is_some_and(|window| window.is_fullscreen()) {
+        if self.window().is_some_and(|window| window.is_fullscreen())
+            && !super::window::fullscreen_locked()
+        {
             self.set_fullscreen(false);
         } else {
             self.pop();
@@ -1127,6 +1187,14 @@ impl Inner {
 
 /// OSD title lines: series over "S1:E4 · Name" for episodes.
 fn titles(item: &BaseItem) -> (String, String) {
+    if item.is_audio() {
+        let by = [item.artist(), item.album.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · ");
+        return (item.name.clone(), by);
+    }
     match &item.series_name {
         Some(series) if item.item_type == "Episode" => (series.clone(), item.episode_label()),
         _ => (

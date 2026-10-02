@@ -70,10 +70,28 @@ enum Chips {
 }
 
 pub fn page(ui: &Ui, folder: &BaseItem) -> adw::NavigationPage {
+    if folder.collection_type.as_deref() == Some("music") {
+        return music(ui, folder);
+    }
     match Kind::of(folder) {
         Some(kind) => tabbed(ui, folder, kind),
         None => plain(ui, folder),
     }
+}
+
+/// Everything a person appears in.
+pub fn person(ui: &Ui, person: &BaseItem) -> adw::NavigationPage {
+    let query = ItemQuery {
+        person_id: Some(person.id.clone()),
+        include_types: Some("Movie,Series"),
+        recursive: true,
+        ..Default::default()
+    };
+    toolbar_page(
+        &person.name,
+        &adw::HeaderBar::new(),
+        &sortable_grid(ui, query),
+    )
 }
 
 fn plain(ui: &Ui, folder: &BaseItem) -> adw::NavigationPage {
@@ -95,6 +113,11 @@ fn plain(ui: &Ui, folder: &BaseItem) -> adw::NavigationPage {
     )
 }
 
+/// A titled page holding a sortable grid of `query`.
+pub fn grid_page(ui: &Ui, title: &str, query: ItemQuery) -> adw::NavigationPage {
+    toolbar_page(title, &adw::HeaderBar::new(), &sortable_grid(ui, query))
+}
+
 /// A page whose content scrolls by itself (grids must sit directly in
 /// their ScrolledWindow to stay virtualized).
 fn toolbar_page(
@@ -102,6 +125,7 @@ fn toolbar_page(
     header: &adw::HeaderBar,
     content: &impl IsA<gtk::Widget>,
 ) -> adw::NavigationPage {
+    super::add_home_button(header);
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(header);
     toolbar.set_content(Some(content));
@@ -109,6 +133,8 @@ fn toolbar_page(
 }
 
 type TabBuilder = Box<dyn FnOnce(&Ui) -> gtk::Widget>;
+/// Name, title, icon, and how to build it.
+type Tab = (&'static str, &'static str, &'static str, TabBuilder);
 
 fn tabbed(ui: &Ui, folder: &BaseItem, kind: Kind) -> adw::NavigationPage {
     let item_type = kind.item_type();
@@ -120,7 +146,7 @@ fn tabbed(ui: &Ui, folder: &BaseItem, kind: Kind) -> adw::NavigationPage {
         ..Default::default()
     };
 
-    let mut tabs: Vec<(&str, &str, &str, TabBuilder)> = Vec::new();
+    let mut tabs: Vec<Tab> = Vec::new();
     let items = in_library(Some(item_type), true);
     tabs.push((
         "items",
@@ -130,9 +156,9 @@ fn tabbed(ui: &Ui, folder: &BaseItem, kind: Kind) -> adw::NavigationPage {
             "Shows"
         },
         if kind == Kind::Movies {
-            "video-x-generic-symbolic"
+            crate::ui::icons::MOVIES
         } else {
-            "tv-symbolic"
+            crate::ui::icons::SHOWS
         },
         Box::new(move |ui| sortable_grid(ui, items).upcast()),
     ));
@@ -140,7 +166,7 @@ fn tabbed(ui: &Ui, folder: &BaseItem, kind: Kind) -> adw::NavigationPage {
     tabs.push((
         "suggestions",
         "Suggestions",
-        "view-grid-symbolic",
+        crate::ui::icons::SUGGESTIONS,
         Box::new(move |ui| suggestions(ui, &suggestions_folder, kind)),
     ));
     if kind == Kind::Movies {
@@ -148,13 +174,13 @@ fn tabbed(ui: &Ui, folder: &BaseItem, kind: Kind) -> adw::NavigationPage {
         tabs.push((
             "collections",
             "Collections",
-            "folder-videos-symbolic",
+            crate::ui::icons::COLLECTIONS,
             Box::new(move |ui| sortable_grid(ui, collections).upcast()),
         ));
     }
     for (name, title, icon, chips_kind) in [
-        ("genres", "Genres", "view-list-symbolic", Chips::Genres),
-        ("tags", "Tags", "bookmark-new-symbolic", Chips::Tags),
+        ("genres", "Genres", crate::ui::icons::GENRES, Chips::Genres),
+        ("tags", "Tags", crate::ui::icons::TAGS, Chips::Tags),
     ] {
         let library_id = library_id.clone();
         tabs.push((
@@ -164,22 +190,33 @@ fn tabbed(ui: &Ui, folder: &BaseItem, kind: Kind) -> adw::NavigationPage {
             Box::new(move |ui| chips(ui, &library_id, item_type, chips_kind)),
         ));
     }
-    let mut favorites = in_library(Some(item_type), true);
-    favorites.filters.push("IsFavorite");
+    let favorites_library = folder.id.clone();
+    let collection = folder.collection_type.clone();
     tabs.push((
         "favorites",
         "Favorites",
-        "starred-symbolic",
-        Box::new(move |ui| sortable_grid(ui, favorites).upcast()),
+        crate::ui::icons::FAVORITE,
+        Box::new(move |ui| {
+            super::favorites::view(
+                ui,
+                Some(favorites_library),
+                super::favorites::sections_for(collection.as_deref()),
+            )
+        }),
     ));
     let folders = in_library(None, false);
     tabs.push((
         "folders",
         "Folders",
-        "folder-symbolic",
+        crate::ui::icons::FOLDER,
         Box::new(move |ui| sortable_grid(ui, folders).upcast()),
     ));
 
+    tab_page(ui, folder, tabs)
+}
+
+/// A library page with these tabs in its header.
+fn tab_page(ui: &Ui, folder: &BaseItem, tabs: Vec<Tab>) -> adw::NavigationPage {
     // Tabs are built the first time they're shown, so opening a library
     // only costs the requests of the tab you're looking at.
     let stack = adw::ViewStack::new();
@@ -213,12 +250,173 @@ fn tabbed(ui: &Ui, folder: &BaseItem, kind: Kind) -> adw::NavigationPage {
                 .build(),
         )
         .build();
-    toolbar_page(&folder.name, &header, &stack)
+    let page = toolbar_page(&folder.name, &header, &stack);
+    super::set_tab_stepper(&page, move |forward| step_stack(&stack, forward));
+    page
+}
+
+/// A music library: albums, artists, songs, what's new, favourites, folders.
+fn music(ui: &Ui, folder: &BaseItem) -> adw::NavigationPage {
+    let library_id = folder.id.clone();
+    let in_library = |include_types: &'static str| ItemQuery {
+        parent_id: Some(library_id.clone()),
+        include_types: Some(include_types),
+        recursive: true,
+        ..Default::default()
+    };
+    let albums = in_library("MusicAlbum");
+    let songs = in_library("Audio");
+    let folders = ItemQuery {
+        parent_id: Some(library_id.clone()),
+        ..Default::default()
+    };
+    let artists_library = library_id.clone();
+    let latest_library = library_id.clone();
+    let favorites_library = library_id.clone();
+    let tabs: Vec<Tab> = vec![
+        (
+            "albums",
+            "Albums",
+            crate::ui::icons::ALBUMS,
+            Box::new(move |ui| sortable_grid_of(ui, albums, Shape::Square).upcast()),
+        ),
+        (
+            "artists",
+            "Artists",
+            crate::ui::icons::ARTISTS,
+            Box::new(move |ui| artists_grid(ui, &artists_library)),
+        ),
+        (
+            "songs",
+            "Songs",
+            crate::ui::icons::SONGS,
+            Box::new(move |ui| sortable_grid_of(ui, songs, Shape::Square).upcast()),
+        ),
+        (
+            "latest",
+            "Latest",
+            crate::ui::icons::SUGGESTIONS,
+            Box::new(move |ui| latest_albums(ui, &latest_library)),
+        ),
+        (
+            "favorites",
+            "Favorites",
+            crate::ui::icons::FAVORITE,
+            Box::new(move |ui| {
+                super::favorites::view(
+                    ui,
+                    Some(favorites_library),
+                    super::favorites::sections_for(Some("music")),
+                )
+            }),
+        ),
+        (
+            "folders",
+            "Folders",
+            crate::ui::icons::FOLDER,
+            Box::new(move |ui| sortable_grid_of(ui, folders, Shape::Square).upcast()),
+        ),
+    ];
+    tab_page(ui, folder, tabs)
+}
+
+/// Album artists as round cards; each opens their albums.
+fn artists_grid(ui: &Ui, library_id: &str) -> gtk::Widget {
+    let (grid, store) = library::grid(ui, Shape::Person);
+    let scrolled = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .child(&grid)
+        .vexpand(true)
+        .build();
+    let client = ui.client();
+    let user_id = ui.user_id();
+    let library_id = library_id.to_string();
+    let weak = ui.downgrade();
+    glib::spawn_future_local(async move {
+        let result =
+            spawn_tokio(async move { client.album_artists(&user_id, &library_id).await }).await;
+        match result {
+            Ok(artists) => {
+                let objects: Vec<_> = artists.into_iter().map(glib::BoxedAnyObject::new).collect();
+                store.extend_from_slice(&objects);
+            }
+            Err(e) => {
+                if let Some(ui) = weak.upgrade() {
+                    ui.report_error("Could not load artists", &e);
+                }
+            }
+        }
+    });
+    scrolled.upcast()
+}
+
+/// Recently added albums.
+fn latest_albums(ui: &Ui, library_id: &str) -> gtk::Widget {
+    let library_id = library_id.to_string();
+    let (grid, store) = library::grid(ui, Shape::Square);
+    let scrolled = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .child(&grid)
+        .vexpand(true)
+        .build();
+    let client = ui.client();
+    let user_id = ui.user_id();
+    glib::spawn_future_local(async move {
+        if let Ok(albums) =
+            spawn_tokio(async move { client.latest(&user_id, &library_id, 60).await }).await
+        {
+            let objects: Vec<_> = albums.into_iter().map(glib::BoxedAnyObject::new).collect();
+            store.extend_from_slice(&objects);
+        }
+    });
+    scrolled.upcast()
+}
+
+/// An artist's albums.
+pub fn artist(ui: &Ui, artist: &BaseItem) -> adw::NavigationPage {
+    let query = ItemQuery {
+        artist_id: Some(artist.id.clone()),
+        include_types: Some("MusicAlbum"),
+        recursive: true,
+        sort_by: Some("ProductionYear"),
+        descending: true,
+        ..Default::default()
+    };
+    toolbar_page(
+        &artist.name,
+        &adw::HeaderBar::new(),
+        &sortable_grid_of(ui, query, Shape::Square),
+    )
+}
+
+/// Shows the next/previous tab of `stack` (controller bumpers).
+fn step_stack(stack: &adw::ViewStack, forward: bool) {
+    let pages = stack.pages();
+    let count = pages.n_items();
+    let current = (0..count).find(|&i| {
+        pages
+            .item(i)
+            .and_downcast::<adw::ViewStackPage>()
+            .is_some_and(|page| Some(page.child()) == stack.visible_child())
+    });
+    let Some(current) = current else { return };
+    let next = if forward {
+        (current + 1).min(count.saturating_sub(1))
+    } else {
+        current.saturating_sub(1)
+    };
+    if let Some(page) = pages.item(next).and_downcast::<adw::ViewStackPage>() {
+        stack.set_visible_child(&page.child());
+    }
 }
 
 /// A poster grid of `base` with a count, filter, sort and order bar above.
 fn sortable_grid(ui: &Ui, base: ItemQuery) -> gtk::Box {
-    let (grid, store) = library::grid(ui, Shape::Poster);
+    sortable_grid_of(ui, base, Shape::Poster)
+}
+
+fn sortable_grid_of(ui: &Ui, base: ItemQuery, shape: Shape) -> gtk::Box {
+    let (grid, store) = library::grid(ui, shape);
     let count = gtk::Label::builder()
         .xalign(0.0)
         .hexpand(true)
@@ -229,7 +427,7 @@ fn sortable_grid(ui: &Ui, base: ItemQuery) -> gtk::Box {
     let sort = gtk::DropDown::from_strings(&SORTS.map(|(label, _, _)| label));
     sort.set_tooltip_text(Some("Sort by"));
     let descending = gtk::ToggleButton::builder()
-        .icon_name("view-sort-ascending-symbolic")
+        .icon_name(crate::ui::icons::SORT_ASCENDING)
         .tooltip_text("Sort order")
         .build();
 
@@ -287,9 +485,9 @@ fn sortable_grid(ui: &Ui, base: ItemQuery) -> gtk::Box {
         let reload = reload.clone();
         move |button| {
             button.set_icon_name(if button.is_active() {
-                "view-sort-descending-symbolic"
+                crate::ui::icons::SORT_DESCENDING
             } else {
-                "view-sort-ascending-symbolic"
+                crate::ui::icons::SORT_ASCENDING
             });
             reload();
         }
@@ -361,13 +559,16 @@ fn reload_grid(
     );
 }
 
-/// Genre or tag buttons; each opens a sortable grid of that genre/tag.
+/// Genre or tag tiles; each opens a sortable grid of that genre/tag.
 fn chips(ui: &Ui, library_id: &str, item_type: &'static str, kind: Chips) -> gtk::Widget {
     let flow = gtk::FlowBox::builder()
         .selection_mode(gtk::SelectionMode::None)
-        .max_children_per_line(30)
-        .row_spacing(8)
-        .column_spacing(8)
+        .activate_on_single_click(true)
+        .homogeneous(true)
+        .min_children_per_line(1)
+        .max_children_per_line(8)
+        .row_spacing(16)
+        .column_spacing(16)
         .margin_top(18)
         .margin_bottom(18)
         .margin_start(18)
@@ -386,7 +587,9 @@ fn chips(ui: &Ui, library_id: &str, item_type: &'static str, kind: Chips) -> gtk
     let user_id = ui.user_id();
     let library_id = library_id.to_string();
     let weak = ui.downgrade();
+    let tiles = flow.clone();
     glib::spawn_future_local(async move {
+        let flow = tiles;
         let fetch_library = library_id.clone();
         let result = spawn_tokio(async move {
             match kind {
@@ -411,7 +614,7 @@ fn chips(ui: &Ui, library_id: &str, item_type: &'static str, kind: Chips) -> gtk
             };
             content.append(
                 &adw::StatusPage::builder()
-                    .icon_name("view-list-symbolic")
+                    .icon_name(crate::ui::icons::GENRES)
                     .title(title)
                     .vexpand(true)
                     .build(),
@@ -419,30 +622,29 @@ fn chips(ui: &Ui, library_id: &str, item_type: &'static str, kind: Chips) -> gtk
             return;
         }
         for entry in entries {
-            let button = gtk::Button::builder()
-                .label(&entry.name)
-                .css_classes(["pill"])
-                .build();
-            let weak = ui.downgrade();
-            let library_id = library_id.clone();
-            button.connect_clicked(move |_| {
-                let Some(ui) = weak.upgrade() else { return };
-                let mut query = ItemQuery {
-                    parent_id: Some(library_id.clone()),
-                    include_types: Some(item_type),
-                    recursive: true,
-                    ..Default::default()
-                };
-                match kind {
-                    Chips::Genres => query.genre_id = Some(entry.id.clone()),
-                    Chips::Tags => query.tag_id = Some(entry.id.clone()),
-                }
-                let grid = sortable_grid(&ui, query);
-                ui.push(&toolbar_page(&entry.name, &adw::HeaderBar::new(), &grid));
-            });
-            flow.append(&button);
+            let mut query = ItemQuery {
+                parent_id: Some(library_id.clone()),
+                include_types: Some(item_type),
+                recursive: true,
+                ..Default::default()
+            };
+            match kind {
+                Chips::Genres => query.genre_id = Some(entry.id.clone()),
+                Chips::Tags => query.tag_id = Some(entry.id.clone()),
+            }
+            flow.append(&super::category_tile::tile(&ui, &entry.name, query));
         }
         content.append(&flow);
+    });
+    flow.connect_child_activated({
+        let weak = ui.downgrade();
+        move |_, child| {
+            let Some(ui) = weak.upgrade() else { return };
+            if let Some((name, query)) = super::category_tile::target(child) {
+                let grid = sortable_grid(&ui, query);
+                ui.push(&toolbar_page(&name, &adw::HeaderBar::new(), &grid));
+            }
+        }
     });
     scrolled.upcast()
 }
@@ -534,7 +736,7 @@ fn suggestions(ui: &Ui, folder: &BaseItem, kind: Kind) -> gtk::Widget {
                 &ui,
                 "Continue Watching",
                 &result.resume,
-                Shape::Landscape,
+                Shape::for_episodes(),
                 Click::Resume,
                 More::Resume(Some(library_id.clone())),
             ));
@@ -544,7 +746,7 @@ fn suggestions(ui: &Ui, folder: &BaseItem, kind: Kind) -> gtk::Widget {
                 &ui,
                 "Next Up",
                 &result.next_up,
-                Shape::Landscape,
+                Shape::for_episodes(),
                 Click::Open,
                 More::NextUp(Some(library_id.clone())),
             ));
@@ -575,7 +777,7 @@ fn suggestions(ui: &Ui, folder: &BaseItem, kind: Kind) -> gtk::Widget {
         if !any {
             content.append(
                 &adw::StatusPage::builder()
-                    .icon_name("view-grid-symbolic")
+                    .icon_name(crate::ui::icons::SUGGESTIONS)
                     .title("Nothing to suggest yet")
                     .description("Watch something in this library first")
                     .vexpand(true)

@@ -1,0 +1,11 @@
+#!/bin/sh
+# AppImage entry point: point GTK at the bundled schemas and icons, run
+# any linuxdeploy hooks, then the same launcher the archive uses.
+APPDIR="$(dirname "$(readlink -f "$0")")"
+export APPDIR
+export GSETTINGS_SCHEMA_DIR="$APPDIR/usr/share/glib-2.0/schemas"
+export XDG_DATA_DIRS="$APPDIR/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+for hook in "$APPDIR"/apprun-hooks/*.sh; do
+    [ -e "$hook" ] && . "$hook"
+done
+exec "$APPDIR/usr/bin/embyclientplus" "$@"

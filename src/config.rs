@@ -16,6 +16,104 @@ pub struct Settings {
     pub subtitles: SubtitleSettings,
     #[serde(default)]
     pub frame_gen: FrameGenSettings,
+    #[serde(default)]
+    pub controller: ControllerSettings,
+    #[serde(default)]
+    pub home: HomeSettings,
+    #[serde(default)]
+    pub window: WindowSettings,
+    #[serde(default)]
+    pub updates: UpdateSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateSettings {
+    #[serde(default = "default_true")]
+    pub check_on_start: bool,
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self {
+            check_on_start: true,
+        }
+    }
+}
+
+/// Start-up window size, applied before any fullscreen request so a cold
+/// launch in gamescope never falls back to 800×600.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowSettings {
+    #[serde(default = "default_width")]
+    pub width: i32,
+    #[serde(default = "default_height")]
+    pub height: i32,
+    #[serde(default)]
+    pub fullscreen: FullscreenMode,
+}
+
+impl Default for WindowSettings {
+    fn default() -> Self {
+        Self {
+            width: default_width(),
+            height: default_height(),
+            fullscreen: FullscreenMode::default(),
+        }
+    }
+}
+
+impl WindowSettings {
+    pub fn start_fullscreen(&self, in_gamescope: bool) -> bool {
+        match self.fullscreen {
+            FullscreenMode::Auto => in_gamescope,
+            FullscreenMode::Always => true,
+            FullscreenMode::Never => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FullscreenMode {
+    /// Fullscreen in gamescope (Steam Game Mode), windowed elsewhere.
+    #[default]
+    Auto,
+    Always,
+    Never,
+}
+
+/// The Steam Deck's screen.
+fn default_width() -> i32 {
+    1280
+}
+
+fn default_height() -> i32 {
+    800
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HomeSettings {
+    /// Art on Continue Watching / Next Up cards.
+    #[serde(default)]
+    pub episode_art: EpisodeArt,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EpisodeArt {
+    /// The episode's own still.
+    #[default]
+    Episode,
+    /// The series' art, so a still can't spoil what happens.
+    Series,
+}
+
+/// Gamepad mapping: action name → button names, only for actions changed
+/// from their defaults (see `controller::bindings`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ControllerSettings {
+    #[serde(default)]
+    pub bindings: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -51,6 +149,9 @@ pub struct PlaybackSettings {
     /// 0 means unlimited.
     #[serde(default)]
     pub bitrate_cap_mbps: u32,
+    /// Load ~/.config/mpv/mpv.conf (minus options the app manages).
+    #[serde(default)]
+    pub use_mpv_conf: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -108,10 +209,56 @@ impl Default for SubtitleSettings {
 /// Interpolation settings themselves (multiplier, quality) live in SVP
 /// Manager, which attaches over mpv's IPC socket — we only decide whether
 /// to expose the socket at all.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FrameGenSettings {
     #[serde(default)]
     pub default_backend: FrameGenBackend,
+    /// SVP's install folder; empty means `~/SVP4`.
+    #[serde(default)]
+    pub svp_dir: String,
+    /// IPC socket SVP Manager connects to (SVP's own mpv.conf uses this).
+    #[serde(default = "default_svp_socket")]
+    pub svp_socket: String,
+    /// Start SVP Manager when SVP is wanted and it isn't running. Unset
+    /// means "only in gamescope", where nothing else would start it.
+    #[serde(default)]
+    pub auto_start_svp: Option<bool>,
+    /// mpv's own frame blending when SVP isn't interpolating.
+    #[serde(default)]
+    pub smooth_without_svp: bool,
+}
+
+pub const DEFAULT_SVP_SOCKET: &str = "/tmp/mpvsocket";
+
+fn default_svp_socket() -> String {
+    DEFAULT_SVP_SOCKET.to_string()
+}
+
+impl Default for FrameGenSettings {
+    fn default() -> Self {
+        Self {
+            default_backend: FrameGenBackend::default(),
+            svp_dir: String::new(),
+            svp_socket: default_svp_socket(),
+            auto_start_svp: None,
+            smooth_without_svp: false,
+        }
+    }
+}
+
+impl FrameGenSettings {
+    pub fn auto_start_svp(&self) -> bool {
+        self.auto_start_svp
+            .unwrap_or_else(crate::gamescope::detected)
+    }
+
+    /// The configured socket, falling back to the default when blank.
+    pub fn socket(&self) -> &str {
+        match self.svp_socket.trim() {
+            "" => DEFAULT_SVP_SOCKET,
+            socket => socket,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -208,6 +355,17 @@ mod tests {
     }
 
     #[test]
+    fn window_defaults_and_fullscreen_modes() {
+        let window = Settings::default().window;
+        assert_eq!((window.width, window.height), (1280, 800));
+        assert!(window.start_fullscreen(true));
+        assert!(!window.start_fullscreen(false));
+        let parsed: Settings = toml::from_str("[window]\nfullscreen = \"never\"\n").unwrap();
+        assert!(!parsed.window.start_fullscreen(true));
+        assert_eq!(parsed.window.width, 1280);
+    }
+
+    #[test]
     fn device_id_is_generated_once() {
         let mut server = ServerSettings::default();
         assert!(server.ensure_device_id());
@@ -229,6 +387,7 @@ mod tests {
         assert_eq!(parsed.server.url, "http://192.168.1.3:8096");
         assert!(parsed.server.user_id.is_empty());
         assert_eq!(parsed.frame_gen.default_backend, FrameGenBackend::Svp);
+        assert_eq!(parsed.frame_gen.socket(), "/tmp/mpvsocket");
         // Untouched sections still get their defaults.
         assert_eq!(parsed.audio.preferred_language, "eng");
         assert_eq!(parsed.playback.mode, PlaybackMode::DirectPlayPreferred);
