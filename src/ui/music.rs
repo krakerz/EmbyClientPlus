@@ -1,5 +1,8 @@
 //! The music player's UI: a mini player bar under every page while music
-//! plays, opening into a Now Playing sheet with the queue.
+//! plays, opening into the music panel (Now Playing on the left, the queue
+//! on the right). With a controller the panel has its own buttons (see
+//! [`MusicPanel::action`]): LB/RB tracks, Y play/pause, X picks up a queue
+//! item to move with ↑/↓, LT/RT back to the library.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -15,6 +18,8 @@ use crate::playback::TICKS_PER_SECOND;
 
 const BAR_COVER: i32 = 48;
 const SHEET_COVER: i32 = 280;
+const NOW_PLAYING_WIDTH: i32 = 380;
+const QUEUE_MIN_HEIGHT: i32 = 460;
 const TICK: Duration = Duration::from_millis(500);
 
 struct View {
@@ -47,13 +52,24 @@ struct View {
     syncing: Cell<bool>,
     /// The user is dragging the seek bar.
     seeking: Cell<bool>,
+    /// The queue row being moved with the controller (its position).
+    moving: Cell<Option<usize>>,
+    /// The queue row to put the cursor on once the list is rebuilt.
+    refocus: Cell<Option<usize>>,
+}
+
+/// The music panel, for the controller.
+#[derive(Clone)]
+pub struct MusicPanel {
+    view: Rc<View>,
+    music: crate::music::WeakMusicPlayer,
 }
 
 /// Fills `sheet` (around the navigation view) with the mini player and
 /// Now Playing.
-pub fn attach(ui: &Ui, music: &MusicPlayer, sheet: &adw::BottomSheet) {
+pub fn attach(ui: &Ui, music: &MusicPlayer, sheet: &adw::BottomSheet) -> MusicPanel {
     sheet.set_can_open(false);
-    sheet.set_full_width(false);
+    sheet.set_full_width(true);
 
     // Mini player.
     let bar_cover = gtk::Picture::builder()
@@ -165,35 +181,55 @@ pub fn attach(ui: &Ui, music: &MusicPlayer, sheet: &adw::BottomSheet) {
 
     let collapse = gtk::Button::builder()
         .icon_name(icons::COLLAPSE)
-        .tooltip_text("Close")
+        .tooltip_text("Back to the library")
         .halign(gtk::Align::Center)
         .css_classes(["flat", "circular"])
         .build();
-    let body = gtk::Box::builder()
+    // Left: what's playing and its controls.
+    let now_playing = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(12)
+        .width_request(NOW_PLAYING_WIDTH)
+        .build();
+    now_playing.append(&collapse);
+    now_playing.append(&cover_box);
+    now_playing.append(&title);
+    now_playing.append(&artist);
+    now_playing.append(&album);
+    now_playing.append(&seek);
+    now_playing.append(&times);
+    now_playing.append(&controls);
+    now_playing.append(&volume_row);
+    // Right: the queue, scrolling on its own.
+    let queue_scroll = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .min_content_height(QUEUE_MIN_HEIGHT)
+        .vexpand(true)
+        .child(&queue)
+        .build();
+    let queue_column = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .hexpand(true)
+        .build();
+    queue_header.set_margin_top(0);
+    queue_column.append(&queue_header);
+    queue_column.append(&queue_scroll);
+    let body = gtk::Box::builder()
+        .spacing(32)
         .margin_top(12)
         .margin_bottom(24)
-        .margin_start(18)
-        .margin_end(18)
+        .margin_start(24)
+        .margin_end(24)
         .build();
-    body.append(&collapse);
-    body.append(&cover_box);
-    body.append(&title);
-    body.append(&artist);
-    body.append(&album);
-    body.append(&seek);
-    body.append(&times);
-    body.append(&controls);
-    body.append(&volume_row);
-    body.append(&queue_header);
-    body.append(&queue);
-    let scrolled = gtk::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .propagate_natural_height(true)
-        .child(&adw::Clamp::builder().maximum_size(560).child(&body).build())
-        .build();
-    sheet.set_sheet(Some(&scrolled));
+    body.append(&now_playing);
+    body.append(&queue_column);
+    sheet.set_sheet(Some(
+        &adw::Clamp::builder()
+            .maximum_size(1200)
+            .child(&body)
+            .build(),
+    ));
 
     let view = Rc::new(View {
         sheet: sheet.clone(),
@@ -219,6 +255,8 @@ pub fn attach(ui: &Ui, music: &MusicPlayer, sheet: &adw::BottomSheet) {
         shown: RefCell::new(None),
         syncing: Cell::new(false),
         seeking: Cell::new(false),
+        moving: Cell::new(None),
+        refocus: Cell::new(None),
     });
 
     // Widgets hold the player weakly: it belongs to the Ui.
@@ -297,6 +335,10 @@ pub fn attach(ui: &Ui, music: &MusicPlayer, sheet: &adw::BottomSheet) {
             }
             None => glib::ControlFlow::Break,
         });
+    }
+    MusicPanel {
+        view,
+        music: music.downgrade(),
     }
 }
 
@@ -436,10 +478,19 @@ fn rebuild_queue(music: &MusicPlayer, view: &View) {
     let entries: Vec<BaseItem> = music.queue().entries().cloned().collect();
     let last = entries.len().saturating_sub(1);
     for (index, item) in entries.iter().enumerate() {
-        view.queue
-            .append(&queue_row(music, item, index, position, last));
+        let row = queue_row(music, item, index, position, last);
+        if view.moving.get() == Some(index) {
+            row.add_css_class("queue-moving");
+        }
+        view.queue.append(&row);
     }
     view.queue_shown.replace((ids, position));
+    // A controller move rebuilt the list: the cursor stays on that row.
+    if let Some(index) = view.refocus.take()
+        && let Some(row) = view.queue.row_at_index(index as i32)
+    {
+        row.grab_focus();
+    }
 }
 
 type QueueEdit = Box<dyn Fn(&MusicPlayer)>;
@@ -488,6 +539,9 @@ fn queue_row(
         for (icon, tip, sensitive, act) in actions {
             let button = icon_button(icon, tip);
             button.set_sensitive(sensitive);
+            // For the mouse; the controller moves row to row and uses X to
+            // move one (see `MusicPanel`).
+            button.set_focusable(false);
             let music = music.downgrade();
             button.connect_clicked(move |_| {
                 if let Some(music) = music.upgrade() {
@@ -542,4 +596,128 @@ fn link_button() -> gtk::Button {
         .css_classes(["flat"])
         .visible(false)
         .build()
+}
+
+impl MusicPanel {
+    pub fn is_open(&self) -> bool {
+        self.view.sheet.is_open()
+    }
+
+    /// Opens the panel (when music is playing), cursor on Play/Pause.
+    pub fn open(&self) -> bool {
+        let sheet = &self.view.sheet;
+        if !sheet.can_open() {
+            return false;
+        }
+        sheet.set_open(true);
+        self.focus_default();
+        true
+    }
+
+    pub fn close(&self) {
+        self.end_move();
+        self.view.sheet.set_open(false);
+    }
+
+    /// Puts the cursor on Play/Pause, unless it's already in the panel.
+    pub fn focus_default(&self) {
+        let play = self.view.play.downgrade();
+        let sheet = self.view.sheet.downgrade();
+        glib::idle_add_local_once(move || {
+            let (Some(play), Some(sheet)) = (play.upgrade(), sheet.upgrade()) else {
+                return;
+            };
+            let inside = sheet
+                .sheet()
+                .zip(sheet.root().and_then(|root| root.focus()))
+                .is_some_and(|(panel, focus)| focus.is_ancestor(&panel) && focus.is_mapped());
+            if !inside {
+                play.grab_focus();
+            }
+        });
+    }
+
+    /// Whether `widget` is inside the panel.
+    pub fn contains(&self, widget: &gtk::Widget) -> bool {
+        self.view
+            .sheet
+            .sheet()
+            .is_some_and(|panel| widget.is_ancestor(&panel))
+    }
+
+    /// The queue row being moved, if any.
+    pub fn moving(&self) -> Option<usize> {
+        self.view.moving.get()
+    }
+
+    /// Runs a music-panel controller action; false when it doesn't apply.
+    pub fn action(&self, action: crate::controller::Action, focus: Option<&gtk::Widget>) -> bool {
+        use crate::controller::Action;
+        let Some(music) = self.music.upgrade() else {
+            return false;
+        };
+        match action {
+            Action::MusicPlayPause => music.toggle_pause(),
+            Action::MusicPrevious => music.previous(),
+            Action::MusicNext => music.next(),
+            Action::CloseMusic => self.close(),
+            Action::MoveInQueue => return self.start_move(focus),
+            _ => return false,
+        }
+        true
+    }
+
+    /// X on a queue row: pick it up to move with ↑/↓ (not the playing one).
+    fn start_move(&self, focus: Option<&gtk::Widget>) -> bool {
+        let Some(row) = focus.and_then(|f| {
+            f.ancestor(gtk::ListBoxRow::static_type())
+                .and_downcast::<gtk::ListBoxRow>()
+                .filter(|row| row.parent().as_ref() == Some(self.view.queue.upcast_ref()))
+        }) else {
+            return false;
+        };
+        let Some(music) = self.music.upgrade() else {
+            return false;
+        };
+        let index = row.index().max(0) as usize;
+        if index == music.queue().position() {
+            return false;
+        }
+        self.view.moving.set(Some(index));
+        row.add_css_class("queue-moving");
+        true
+    }
+
+    /// ↑/↓ while moving: the row trades places with its neighbour.
+    pub fn move_step(&self, up: bool) {
+        let (Some(index), Some(music)) = (self.view.moving.get(), self.music.upgrade()) else {
+            return;
+        };
+        let current = music.queue().position();
+        let last = music.queue().entries().count().saturating_sub(1);
+        let target = if up {
+            index.checked_sub(1)
+        } else {
+            (index < last).then_some(index + 1)
+        };
+        // The playing track stays put; moves stop at it.
+        let Some(target) = target.filter(|&t| t != current) else {
+            return;
+        };
+        self.view.moving.set(Some(target));
+        self.view.refocus.set(Some(target));
+        tracing::info!("queue: moved {index} to {target}");
+        music.shift(index, up);
+    }
+
+    /// Puts the moved row down (A, B or X again).
+    pub fn end_move(&self) {
+        if self.view.moving.take().is_some() {
+            let mut child = self.view.queue.first_child();
+            while let Some(row) = child {
+                row.remove_css_class("queue-moving");
+                child = row.next_sibling();
+            }
+        }
+    }
 }

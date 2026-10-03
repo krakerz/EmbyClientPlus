@@ -347,6 +347,21 @@ pub fn show(parent: &impl IsA<gtk::Widget>) {
             .css_classes(["dim-label", "caption-heading"])
             .build(),
     );
+    // Quitting from here is easier with a controller than Steam's menu.
+    let quit = gtk::Button::builder()
+        .label("Quit")
+        .tooltip_text(format!("Quit {}", crate::APP_NAME))
+        .css_classes(["destructive-action"])
+        .build();
+    let window = parent.as_ref().root().and_downcast::<gtk::Window>();
+    quit.connect_clicked(move |_| {
+        // Closing the window runs the usual shutdown: playback is reported
+        // stopped and the SVP Manager we started is stopped.
+        if let Some(window) = &window {
+            super::window::shut_down(window);
+        }
+    });
+    header.pack_end(&quit);
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
     toolbar.set_content(Some(&stack));
@@ -390,6 +405,7 @@ fn controller_page() -> adw::PreferencesPage {
     for (title, context) in [
         ("While Browsing", Context::Browse),
         ("In the Player", Context::Player),
+        ("In the Music Player", Context::Music),
     ] {
         let group = adw::PreferencesGroup::builder().title(title).build();
         for action in Action::ALL.into_iter().filter(|a| a.context() == context) {

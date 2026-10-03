@@ -174,22 +174,10 @@ pub fn page(ui: &Ui, series: &BaseItem) -> adw::NavigationPage {
         }
     });
     load(ui, &view, &series_id);
-    // Episodes may load before the page has finished sliding in, and the
-    // navigation view moves focus when it does; place the cursor again.
-    page.connect_shown({
+    // The controller's cursor starts on an episode (see `focus_episode`).
+    super::set_focus_hook(&page, {
         let view = Rc::downgrade(&view);
-        move |_| {
-            if let Some(view) = view.upgrade() {
-                let season = view
-                    .season_items
-                    .borrow()
-                    .get(view.seasons.selected())
-                    .map(|season| season.id.clone());
-                if let Some(season) = season {
-                    focus_episode(&view, &season);
-                }
-            }
-        }
+        move || view.upgrade().is_some_and(|view| place_on_episode(&view))
     });
     page
 }
@@ -371,29 +359,55 @@ fn episode_row(ui: &Ui, episode: &BaseItem) -> adw::ActionRow {
 /// first. Leaves the focus alone while the user is elsewhere on the page
 /// (hero buttons, cast); season chips count as "on the episodes".
 fn focus_episode(view: &SeriesView, season_id: &str) {
-    let Some(page) = view.episodes.ancestor(adw::NavigationPage::static_type()) else {
-        return;
-    };
-    let focus = view.episodes.root().and_then(|root| root.focus());
-    let elsewhere_on_page = focus.as_ref().is_some_and(|focus| {
-        focus.is_ancestor(&page)
-            && !focus.is_ancestor(&view.episodes)
-            && !focus.is_ancestor(&view.seasons.root)
-    });
-    if elsewhere_on_page {
+    if focus_elsewhere_on_page(view) {
         return;
     }
+    if let Some(row) = start_row(view, season_id) {
+        row.grab_focus();
+    }
+}
+
+/// The cursor's starting place, for the page's focus hook: the episode
+/// to start on, once the season's episodes are in.
+fn place_on_episode(view: &SeriesView) -> bool {
+    let season = view
+        .season_items
+        .borrow()
+        .get(view.seasons.selected())
+        .map(|season| season.id.clone());
+    season
+        .and_then(|season| start_row(view, &season))
+        .is_some_and(|row| row.grab_focus())
+}
+
+/// The focus is on this page but somewhere the user chose (hero buttons,
+/// cast), not on the episodes or season chips.
+fn focus_elsewhere_on_page(view: &SeriesView) -> bool {
+    let Some(page) = view.episodes.ancestor(adw::NavigationPage::static_type()) else {
+        return false;
+    };
+    let focus = view.episodes.root().and_then(|root| root.focus());
+    focus.as_ref().is_some_and(|focus| {
+        focus.is_ancestor(&page)
+            && focus.is_mapped()
+            && !focus.is::<gtk::ScrolledWindow>()
+            && !focus.is_ancestor(&view.episodes)
+            && !focus.is_ancestor(&view.seasons.root)
+    })
+}
+
+/// The row to start on in `season_id`: the episode last opened there,
+/// else the first.
+fn start_row(view: &SeriesView, season_id: &str) -> Option<gtk::ListBoxRow> {
     let index = match &*view.opened.borrow() {
         Some((season, index)) if season == season_id => *index as i32,
         _ => 0,
     };
-    let row = view
-        .episodes
+    view.episodes
         .row_at_index(index)
-        .or_else(|| view.episodes.row_at_index(0));
-    if let Some(row) = row {
-        row.grab_focus();
-    }
+        .or_else(|| view.episodes.row_at_index(0))
+        // Still the loading spinner, not an episode.
+        .filter(|row| row.is_activatable())
 }
 
 fn clear_list(list: &gtk::ListBox) {

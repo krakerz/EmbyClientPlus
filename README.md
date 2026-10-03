@@ -66,6 +66,7 @@ mpv.conf, controller, updates and logs.
 
 - **Browsing:** D-pad/stick move, A select, B back, Y home, X item menu, LB/RB tabs, seasons or episodes, Select search, Start Preferences.
 - **Player:** A play/pause, D-pad seek/volume, LB/RB episode, LT/RT chapter, X/Y audio/subtitles, Select skip intro/credits, Start drives the on-screen buttons.
+- **Music:** LT/RT open or close the music panel; in it Y play/pause, LB/RB track, X move a queue item (↑/↓, then A).
 
 **Steam Game Mode:** add the AppImage (or the installed `bin/embyclientplus`) as a non-Steam
 game, with the **Gamepad** layout.

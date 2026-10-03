@@ -1,6 +1,7 @@
 //! Movie/episode details with Resume / Play buttons. Episodes also get
 //! previous/next links and a strip of their season's episodes.
 
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -20,6 +21,24 @@ struct DetailsView {
     episodes: gtk::Box,
     /// Cast and similar titles.
     related: gtk::Box,
+    /// The previous/next episode links, once loaded.
+    neighbours: RefCell<Option<gtk::CenterBox>>,
+    /// Where the cursor goes when this page came from LB/RB.
+    arrived_at: Cell<Option<Spot>>,
+}
+
+/// Where the cursor was when LB/RB stepped to another episode, so the
+/// next page puts it back on the same kind of thing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Spot {
+    Previous,
+    Next,
+    Play,
+}
+
+thread_local! {
+    /// Handed from the page LB/RB left to the one it opened.
+    static STEPPED_FROM: Cell<Option<Spot>> = const { Cell::new(None) };
 }
 
 pub fn page(ui: &Ui, item: &BaseItem) -> adw::NavigationPage {
@@ -40,6 +59,18 @@ pub fn page(ui: &Ui, item: &BaseItem) -> adw::NavigationPage {
         hero,
         episodes,
         related,
+        neighbours: RefCell::new(None),
+        arrived_at: Cell::new(STEPPED_FROM.with(Cell::take)),
+    });
+    // Opened by LB/RB: the navigation view focuses the header when the
+    // page slides in; put the cursor back where it was.
+    page.connect_shown({
+        let view = Rc::downgrade(&view);
+        move |_| {
+            if let Some(view) = view.upgrade() {
+                place_cursor(&view);
+            }
+        }
     });
 
     // Show what we already have right away, then refresh from the server
@@ -88,6 +119,9 @@ fn load(ui: &Ui, view: &Rc<DetailsView>, item_id: &str) {
                 show(&ui, &view, &item);
                 show_episodes(&ui, &view, &item, &episodes);
                 super::hero::show_related(&ui, &view.related, &item);
+                // The buttons were just rebuilt; once is enough after that.
+                place_cursor(&view);
+                view.arrived_at.set(None);
             }
             Err(e) => ui.report_error("Could not load details", &e),
         }
@@ -136,6 +170,8 @@ fn show_episodes(ui: &Ui, view: &DetailsView, item: &BaseItem, episodes: &[BaseI
         return;
     }
     let (previous, next) = neighbours(episodes, &item.id);
+    let nav = gtk::CenterBox::new();
+    view.neighbours.replace(Some(nav.clone()));
     // LB/RB step to the previous/next episode, like the buttons below.
     if let Some(page) = view
         .episodes
@@ -143,15 +179,17 @@ fn show_episodes(ui: &Ui, view: &DetailsView, item: &BaseItem, episodes: &[BaseI
         .and_downcast::<adw::NavigationPage>()
     {
         let (weak, previous, next) = (ui.downgrade(), previous.clone(), next.clone());
+        let nav = nav.downgrade();
         super::set_tab_label(&page, "Episode");
         super::set_tab_stepper(&page, move |forward| {
             let target = if forward { &next } else { &previous };
-            if let (Some(ui), Some(target)) = (weak.upgrade(), target) {
-                ui.open_replacing(target);
-            }
+            let (Some(ui), Some(target)) = (weak.upgrade(), target) else {
+                return;
+            };
+            STEPPED_FROM.with(|spot| spot.set(Some(spot_of(nav.upgrade().as_ref()))));
+            ui.open_replacing(target);
         });
     }
-    let nav = gtk::CenterBox::new();
     if let Some(previous) = previous {
         nav.set_start_widget(Some(&neighbour_button(ui, &previous, false)));
     }
@@ -229,6 +267,38 @@ fn scroll_to_current(strip: &gtk::Box, season: &[BaseItem], item_id: &str) {
 
 /// "‹ S1:E3 · Title" / "S1:E5 · Title ›"; replaces this page rather than
 /// stacking another.
+/// What the cursor is on now: one of the previous/next links, or else
+/// anything (Play stands in for it).
+fn spot_of(nav: Option<&gtk::CenterBox>) -> Spot {
+    let focus = nav.and_then(|nav| nav.root()).and_then(|root| root.focus());
+    let within = |widget: Option<gtk::Widget>| {
+        widget.is_some_and(|w| focus.as_ref().is_some_and(|f| f == &w || f.is_ancestor(&w)))
+    };
+    match nav {
+        Some(nav) if within(nav.start_widget()) => Spot::Previous,
+        Some(nav) if within(nav.end_widget()) => Spot::Next,
+        _ => Spot::Play,
+    }
+}
+
+/// Puts the cursor where it was on the page LB/RB came from.
+fn place_cursor(view: &DetailsView) {
+    let Some(spot) = view.arrived_at.get() else {
+        return;
+    };
+    let nav = view.neighbours.borrow().clone();
+    let target = match spot {
+        Spot::Previous => nav.and_then(|nav| nav.start_widget()),
+        Spot::Next => nav.and_then(|nav| nav.end_widget()),
+        Spot::Play => None,
+    };
+    // An end of the season has no link on that side: Play instead.
+    let target = target.or_else(|| view.hero.buttons.first_child());
+    if let Some(target) = target {
+        target.grab_focus();
+    }
+}
+
 fn neighbour_button(ui: &Ui, episode: &BaseItem, forward: bool) -> gtk::Button {
     let label = gtk::Label::builder()
         .label(episode.episode_label())

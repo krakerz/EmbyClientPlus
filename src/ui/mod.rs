@@ -65,6 +65,7 @@ struct Inner {
     /// Holds `nav` plus the music player's bar and Now Playing sheet.
     root: adw::BottomSheet,
     music: crate::music::MusicPlayer,
+    music_panel: RefCell<Option<music::MusicPanel>>,
     toasts: adw::ToastOverlay,
     player: Player,
     player_page: PlayerPage,
@@ -99,6 +100,7 @@ impl Ui {
                 nav: adw::NavigationView::new(),
                 root: adw::BottomSheet::new(),
                 music,
+                music_panel: RefCell::new(None),
                 toasts,
                 player,
                 player_page,
@@ -124,7 +126,8 @@ impl Ui {
         actions.add_action(&home);
         ui.inner.nav.insert_action_group("nav", Some(&actions));
         ui.inner.root.set_content(Some(&ui.inner.nav));
-        music::attach(&ui, &ui.inner.music, &ui.inner.root);
+        let panel = music::attach(&ui, &ui.inner.music, &ui.inner.root);
+        ui.inner.music_panel.replace(Some(panel));
         ui
     }
 
@@ -136,11 +139,20 @@ impl Ui {
         &self.inner.music
     }
 
-    /// Closes Now Playing if it's open; false when it wasn't.
+    /// Closes the music panel if it's open; false when it wasn't.
     pub fn close_now_playing(&self) -> bool {
-        let open = self.inner.root.is_open();
-        self.inner.root.set_open(false);
-        open
+        match self.music_panel() {
+            Some(panel) if panel.is_open() => {
+                panel.close();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The music panel (Now Playing + queue), for the controller.
+    pub fn music_panel(&self) -> Option<music::MusicPanel> {
+        self.inner.music_panel.borrow().clone()
     }
 
     pub fn session(&self) -> &Session {
@@ -723,6 +735,27 @@ fn set_tab_stepper(page: &adw::NavigationPage, step: impl Fn(bool) + 'static) {
     let hook: Hook<bool> = Rc::new(step);
     // SAFETY: this key is only ever stored and read as `Hook<bool>`.
     unsafe { page.set_data(TAB_STEP_KEY, hook) };
+}
+
+const FOCUS_HOOK_KEY: &str = "embyclientplus-focus-hook";
+
+type FocusHook = Rc<dyn Fn() -> bool>;
+
+/// Where the controller's cursor starts on `page` (e.g. a series' first
+/// episode), instead of the first item; `focus` returns false while that
+/// isn't there yet.
+fn set_focus_hook(page: &adw::NavigationPage, focus: impl Fn() -> bool + 'static) {
+    let hook: FocusHook = Rc::new(focus);
+    // SAFETY: this key is only ever stored and read as `FocusHook`.
+    unsafe { page.set_data(FOCUS_HOOK_KEY, hook) };
+}
+
+fn focus_hook(page: &adw::NavigationPage) -> Option<FocusHook> {
+    // SAFETY: see `set_focus_hook`; cloned out immediately.
+    unsafe {
+        page.data::<FocusHook>(FOCUS_HOOK_KEY)
+            .map(|hook| hook.as_ref().clone())
+    }
 }
 
 const TAB_LABEL_KEY: &str = "embyclientplus-tab-label";

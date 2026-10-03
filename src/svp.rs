@@ -48,6 +48,9 @@ pub fn manager_running() -> bool {
     })
 }
 
+/// How long SVP Manager gets to exit on SIGTERM before it's killed.
+const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// The SVP Manager this app started, if any; only that one gets stopped.
 static STARTED: Mutex<Option<Child>> = Mutex::new(None);
 
@@ -109,6 +112,16 @@ pub fn stop_started() {
         return;
     };
     if let Some(mut child) = started.take() {
+        // Politely first, so it can close cleanly; forcefully if it lingers.
+        // SAFETY: a plain signal to the child process we started.
+        unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+        let deadline = std::time::Instant::now() + STOP_GRACE;
+        while std::time::Instant::now() < deadline {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
         let _ = child.kill();
         let _ = child.wait();
         tracing::info!("stopped the SVP Manager we started");

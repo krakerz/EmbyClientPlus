@@ -32,6 +32,15 @@ const CSS: &str = "
     padding: 6px 14px;
     border-radius: 999px;
     font-size: 0.9em;
+    background: @popover_bg_color;
+    color: @popover_fg_color;
+    border: 1px solid alpha(@borders, 0.8);
+    box-shadow: 0 2px 8px alpha(black, 0.35);
+}
+.queue-moving {
+    background: alpha(@accent_bg_color, 0.35);
+    outline: 3px solid @accent_color;
+    outline-offset: -3px;
 }
 .legend-key {
     min-width: 22px;
@@ -76,6 +85,12 @@ flowboxchild:focus-visible .category-tile { outline: 3px solid @accent_color; ou
 /* Controller/keyboard focus: a solid accent ring, easy to spot from the couch. */
 button:focus-visible { outline: 3px solid @accent_color; outline-offset: 1px; }
 .card-button:focus-visible { outline: none; }
+/* Grid cells draw their own focus box around the whole card; the ring on
+   the artwork (below) is the one to show. */
+gridview > child:focus-visible {
+    outline: none;
+    background: none;
+}
 .card-button:focus-visible .card,
 gridview > child:focus-visible .card {
     outline: 4px solid @accent_color;
@@ -159,6 +174,52 @@ pub fn present(window: &adw::ApplicationWindow) {
     });
 }
 
+thread_local! {
+    /// The window a termination signal closes (main thread only).
+    static SHUTDOWN_WINDOW: RefCell<glib::WeakRef<adw::ApplicationWindow>> =
+        RefCell::new(glib::WeakRef::new());
+}
+
+/// Quits the app the normal way (final playback report, SVP Manager
+/// stopped). An open dialog would swallow the close request (libadwaita
+/// closes the dialog instead), so it goes first.
+pub fn shut_down(window: &gtk::Window) {
+    if let Some(dialog) = window
+        .downcast_ref::<adw::ApplicationWindow>()
+        .and_then(|window| window.visible_dialog())
+    {
+        dialog.force_close();
+    }
+    window.close();
+}
+
+/// After a termination signal, the longest a clean shutdown may take.
+const SHUTDOWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Resolves when the first of `futures` does.
+async fn futures_select_any<F: std::future::Future + Unpin>(futures: impl Iterator<Item = F>) {
+    let mut futures: Vec<F> = futures.collect();
+    std::future::poll_fn(move |cx| {
+        for future in &mut futures {
+            if std::pin::Pin::new(future).poll(cx).is_ready() {
+                return std::task::Poll::Ready(());
+            }
+        }
+        std::task::Poll::Pending
+    })
+    .await;
+}
+
+/// Pointer movement (px) below this is noise, not someone using the mouse.
+const POINTER_JITTER: f64 = 4.0;
+
+fn pointer_used(state: &State) {
+    if state.legend.is_in_use() {
+        state.legend.set_in_use(false);
+        state.refresh_legend();
+    }
+}
+
 const SVP_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 /// How long SVP Manager gets to open its window after its process appears.
 const SVP_SETTLE: std::time::Duration = std::time::Duration::from_secs(3);
@@ -228,12 +289,41 @@ pub fn build(app: &adw::Application, player: Player) -> adw::ApplicationWindow {
             if let (Some(state), Some(window)) = (state.upgrade(), window.upgrade()) {
                 let ui = state.ui.borrow().clone();
                 super::gamepad::handle(&window, ui.as_ref(), pad, repeat);
+                state.legend.set_in_use(true);
                 state.refresh_legend();
             }
         }
     });
 
     super::gamepad::track_focus(&window);
+    // Steam's "Exit game", a logout or Ctrl+C: shut down as if the window
+    // were closed (final playback report, SVP Manager stopped).
+    SHUTDOWN_WINDOW.with(|slot| slot.replace(window.downgrade()));
+    spawn_detached(async {
+        use tokio::signal::unix::{SignalKind, signal};
+        let kinds = [
+            SignalKind::terminate(),
+            SignalKind::interrupt(),
+            SignalKind::hangup(),
+        ];
+        let mut streams: Vec<_> = kinds.into_iter().filter_map(|k| signal(k).ok()).collect();
+        if streams.is_empty() {
+            return;
+        }
+        let waits = streams.iter_mut().map(|s| Box::pin(s.recv()));
+        futures_select_any(waits).await;
+        tracing::info!("termination signal: shutting down");
+        glib::MainContext::default().invoke(|| {
+            if let Some(window) = SHUTDOWN_WINDOW.with(|slot| slot.borrow().upgrade()) {
+                shut_down(window.upcast_ref());
+            }
+        });
+        // The signal no longer kills us by default: if shutdown hangs,
+        // don't outlive the request.
+        tokio::time::sleep(SHUTDOWN_DEADLINE).await;
+        tracing::warn!("shutdown took too long; exiting");
+        std::process::exit(0);
+    });
     // The legend follows the controller, the mapping and open dialogs.
     crate::controller::on_change({
         let state = Rc::downgrade(&state);
@@ -243,6 +333,36 @@ pub fn build(app: &adw::Application, player: Player) -> adw::ApplicationWindow {
             }
         }
     });
+    // Mouse or touch input hides the legend until the controller is used
+    // again. Motion events also come without the pointer moving (layout
+    // changes), so only real movement counts.
+    let pointer_moved = gtk::EventControllerMotion::new();
+    pointer_moved.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let last_position = std::cell::Cell::new(None::<(f64, f64)>);
+    pointer_moved.connect_motion({
+        let state = Rc::downgrade(&state);
+        move |_, x, y| {
+            let moved = last_position
+                .replace(Some((x, y)))
+                .is_some_and(|(px, py)| (x - px).abs() + (y - py).abs() > POINTER_JITTER);
+            if moved && let Some(state) = state.upgrade() {
+                pointer_used(&state);
+            }
+        }
+    });
+    window.add_controller(pointer_moved);
+    let clicked = gtk::GestureClick::new();
+    clicked.set_button(0);
+    clicked.set_propagation_phase(gtk::PropagationPhase::Capture);
+    clicked.connect_pressed({
+        let state = Rc::downgrade(&state);
+        move |_, _, _, _| {
+            if let Some(state) = state.upgrade() {
+                pointer_used(&state);
+            }
+        }
+    });
+    window.add_controller(clicked);
     window.connect_visible_dialog_notify({
         let state = Rc::downgrade(&state);
         move |_| {
@@ -313,6 +433,16 @@ fn show_main(state: &Rc<State>, session: Session) {
             }
         }
     });
+    // ...and so do the music panel opening and the music bar appearing.
+    let sheet = ui.widget();
+    for property in ["open", "bottom-bar"] {
+        let state = Rc::downgrade(state);
+        sheet.connect_notify_local(Some(property), move |_, _| {
+            if let Some(state) = state.upgrade() {
+                state.refresh_legend();
+            }
+        });
+    }
     state.ui.replace(Some(ui));
     state.refresh_legend();
     state.login.replace(None);
