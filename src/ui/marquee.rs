@@ -38,6 +38,9 @@ fn wrap_inner(label: &gtk::Label, owner: Option<&gtk::Widget>) -> gtk::ScrolledW
         .propagate_natural_width(false)
         .propagate_natural_height(true)
         .hexpand(true)
+        // Text, not a place for the cursor: focus moves past it.
+        .can_focus(false)
+        .focusable(false)
         .child(label)
         .build();
     attach_inner(&scroller, owner);

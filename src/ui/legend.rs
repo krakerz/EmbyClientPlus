@@ -32,6 +32,8 @@ impl Legend {
             .vscrollbar_policy(gtk::PolicyType::Never)
             .propagate_natural_width(true)
             .propagate_natural_height(true)
+            .can_focus(false)
+            .focusable(false)
             .child(&hints)
             .build();
         let root = gtk::Box::builder()
