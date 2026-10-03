@@ -28,6 +28,19 @@ const CSS: &str = "
     border-radius: 12px;
 }
 .scrub-frame { border-radius: 8px; }
+.legend {
+    padding: 6px 14px;
+    border-radius: 999px;
+    font-size: 0.9em;
+}
+.legend-key {
+    min-width: 22px;
+    padding: 0 6px;
+    border-radius: 6px;
+    background: alpha(currentColor, 0.18);
+    font-weight: bold;
+    font-size: 0.85em;
+}
 .volume-osd {
     padding: 12px 18px;
     border-radius: 999px;
@@ -71,6 +84,14 @@ gridview > child:focus-visible .card {
 .card-button:focus-visible .card-title,
 gridview > child:focus-visible .card-title { color: @accent_color; }
 row:focus-visible { outline: 3px solid @accent_color; outline-offset: -3px; }
+/* Menus (player options, card menus): the highlighted choice stands out
+   from video behind the popover, not just a faint tint. */
+popover.menu modelbutton:hover,
+popover.menu modelbutton:focus-visible,
+popover modelbutton:focus-visible {
+    background: @accent_bg_color;
+    color: @accent_fg_color;
+}
 .watched-badge {
     background: alpha(@accent_bg_color, 0.9);
     color: @accent_fg_color;
@@ -86,7 +107,63 @@ struct State {
     ui: RefCell<Option<Ui>>,
     player: Player,
     player_page: PlayerPage,
+    legend: super::legend::Legend,
+    window: glib::WeakRef<adw::ApplicationWindow>,
 }
+
+impl State {
+    /// Re-reads the controller legend for what's on screen.
+    fn refresh_legend(&self) {
+        if let Some(window) = self.window.upgrade() {
+            self.legend.update(&window, self.ui.borrow().as_ref());
+        }
+    }
+}
+
+/// Shows the window. SVP Manager starts with the app (when auto-start is
+/// on), so it's up before the first video. In Game Mode, gamescope gives
+/// focus to whichever window maps last, so if SVP Manager has to start,
+/// ours waits until it's up and then opens on top.
+pub fn present(window: &adw::ApplicationWindow) {
+    let frame_gen = Settings::load().unwrap_or_default().frame_gen;
+    let wanted = frame_gen.default_backend == crate::config::FrameGenBackend::Svp
+        && frame_gen.auto_start_svp()
+        && crate::svp::installed();
+    if !wanted || crate::svp::manager_running() {
+        window.present();
+        return;
+    }
+    crate::svp::ensure_running();
+    if !crate::gamescope::detected() {
+        window.present();
+        return;
+    }
+    let started = std::time::Instant::now();
+    let running_since = std::cell::Cell::new(None::<std::time::Instant>);
+    let window = window.downgrade();
+    glib::timeout_add_local(SVP_POLL, move || {
+        let Some(window) = window.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
+        if running_since.get().is_none() && crate::svp::manager_running() {
+            running_since.set(Some(std::time::Instant::now()));
+        }
+        let settled = running_since
+            .get()
+            .is_some_and(|at| at.elapsed() >= SVP_SETTLE);
+        if settled || started.elapsed() >= SVP_WAIT_MAX {
+            window.present();
+            return glib::ControlFlow::Break;
+        }
+        glib::ControlFlow::Continue
+    });
+}
+
+const SVP_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+/// How long SVP Manager gets to open its window after its process appears.
+const SVP_SETTLE: std::time::Duration = std::time::Duration::from_secs(3);
+/// Never keep the app hidden longer than this.
+const SVP_WAIT_MAX: std::time::Duration = std::time::Duration::from_secs(10);
 
 pub fn build(app: &adw::Application, player: Player) -> adw::ApplicationWindow {
     load_css();
@@ -95,7 +172,10 @@ pub fn build(app: &adw::Application, player: Player) -> adw::ApplicationWindow {
         .transition_type(gtk::StackTransitionType::Crossfade)
         .build();
     let toasts = adw::ToastOverlay::new();
-    toasts.set_child(Some(&stack));
+    let legend = super::legend::Legend::new();
+    let content = gtk::Overlay::builder().child(&stack).build();
+    content.add_overlay(legend.widget());
+    toasts.set_child(Some(&content));
     let window_settings = Settings::load().unwrap_or_default().window;
     apply_theme(window_settings.theme);
     let window = adw::ApplicationWindow::builder()
@@ -129,6 +209,8 @@ pub fn build(app: &adw::Application, player: Player) -> adw::ApplicationWindow {
         ui: RefCell::new(None),
         player,
         player_page: PlayerPage::new(player),
+        legend,
+        window: window.downgrade(),
     });
 
     match stored_session(&settings) {
@@ -146,10 +228,29 @@ pub fn build(app: &adw::Application, player: Player) -> adw::ApplicationWindow {
             if let (Some(state), Some(window)) = (state.upgrade(), window.upgrade()) {
                 let ui = state.ui.borrow().clone();
                 super::gamepad::handle(&window, ui.as_ref(), pad, repeat);
+                state.refresh_legend();
             }
         }
     });
 
+    super::gamepad::track_focus(&window);
+    // The legend follows the controller, the mapping and open dialogs.
+    crate::controller::on_change({
+        let state = Rc::downgrade(&state);
+        move || {
+            if let Some(state) = state.upgrade() {
+                state.refresh_legend();
+            }
+        }
+    });
+    window.connect_visible_dialog_notify({
+        let state = Rc::downgrade(&state);
+        move |_| {
+            if let Some(state) = state.upgrade() {
+                state.refresh_legend();
+            }
+        }
+    });
     window.connect_close_request({
         let state = state.clone();
         move |_| {
@@ -203,7 +304,17 @@ fn show_main(state: &Rc<State>, session: Session) {
     );
     replace_child(&state.stack, "main", ui.widget());
     state.stack.set_visible_child_name("main");
+    // Pages (and the player) come and go: the legend's hints change too.
+    ui.nav().connect_visible_page_notify({
+        let state = Rc::downgrade(state);
+        move |_| {
+            if let Some(state) = state.upgrade() {
+                state.refresh_legend();
+            }
+        }
+    });
     state.ui.replace(Some(ui));
+    state.refresh_legend();
     state.login.replace(None);
     if let Some(child) = state.stack.child_by_name("login") {
         state.stack.remove(&child);

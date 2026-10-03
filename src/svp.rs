@@ -51,9 +51,11 @@ pub fn manager_running() -> bool {
 /// The SVP Manager this app started, if any; only that one gets stopped.
 static STARTED: Mutex<Option<Child>> = Mutex::new(None);
 
-/// Starts SVP Manager if it isn't running. It normally sits in the tray
-/// with no window; in gamescope (no tray) it runs invisibly on the
-/// session's X display, which is verified to attach and interpolate.
+/// Starts SVP Manager if it isn't running: at app launch (when auto-start
+/// is on), so it's ready before any video, and again at playback if it
+/// was closed. On the desktop it sits in the tray. In Game Mode it shares
+/// gamescope's X display, but without Steam's game id it isn't part of
+/// this app as far as gamescope is concerned, so it never takes focus.
 pub fn ensure_running() {
     if manager_running() {
         return;
@@ -63,18 +65,9 @@ pub fn ensure_running() {
     };
     let manager = dir.join("SVPManager");
     let in_gamescope = crate::gamescope::detected();
-    // In Game Mode, SVP Manager's windows would count as part of our app
-    // and steal focus. A headless gamescope gives it a private, invisible
-    // display; it still finds our player through the IPC socket.
-    let mut command = if in_gamescope && headless_gamescope_available() {
-        let mut command = Command::new("gamescope");
-        command
-            .args(["--backend", "headless", "-w", "640", "-h", "360", "--"])
-            .arg(&manager);
-        command
-    } else {
-        Command::new(&manager)
-    };
+    // A headless gamescope around it (to hide it) cost GPU time while
+    // playing, which showed as stutter on handhelds; it runs plainly now.
+    let mut command = Command::new(&manager);
     command
         .current_dir(&dir)
         .stdin(Stdio::null())
@@ -84,7 +77,8 @@ pub fn ensure_running() {
         // Qt would otherwise try gamescope's Wayland socket.
         command.env("QT_QPA_PLATFORM", "xcb");
         // Without Steam's game id and overlay, gamescope doesn't treat SVP
-        // Manager as part of this game.
+        // Manager as part of this game: its windows stay behind ours and
+        // never take focus.
         for name in [
             "SteamAppId",
             "SteamGameId",
@@ -109,57 +103,16 @@ pub fn ensure_running() {
     }
 }
 
-/// Whether this gamescope has a headless backend (3.14+).
-fn headless_gamescope_available() -> bool {
-    Command::new("gamescope")
-        .arg("--help")
-        .output()
-        .is_ok_and(|out| {
-            let text = String::from_utf8_lossy(&out.stdout) + String::from_utf8_lossy(&out.stderr);
-            text.contains("headless")
-        })
-}
-
 /// Stops the SVP Manager started by [`ensure_running`], at app exit.
 pub fn stop_started() {
     let Ok(mut started) = STARTED.lock() else {
         return;
     };
     if let Some(mut child) = started.take() {
-        // With the headless-gamescope wrapper, SVP Manager is its child.
-        for pid in managers_with_parent(child.id()) {
-            // SAFETY: plain signal to a process we started (indirectly).
-            unsafe { libc::kill(pid, libc::SIGTERM) };
-        }
         let _ = child.kill();
         let _ = child.wait();
         tracing::info!("stopped the SVP Manager we started");
     }
-}
-
-/// SVPManager processes whose parent is `parent`.
-fn managers_with_parent(parent: u32) -> Vec<i32> {
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return Vec::new();
-    };
-    entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let pid: i32 = entry.file_name().to_str()?.parse().ok()?;
-            let comm = std::fs::read_to_string(entry.path().join("comm")).ok()?;
-            if !is_manager(&comm) {
-                return None;
-            }
-            let status = std::fs::read_to_string(entry.path().join("status")).ok()?;
-            let ppid = status
-                .lines()
-                .find_map(|line| line.strip_prefix("PPid:"))?
-                .trim()
-                .parse::<u32>()
-                .ok()?;
-            (ppid == parent).then_some(pid)
-        })
-        .collect()
 }
 
 fn is_manager(comm: &str) -> bool {

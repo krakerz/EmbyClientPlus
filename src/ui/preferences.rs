@@ -95,12 +95,12 @@ pub fn show(parent: &impl IsA<gtk::Widget>) {
             &labels.iter().map(String::as_str).collect::<Vec<_>>(),
         ))
         .build();
-    let current = Quality::from_mbps(settings.playback.bitrate_cap_mbps);
+    let current = Quality::from_kbps(settings.playback.bitrate_cap_kbps());
     quality.set_selected(QUALITIES.iter().position(|q| *q == current).unwrap_or(0) as u32);
     quality.connect_selected_notify(|row| {
         if let Some(chosen) = QUALITIES.get(row.selected() as usize) {
-            let mbps = chosen.mbps();
-            save(|s| s.playback.bitrate_cap_mbps = mbps);
+            let kbps = chosen.kbps();
+            save(|s| s.playback.set_bitrate_cap_kbps(kbps));
         }
     });
     playback.add(&quality);

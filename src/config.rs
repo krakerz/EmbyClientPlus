@@ -160,9 +160,13 @@ impl ServerSettings {
 pub struct PlaybackSettings {
     #[serde(default)]
     pub mode: PlaybackMode,
-    /// 0 means unlimited.
+    /// Older configs' bitrate cap in whole Mbps (0 = original); read only
+    /// when `bitrate_cap_kbps` is absent. See [`Self::bitrate_cap_kbps`].
     #[serde(default)]
     pub bitrate_cap_mbps: u32,
+    /// Default quality: transcode cap in kbps, 0 = the original file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bitrate_cap_kbps: Option<u32>,
     /// Load ~/.config/mpv/mpv.conf (minus options the app manages).
     #[serde(default)]
     pub use_mpv_conf: bool,
@@ -222,11 +226,27 @@ impl TrailerQuality {
     }
 }
 
+impl PlaybackSettings {
+    /// The default quality's cap in kbps (0 = original), from the current
+    /// setting or an older config's Mbps one.
+    pub fn bitrate_cap_kbps(&self) -> u32 {
+        self.bitrate_cap_kbps
+            .unwrap_or(self.bitrate_cap_mbps.saturating_mul(1_000))
+    }
+
+    pub fn set_bitrate_cap_kbps(&mut self, kbps: u32) {
+        self.bitrate_cap_kbps = Some(kbps);
+        // Older versions read this one; keep it a sane approximation.
+        self.bitrate_cap_mbps = kbps / 1_000;
+    }
+}
+
 impl Default for PlaybackSettings {
     fn default() -> Self {
         Self {
             mode: PlaybackMode::default(),
             bitrate_cap_mbps: 0,
+            bitrate_cap_kbps: None,
             use_mpv_conf: false,
             bar_fill: default_bar_fill(),
             trailer_quality: TrailerQuality::default(),
@@ -476,5 +496,18 @@ mod tests {
         // Untouched sections still get their defaults.
         assert_eq!(parsed.audio.preferred_language, "eng");
         assert_eq!(parsed.playback.mode, PlaybackMode::DirectPlayPreferred);
+    }
+
+    #[test]
+    fn bitrate_cap_reads_old_mbps_configs() {
+        let old: Settings = toml::from_str("[playback]\nbitrate_cap_mbps = 6\n").unwrap();
+        assert_eq!(old.playback.bitrate_cap_kbps(), 6_000);
+        let mut new = Settings::default();
+        assert_eq!(new.playback.bitrate_cap_kbps(), 0);
+        new.playback.set_bitrate_cap_kbps(720);
+        assert_eq!(new.playback.bitrate_cap_kbps(), 720);
+        let saved = toml::to_string(&new).unwrap();
+        let reloaded: Settings = toml::from_str(&saved).unwrap();
+        assert_eq!(reloaded.playback.bitrate_cap_kbps(), 720);
     }
 }

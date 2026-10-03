@@ -34,57 +34,90 @@ const PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
 const STOP_REPORT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Stream quality: the original file, or a server transcode capped at a
-/// bitrate. Picked per session, not remembered (it's about the network).
+/// bitrate (kbps). Picked per session, not remembered (it's about the
+/// network); the configured default applies at the start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Quality {
     #[default]
     Original,
-    Mbps(u32),
+    Kbps(u32),
 }
 
-pub const QUALITIES: [Quality; 5] = [
+/// The choices offered, best first (the same steps as Emby's web player).
+pub const QUALITIES: [Quality; 13] = [
     Quality::Original,
-    Quality::Mbps(20),
-    Quality::Mbps(10),
-    Quality::Mbps(6),
-    Quality::Mbps(3),
+    Quality::Kbps(40_000),
+    Quality::Kbps(20_000),
+    Quality::Kbps(10_000),
+    Quality::Kbps(8_000),
+    Quality::Kbps(6_000),
+    Quality::Kbps(4_000),
+    Quality::Kbps(3_000),
+    Quality::Kbps(2_000),
+    Quality::Kbps(1_500),
+    Quality::Kbps(1_000),
+    Quality::Kbps(720),
+    Quality::Kbps(420),
 ];
 
 impl Quality {
+    /// "Original", "10 Mbps", "720p · 4 Mbps", "360p · 720 kbps".
     pub fn label(self) -> String {
-        match self {
-            Quality::Original => "Original".to_string(),
-            Quality::Mbps(mbps) => format!("{mbps} Mbps"),
+        let Quality::Kbps(kbps) = self else {
+            return "Original".to_string();
+        };
+        let rate = if kbps >= 1_000 {
+            let mbps = f64::from(kbps) / 1_000.0;
+            format!("{} Mbps", format!("{mbps:.1}").trim_end_matches(".0"))
+        } else {
+            format!("{kbps} kbps")
+        };
+        match self.max_height() {
+            Some(height) => format!("{height}p · {rate}"),
+            None => rate,
         }
     }
 
-    /// From config's `playback.bitrate_cap_mbps` (0 = original).
-    pub fn from_mbps(mbps: u32) -> Self {
-        if mbps == 0 {
+    /// From config's bitrate cap in kbps (0 = original).
+    pub fn from_kbps(kbps: u32) -> Self {
+        if kbps == 0 {
             Quality::Original
         } else {
-            Quality::Mbps(mbps)
+            Quality::Kbps(kbps)
         }
     }
 
-    pub fn mbps(self) -> u32 {
+    pub fn kbps(self) -> u32 {
         match self {
             Quality::Original => 0,
-            Quality::Mbps(mbps) => mbps,
+            Quality::Kbps(kbps) => kbps,
         }
     }
 
     fn max_bitrate(self) -> Option<i64> {
         match self {
             Quality::Original => None,
-            Quality::Mbps(mbps) => Some(i64::from(mbps) * 1_000_000),
+            Quality::Kbps(kbps) => Some(i64::from(kbps) * 1_000),
+        }
+    }
+
+    /// The tallest picture worth sending at this bitrate; above ~6 Mbps
+    /// the source size is fine. Without a cap the server squeezes 1080p
+    /// into the bitrate, which looks far worse than a smaller picture.
+    pub fn max_height(self) -> Option<u32> {
+        match self.kbps() {
+            0 | 6_000.. => None,
+            3_000..6_000 => Some(720),
+            1_500..3_000 => Some(480),
+            700..1_500 => Some(360),
+            _ => Some(240),
         }
     }
 
     fn play_method(self) -> &'static str {
         match self {
             Quality::Original => "DirectStream",
-            Quality::Mbps(_) => "Transcode",
+            Quality::Kbps(_) => "Transcode",
         }
     }
 }
@@ -137,6 +170,7 @@ impl PlaybackSession {
         let request = StreamRequest {
             start_ticks,
             max_bitrate: quality.max_bitrate(),
+            max_height: quality.max_height(),
             audio_stream_index,
         };
         let (item, episodes, info) = spawn_tokio({
@@ -186,7 +220,7 @@ impl PlaybackSession {
                 stream.url
             }
             Quality::Original => client.direct_stream_url(&item.id, &source.id)?,
-            Quality::Mbps(_) => client.resolve_transcoding_url(&without_burned_subtitles(
+            Quality::Kbps(_) => client.resolve_transcoding_url(&without_burned_subtitles(
                 source
                     .transcoding_url
                     .as_deref()
@@ -572,7 +606,7 @@ fn subtitle_files(
         }
         let wanted = match quality {
             Quality::Original => stream.is_external,
-            Quality::Mbps(_) => stream.is_external || stream.is_text_subtitle_stream,
+            Quality::Kbps(_) => stream.is_external || stream.is_text_subtitle_stream,
         };
         if !wanted {
             continue;
@@ -685,7 +719,7 @@ mod tests {
 
     #[test]
     fn transcode_fetches_every_text_subtitle() {
-        let files = subtitle_files(&client(), "i", &source(), Quality::Mbps(6)).unwrap();
+        let files = subtitle_files(&client(), "i", &source(), Quality::Kbps(6_000)).unwrap();
         let indexes: Vec<i32> = files.iter().map(|(i, _)| *i).collect();
         assert_eq!(indexes, [2, 4]);
         assert_eq!(
@@ -711,11 +745,19 @@ mod tests {
     #[test]
     fn quality_labels_and_bitrates() {
         assert_eq!(Quality::Original.label(), "Original");
-        assert_eq!(Quality::from_mbps(0), Quality::Original);
-        assert_eq!(Quality::from_mbps(6).mbps(), 6);
-        assert_eq!(Quality::Mbps(6).max_bitrate(), Some(6_000_000));
+        assert_eq!(Quality::from_kbps(0), Quality::Original);
+        assert_eq!(Quality::from_kbps(6_000).kbps(), 6_000);
+        assert_eq!(Quality::Kbps(6_000).max_bitrate(), Some(6_000_000));
+        assert_eq!(Quality::Kbps(420).max_bitrate(), Some(420_000));
         assert_eq!(Quality::Original.play_method(), "DirectStream");
-        assert_eq!(Quality::Mbps(3).play_method(), "Transcode");
+        assert_eq!(Quality::Kbps(3_000).play_method(), "Transcode");
+        assert_eq!(Quality::Kbps(10_000).label(), "10 Mbps");
+        assert_eq!(Quality::Kbps(4_000).label(), "720p · 4 Mbps");
+        assert_eq!(Quality::Kbps(1_500).label(), "480p · 1.5 Mbps");
+        assert_eq!(Quality::Kbps(720).label(), "360p · 720 kbps");
+        assert_eq!(Quality::Kbps(420).label(), "240p · 420 kbps");
+        assert_eq!(Quality::Kbps(6_000).max_height(), None);
+        assert_eq!(Quality::Original.max_height(), None);
     }
 
     #[test]

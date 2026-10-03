@@ -35,12 +35,34 @@ pub struct DeviceProfile {
     pub direct_play_profiles: Vec<DirectPlayProfile>,
     pub transcoding_profiles: Vec<TranscodingProfile>,
     pub subtitle_profiles: Vec<SubtitleProfile>,
+    /// Limits on the stream, e.g. the transcode's height at low bitrates.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub codec_profiles: Vec<CodecProfile>,
+}
+
+/// A limit the server must respect for one stream type.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct CodecProfile {
+    #[serde(rename = "Type")]
+    pub profile_type: String,
+    pub conditions: Vec<ProfileCondition>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ProfileCondition {
+    pub condition: String,
+    pub property: String,
+    pub value: String,
+    pub is_required: bool,
 }
 
 impl Default for DeviceProfile {
     fn default() -> Self {
         DeviceProfile {
             max_streaming_bitrate: None,
+            codec_profiles: Vec::new(),
             direct_play_profiles: vec![
                 DirectPlayProfile {
                     container: "mkv,mp4,mov,avi,webm,ts,m2ts,flv".to_string(),
@@ -86,9 +108,22 @@ impl Default for DeviceProfile {
 impl DeviceProfile {
     /// Forces Emby to transcode (no direct-play profiles), to HLS H.264/AAC
     /// under `max_bitrate`. Subtitles are requested as external files.
-    pub fn transcode_only(max_bitrate: Option<i64>) -> Self {
+    pub fn transcode_only(max_bitrate: Option<i64>, max_height: Option<u32>) -> Self {
         DeviceProfile {
             max_streaming_bitrate: max_bitrate,
+            codec_profiles: max_height
+                .map(|height| {
+                    vec![CodecProfile {
+                        profile_type: "Video".to_string(),
+                        conditions: vec![ProfileCondition {
+                            condition: "LessThanEqual".to_string(),
+                            property: "Height".to_string(),
+                            value: height.to_string(),
+                            is_required: false,
+                        }],
+                    }]
+                })
+                .unwrap_or_default(),
             direct_play_profiles: Vec::new(),
             subtitle_profiles: ["ass", "ssa", "srt", "subrip", "vtt"]
                 .into_iter()
