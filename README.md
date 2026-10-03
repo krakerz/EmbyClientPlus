@@ -12,16 +12,17 @@ VapourSynth, so SVP 4 attaches just as it does to a standalone mpv.
 - Browsing:
   - Home rows;
   - tabbed libraries (genres, tags, collections, folders);
-  - series and episodes, music, favourites, search.
-- Music player: queue, shuffle/repeat, gapless, Emby playlists, media keys; no SVP.
-- Plays the original file, with transcode presets; resume and watched state sync with Emby.
+  - series and episodes, music, favourites, search with tabbed results.
+- Music player: compact mini player and music panel with queue (shuffle/repeat, gapless, Emby playlists, drag or controller reordering, media keys); no SVP.
+- Plays the original file, with transcode presets (down to 420 kbps); resume and watched state sync with Emby.
 - Player:
   - chapters, track pickers remembered per title;
   - Skip Intro/Credits, Up Next, previous/next;
+  - trickplay seek previews;
   - black-bar fill (blur/glow), aspect ratio and zoom per title.
 - Theme: Light, Dark, or Follow system.
 - SVP per title, with a status light. In Game Mode the app starts SVP Manager itself.
-- Controller navigation, remappable; fullscreen under gamescope.
+- Controller navigation with button legend, remappable; fullscreen under gamescope.
 - Optional: your own `~/.config/mpv/mpv.conf`, and in-app trailers via `yt-dlp`.
 - Self-updates from GitHub releases.
 
@@ -53,7 +54,7 @@ EMBYCLIENTPLUS_PORTABLE=1 cargo build --release && packaging/package.sh   # rele
 2. Pick a title and press **Play** or **Resume**.
 
 Settings are in Home's menu → **Preferences**: SVP, quality, languages, display, artwork,
-mpv.conf, controller, updates and logs.
+mpv.conf, controller, updates and logs. A **Quit button** in Preferences is handy in Steam Game Mode.
 
 | Key | Action | Key | Action |
 |---|---|---|---|

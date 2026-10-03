@@ -165,6 +165,23 @@ impl Queue {
         true
     }
 
+    /// Moves the track at `from` to position `to` (drag and drop). The
+    /// playing track keeps playing wherever the move leaves it.
+    pub fn move_item(&mut self, from: usize, to: usize) -> bool {
+        if from >= self.order.len() || to >= self.order.len() || from == to {
+            return false;
+        }
+        let playing = self.order[self.pos];
+        let item = self.order.remove(from);
+        self.order.insert(to, item);
+        self.pos = self
+            .order
+            .iter()
+            .position(|&i| i == playing)
+            .unwrap_or(self.pos);
+        true
+    }
+
     /// Clears everything after the current track.
     pub fn clear_upcoming(&mut self) {
         self.order.truncate(self.pos + 1);
@@ -272,5 +289,25 @@ mod tests {
         queue.set_shuffle(false, 0);
         assert_eq!(ids(&queue), ["a", "b", "c", "d", "e", "f"]);
         assert_eq!(queue.current().unwrap().id, playing);
+    }
+
+    #[test]
+    fn moves_past_the_playing_track_keep_it_playing() {
+        let mut queue = Queue::new(tracks(&["0", "1", "2", "3", "4"]), 2);
+        // An upcoming track moved above the playing one, step by step.
+        assert!(queue.shift(3, true));
+        assert_eq!(ids(&queue), ["0", "1", "3", "2", "4"]);
+        assert_eq!(queue.current().unwrap().id, "2");
+        // A played track dragged below it.
+        assert!(queue.move_item(0, 4));
+        assert_eq!(ids(&queue), ["1", "3", "2", "4", "0"]);
+        assert_eq!(queue.current().unwrap().id, "2");
+        assert_eq!(queue.position(), 2);
+        // The playing track itself can move too.
+        assert!(queue.move_item(2, 0));
+        assert_eq!(queue.position(), 0);
+        assert_eq!(queue.current().unwrap().id, "2");
+        assert!(!queue.move_item(1, 1));
+        assert!(!queue.move_item(9, 0));
     }
 }
