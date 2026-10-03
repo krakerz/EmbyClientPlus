@@ -34,7 +34,6 @@ const CSS: &str = "
     font-size: 0.9em;
     background: @popover_bg_color;
     color: @popover_fg_color;
-    border: 1px solid alpha(@borders, 0.8);
     box-shadow: 0 2px 8px alpha(black, 0.35);
 }
 .queue-moving {

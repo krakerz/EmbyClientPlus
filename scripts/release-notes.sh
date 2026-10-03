@@ -41,6 +41,8 @@ section == "" { next }
 }
 END {
     take_newer = (found == "" || found == newest)
+    # Lines right under the version heading (no subsection) lead.
+    emit("")
     n = split("Added Changed Deprecated Removed Fixed Security", order, " ")
     for (i = 1; i <= n; i++) emit(order[i])
     for (heading in seen) if (!(heading in done)) emit(heading)

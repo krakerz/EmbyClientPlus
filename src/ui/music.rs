@@ -17,9 +17,10 @@ use crate::music::{MusicPlayer, Repeat};
 use crate::playback::TICKS_PER_SECOND;
 
 const BAR_COVER: i32 = 48;
-const SHEET_COVER: i32 = 280;
-const NOW_PLAYING_WIDTH: i32 = 380;
-const QUEUE_MIN_HEIGHT: i32 = 460;
+const SHEET_COVER: i32 = 260;
+/// The mini player's width; the open panel matches it.
+const BAR_WIDTH: i32 = 420;
+const PANEL_WIDTH: i32 = BAR_WIDTH - 36;
 const TICK: Duration = Duration::from_millis(500);
 
 struct View {
@@ -69,7 +70,11 @@ pub struct MusicPanel {
 /// Now Playing.
 pub fn attach(ui: &Ui, music: &MusicPlayer, sheet: &adw::BottomSheet) -> MusicPanel {
     sheet.set_can_open(false);
-    sheet.set_full_width(true);
+    // A compact floating mini player at the bottom right (the controller
+    // legend has the bottom left); the panel opens upward from it, just as
+    // wide.
+    sheet.set_full_width(false);
+    sheet.set_align(1.0);
 
     // Mini player.
     let bar_cover = gtk::Picture::builder()
@@ -105,6 +110,7 @@ pub fn attach(ui: &Ui, music: &MusicPlayer, sheet: &adw::BottomSheet) -> MusicPa
         .build();
     let bar = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
+        .width_request(BAR_WIDTH)
         .build();
     bar.append(&bar_progress);
     bar.append(&row);
@@ -185,51 +191,34 @@ pub fn attach(ui: &Ui, music: &MusicPlayer, sheet: &adw::BottomSheet) -> MusicPa
         .halign(gtk::Align::Center)
         .css_classes(["flat", "circular"])
         .build();
-    // Left: what's playing and its controls.
-    let now_playing = gtk::Box::builder()
+    // One column, as wide as the mini player: what's playing and its
+    // controls, then the queue; all of it scrolls together.
+    let body = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(12)
-        .width_request(NOW_PLAYING_WIDTH)
-        .build();
-    now_playing.append(&collapse);
-    now_playing.append(&cover_box);
-    now_playing.append(&title);
-    now_playing.append(&artist);
-    now_playing.append(&album);
-    now_playing.append(&seek);
-    now_playing.append(&times);
-    now_playing.append(&controls);
-    now_playing.append(&volume_row);
-    // Right: the queue, scrolling on its own.
-    let queue_scroll = gtk::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .min_content_height(QUEUE_MIN_HEIGHT)
-        .vexpand(true)
-        .child(&queue)
-        .build();
-    let queue_column = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(6)
-        .hexpand(true)
-        .build();
-    queue_header.set_margin_top(0);
-    queue_column.append(&queue_header);
-    queue_column.append(&queue_scroll);
-    let body = gtk::Box::builder()
-        .spacing(32)
         .margin_top(12)
-        .margin_bottom(24)
-        .margin_start(24)
-        .margin_end(24)
+        .margin_bottom(18)
+        .margin_start(18)
+        .margin_end(18)
+        .width_request(PANEL_WIDTH)
         .build();
-    body.append(&now_playing);
-    body.append(&queue_column);
-    sheet.set_sheet(Some(
-        &adw::Clamp::builder()
-            .maximum_size(1200)
-            .child(&body)
-            .build(),
-    ));
+    body.append(&collapse);
+    body.append(&cover_box);
+    body.append(&title);
+    body.append(&artist);
+    body.append(&album);
+    body.append(&seek);
+    body.append(&times);
+    body.append(&controls);
+    body.append(&volume_row);
+    body.append(&queue_header);
+    body.append(&queue);
+    let scrolled = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .propagate_natural_height(true)
+        .child(&body)
+        .build();
+    sheet.set_sheet(Some(&scrolled));
 
     let view = Rc::new(View {
         sheet: sheet.clone(),
@@ -515,18 +504,19 @@ fn queue_row(
         row.add_css_class("music-current");
     }
     row.add_prefix(&marker);
+    add_drag_and_drop(music, &row, index);
     if index != current {
         let actions: [(&str, &str, bool, QueueEdit); 3] = [
             (
                 icons::MOVE_UP,
                 "Move up",
-                index > 0 && index - 1 != current,
+                index > 0,
                 Box::new(move |m| m.shift(index, true)),
             ),
             (
                 icons::MOVE_DOWN,
                 "Move down",
-                index < last && index + 1 != current,
+                index < last,
                 Box::new(move |m| m.shift(index, false)),
             ),
             (
@@ -558,6 +548,34 @@ fn queue_row(
         });
     }
     row
+}
+
+/// Mouse reordering: drag a queue row onto another to move it there.
+fn add_drag_and_drop(music: &MusicPlayer, row: &adw::ActionRow, index: usize) {
+    let drag = gtk::DragSource::builder()
+        .actions(gtk::gdk::DragAction::MOVE)
+        .build();
+    drag.connect_prepare(move |source, _, _| {
+        if let Some(widget) = source.widget() {
+            // The row itself follows the pointer.
+            source.set_icon(Some(&gtk::WidgetPaintable::new(Some(&widget))), 0, 0);
+        }
+        Some(gtk::gdk::ContentProvider::for_value(
+            &(index as u32).to_value(),
+        ))
+    });
+    row.add_controller(drag);
+
+    let drop = gtk::DropTarget::new(u32::static_type(), gtk::gdk::DragAction::MOVE);
+    let music = music.downgrade();
+    drop.connect_drop(move |_, value, _, _| {
+        let (Ok(from), Some(music)) = (value.get::<u32>(), music.upgrade()) else {
+            return false;
+        };
+        music.move_item(from as usize, index);
+        true
+    });
+    row.add_controller(drop);
 }
 
 fn cover_frame(picture: &gtk::Picture, size: i32) -> gtk::Overlay {
@@ -680,7 +698,7 @@ impl MusicPanel {
             return false;
         };
         let index = row.index().max(0) as usize;
-        if index == music.queue().position() {
+        if index >= music.queue().entries().count() {
             return false;
         }
         self.view.moving.set(Some(index));
@@ -693,15 +711,14 @@ impl MusicPanel {
         let (Some(index), Some(music)) = (self.view.moving.get(), self.music.upgrade()) else {
             return;
         };
-        let current = music.queue().position();
         let last = music.queue().entries().count().saturating_sub(1);
         let target = if up {
             index.checked_sub(1)
         } else {
             (index < last).then_some(index + 1)
         };
-        // The playing track stays put; moves stop at it.
-        let Some(target) = target.filter(|&t| t != current) else {
+        // Moves pass the playing track too; it keeps playing.
+        let Some(target) = target else {
             return;
         };
         self.view.moving.set(Some(target));

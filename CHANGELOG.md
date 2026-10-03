@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-10-03
+
+First stable release.
+
+### Added
+- Reorder the music queue by dragging rows with the mouse.
+
+### Changed
+- Queue items can move past the playing track (buttons, controller X-move and drag); the playing track keeps playing, and it can be moved too.
+- The music bar is a compact floating mini player at the bottom right again; the music panel opens upward from it at the same width, with Now Playing above the queue.
+- The controller legend stays at the bottom left; when the mini player leaves too little room, its hints scroll slowly on one line instead of being cut off.
+
 ## [0.8.0] — 2026-10-03
 
 ### Added

@@ -317,6 +317,13 @@ impl MusicPlayer {
         }
     }
 
+    /// Moves the track at `from` to `to` (drag and drop).
+    pub fn move_item(&self, from: usize, to: usize) {
+        if self.inner.queue.borrow_mut().move_item(from, to) {
+            self.requeue_next();
+        }
+    }
+
     pub fn clear_upcoming(&self) {
         self.inner.queue.borrow_mut().clear_upcoming();
         self.requeue_next();

@@ -1,36 +1,64 @@
 //! The controller legend: a small bar at the bottom left listing what the
 //! buttons do right now (Select, Back, Options, ...), using the user's own
 //! mapping. Shown once the controller is used (hidden again on mouse or
-//! touch input), never in the player.
+//! touch input), never in the player. It stays at the bottom left; when the
+//! mini player leaves too little room, the hints scroll slowly back and
+//! forth on one line (a marquee) instead of being cut off.
+
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use std::time::Duration;
 
 use adw::prelude::*;
+use gtk::glib;
 
 use super::Ui;
 use crate::controller::{self, Action, Pad};
 
 const MARGIN: i32 = 12;
+/// The legend's own padding and border, left and right together.
+const CHROME: i32 = 30;
+/// Marquee: a step every frame-ish, a rest at each end.
+const MARQUEE_TICK: Duration = Duration::from_millis(30);
+const MARQUEE_STEP: f64 = 1.0;
+const MARQUEE_REST_TICKS: u32 = 50;
 
 pub struct Legend {
     root: gtk::Box,
+    scroller: gtk::ScrolledWindow,
+    hints: gtk::Box,
     /// The controller was used last (not the mouse or touch screen).
-    in_use: std::cell::Cell<bool>,
+    in_use: Cell<bool>,
+    /// The running marquee, shared with its idle check.
+    marquee: Rc<RefCell<Option<glib::SourceId>>>,
 }
 
 impl Legend {
     pub fn new() -> Self {
+        let hints = gtk::Box::builder().spacing(14).build();
+        let scroller = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::External)
+            .vscrollbar_policy(gtk::PolicyType::Never)
+            .propagate_natural_width(true)
+            .propagate_natural_height(true)
+            .child(&hints)
+            .build();
         let root = gtk::Box::builder()
-            .spacing(14)
             .halign(gtk::Align::Start)
             .valign(gtk::Align::End)
-            .margin_start(12)
+            .margin_start(MARGIN)
             .margin_bottom(MARGIN)
             .can_target(false)
             .visible(false)
             .css_classes(["legend"])
             .build();
+        root.append(&scroller);
         Legend {
             root,
-            in_use: std::cell::Cell::new(false),
+            scroller,
+            hints,
+            in_use: Cell::new(false),
+            marquee: Rc::default(),
         }
     }
 
@@ -55,20 +83,26 @@ impl Legend {
             && window.visible_dialog().is_none();
         self.root.set_visible(shown);
         let Some(ui) = ui.filter(|_| shown) else {
+            self.stop_marquee();
             return;
         };
-        super::clear(&self.root);
+        super::clear(&self.hints);
         let bindings = controller::bindings();
         let panel = ui.music_panel().filter(|panel| panel.is_open());
-        // Sit just above the music bar when it's showing (it spans the
-        // width); otherwise at the very bottom.
+        // Room up to the mini player or music panel (bottom right).
         let sheet = ui.widget();
-        let bar = if panel.is_none() && sheet.bottom_bar().is_some() {
-            sheet.bottom_bar_height()
+        // The mini player, or the open panel above it: both bottom right.
+        let corner = if panel.is_some() {
+            sheet.sheet()
         } else {
-            0
+            sheet.bottom_bar()
         };
-        self.root.set_margin_bottom(MARGIN + bar);
+        // Not laid out yet right after it appears: use its set width.
+        let bar_width = corner.map_or(0, |w| w.width().max(w.width_request()) + MARGIN);
+        let window_width = self.root.parent().map_or(0, |p| p.width());
+        let room = window_width - 2 * MARGIN - bar_width - CHROME;
+        self.scroller
+            .set_max_content_width(if room > 0 { room } else { -1 });
 
         let mut hints: Vec<(Vec<Pad>, &str)> = Vec::new();
         if let Some(panel) = &panel {
@@ -132,9 +166,70 @@ impl Legend {
                 );
             }
             hint.append(&gtk::Label::new(Some(text)));
-            self.root.append(&hint);
+            self.hints.append(&hint);
         }
+        // Whether it fits is known once laid out.
+        let (weak, slot) = (self.scroller.downgrade(), self.marquee.clone());
+        glib::idle_add_local_once(move || {
+            if let Some(scroller) = weak.upgrade() {
+                run_marquee(&scroller, &slot);
+            }
+        });
     }
+
+    fn stop_marquee(&self) {
+        stop_marquee(&self.scroller, &self.marquee);
+    }
+}
+
+fn stop_marquee(scroller: &gtk::ScrolledWindow, slot: &RefCell<Option<glib::SourceId>>) {
+    if let Some(source) = slot.take() {
+        source.remove();
+    }
+    scroller.hadjustment().set_value(0.0);
+}
+
+/// Scrolls the hints back and forth when they don't fit; stops when they
+/// do. A running marquee picks up size changes on its own.
+fn run_marquee(scroller: &gtk::ScrolledWindow, slot: &Rc<RefCell<Option<glib::SourceId>>>) {
+    let adjustment = scroller.hadjustment();
+    if adjustment.upper() - adjustment.page_size() <= 1.0 {
+        stop_marquee(scroller, slot);
+        return;
+    }
+    if slot.borrow().is_some() {
+        return;
+    }
+    adjustment.set_value(0.0);
+    let rest = Cell::new(MARQUEE_REST_TICKS);
+    let forward = Cell::new(true);
+    let weak = scroller.downgrade();
+    let source = glib::timeout_add_local(MARQUEE_TICK, move || {
+        let Some(scroller) = weak.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
+        if rest.get() > 0 {
+            rest.set(rest.get() - 1);
+            return glib::ControlFlow::Continue;
+        }
+        let adjustment = scroller.hadjustment();
+        let end = (adjustment.upper() - adjustment.page_size()).max(0.0);
+        let step = if forward.get() {
+            MARQUEE_STEP
+        } else {
+            -MARQUEE_STEP
+        };
+        let value = adjustment.value() + step;
+        if value >= end || value <= 0.0 {
+            adjustment.set_value(value.clamp(0.0, end));
+            forward.set(!forward.get());
+            rest.set(MARQUEE_REST_TICKS);
+        } else {
+            adjustment.set_value(value);
+        }
+        glib::ControlFlow::Continue
+    });
+    slot.replace(Some(source));
 }
 
 /// The short name printed on a button badge.
