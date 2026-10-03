@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-10-03
+
+### Added
+- More quality presets: 40, 8, 4, 2, 1.5 and 1 Mbps, 720 and 420 kbps; low ones also cap the resolution (720p down to 240p).
+- Controller legend at the bottom left showing what the buttons do, following your mapping (hidden in the player).
+- Episode pages: LB/RB open the previous or next episode.
+
+### Changed
+- SVP Manager starts with the app when auto-start is on; in Steam Game Mode the app opens once SVP Manager is up, so SVP no longer takes focus.
+- The highlighted choice in player and card menus stands out more.
+
+### Fixed
+- Stutter during playback in Steam Game Mode, caused by running SVP Manager inside a hidden gamescope.
+- Controller: Down did nothing right after launch, and the cursor went missing after a page reloaded.
+- Controller: changing quality while moving through the player's buttons (Start) dropped back to seeking.
+
 ## [0.6.0] — 2026-10-02
 
 ### Added

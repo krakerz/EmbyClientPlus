@@ -12,6 +12,7 @@ mod home;
 pub mod icons;
 mod image_disk_cache;
 pub(crate) mod images;
+mod legend;
 mod library;
 mod library_page;
 pub mod login;
@@ -437,11 +438,11 @@ impl Ui {
             .as_ref()
             .map(|session| session.quality)
             .unwrap_or_else(|| {
-                Quality::from_mbps(
+                Quality::from_kbps(
                     Settings::load()
                         .unwrap_or_default()
                         .playback
-                        .bitrate_cap_mbps,
+                        .bitrate_cap_kbps(),
                 )
             });
         self.play_with(item, start_ticks, quality, None);
@@ -722,6 +723,23 @@ fn set_tab_stepper(page: &adw::NavigationPage, step: impl Fn(bool) + 'static) {
     let hook: Hook<bool> = Rc::new(step);
     // SAFETY: this key is only ever stored and read as `Hook<bool>`.
     unsafe { page.set_data(TAB_STEP_KEY, hook) };
+}
+
+const TAB_LABEL_KEY: &str = "embyclientplus-tab-label";
+
+/// What LB/RB step through on `page`, for the controller legend.
+fn set_tab_label(page: &adw::NavigationPage, label: &'static str) {
+    // SAFETY: this key is only ever stored and read as `&'static str`.
+    unsafe { page.set_data(TAB_LABEL_KEY, label) };
+}
+
+fn tab_label(page: &adw::NavigationPage) -> &'static str {
+    // SAFETY: see `set_tab_label`; copied out immediately.
+    unsafe {
+        page.data::<&'static str>(TAB_LABEL_KEY)
+            .map(|label| *label.as_ref())
+            .unwrap_or("Tabs")
+    }
 }
 
 fn tab_stepper(page: &adw::NavigationPage) -> Option<Hook<bool>> {

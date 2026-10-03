@@ -9,6 +9,8 @@ use super::models::{DeviceProfile, PlaybackInfoRequest, PlaybackInfoResponse};
 pub struct StreamRequest {
     pub start_ticks: i64,
     pub max_bitrate: Option<i64>,
+    /// Tallest transcoded picture (low bitrates); `None` keeps the source's.
+    pub max_height: Option<u32>,
     /// Emby `MediaStream.Index` of the audio to transcode with.
     pub audio_stream_index: Option<i32>,
 }
@@ -19,7 +21,7 @@ impl StreamRequest {
         PlaybackInfoRequest {
             user_id: user_id.to_string(),
             device_profile: if transcode {
-                DeviceProfile::transcode_only(self.max_bitrate)
+                DeviceProfile::transcode_only(self.max_bitrate, self.max_height)
             } else {
                 DeviceProfile::default()
             },
@@ -71,6 +73,7 @@ mod tests {
         let request = StreamRequest {
             start_ticks: 42,
             max_bitrate: Some(6_000_000),
+            max_height: None,
             audio_stream_index: Some(1),
         }
         .to_request("u");
@@ -81,5 +84,21 @@ mod tests {
         assert_eq!(request.audio_stream_index, Some(1));
         assert_eq!(request.start_time_ticks, 0);
         assert!(request.device_profile.direct_play_profiles.is_empty());
+    }
+
+    #[test]
+    fn low_bitrates_cap_the_picture_height() {
+        let request = StreamRequest {
+            max_bitrate: Some(1_000_000),
+            max_height: Some(360),
+            ..Default::default()
+        }
+        .to_request("u");
+        let json = serde_json::to_value(&request).unwrap();
+        let condition = &json["DeviceProfile"]["CodecProfiles"][0]["Conditions"][0];
+        assert_eq!(condition["Property"], "Height");
+        assert_eq!(condition["Value"], "360");
+        let original = serde_json::to_value(StreamRequest::default().to_request("u")).unwrap();
+        assert!(original["DeviceProfile"].get("CodecProfiles").is_none());
     }
 }

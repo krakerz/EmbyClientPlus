@@ -37,7 +37,7 @@ fn main() -> glib::ExitCode {
             Some(target) => build_standalone_player(app, target),
             None => player::Player::new(mpv_config_dir().as_deref()).map(|player| {
                 apply_bar_fill(player);
-                ui::window::build(app, player).present()
+                ui::window::present(&ui::window::build(app, player))
             }),
         };
         if let Err(e) = result {

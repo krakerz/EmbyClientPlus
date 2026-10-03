@@ -136,6 +136,21 @@ fn show_episodes(ui: &Ui, view: &DetailsView, item: &BaseItem, episodes: &[BaseI
         return;
     }
     let (previous, next) = neighbours(episodes, &item.id);
+    // LB/RB step to the previous/next episode, like the buttons below.
+    if let Some(page) = view
+        .episodes
+        .ancestor(adw::NavigationPage::static_type())
+        .and_downcast::<adw::NavigationPage>()
+    {
+        let (weak, previous, next) = (ui.downgrade(), previous.clone(), next.clone());
+        super::set_tab_label(&page, "Episode");
+        super::set_tab_stepper(&page, move |forward| {
+            let target = if forward { &next } else { &previous };
+            if let (Some(ui), Some(target)) = (weak.upgrade(), target) {
+                ui.open_replacing(target);
+            }
+        });
+    }
     let nav = gtk::CenterBox::new();
     if let Some(previous) = previous {
         nav.set_start_widget(Some(&neighbour_button(ui, &previous, false)));

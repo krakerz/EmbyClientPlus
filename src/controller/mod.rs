@@ -48,6 +48,8 @@ struct Hub {
     connected: RefCell<Option<String>>,
     bindings: RefCell<Bindings>,
     started: Cell<bool>,
+    /// Run when a controller connects/disconnects or the mapping changes.
+    listeners: RefCell<Vec<Box<dyn Fn()>>>,
 }
 
 /// Starts reading controllers (once); presses go to `handler`.
@@ -59,6 +61,13 @@ pub fn start(handler: impl Fn(Pad, bool) + 'static) {
             return;
         }
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        if let Some(fifo) = std::env::var_os("EMBYCLIENTPLUS_FAKE_PAD") {
+            let sender = sender.clone();
+            std::thread::Builder::new()
+                .name("fake-pad".into())
+                .spawn(move || read_fake_pad(std::path::Path::new(&fifo), &sender))
+                .expect("failed to start the fake gamepad thread");
+        }
         std::thread::Builder::new()
             .name("gamepad".into())
             .spawn(move || read_pads(&sender))
@@ -72,15 +81,23 @@ pub fn start(handler: impl Fn(Pad, bool) + 'static) {
 }
 
 impl Hub {
+    fn changed(&self) {
+        for listener in self.listeners.borrow().iter() {
+            listener();
+        }
+    }
+
     fn dispatch(&self, event: PadEvent) {
         match event {
             PadEvent::Connected(name) => {
                 tracing::info!("controller connected: {name}");
                 self.connected.replace(Some(name));
+                self.changed();
             }
             PadEvent::Disconnected => {
                 tracing::info!("controller disconnected");
                 self.connected.replace(None);
+                self.changed();
             }
             PadEvent::Pressed(pad) => {
                 if let Some(capture) = self.capture.take() {
@@ -116,7 +133,16 @@ pub fn set_bindings(bindings: Bindings) {
     if let Err(e) = Settings::update(|s| s.controller.bindings = config) {
         tracing::warn!("couldn't save controller bindings: {e:#}");
     }
-    HUB.with(|hub| hub.bindings.replace(bindings));
+    HUB.with(|hub| {
+        hub.bindings.replace(bindings);
+        hub.changed();
+    });
+}
+
+/// Runs `listener` when a controller connects or disconnects, or the
+/// mapping changes.
+pub fn on_change(listener: impl Fn() + 'static) {
+    HUB.with(|hub| hub.listeners.borrow_mut().push(Box::new(listener)));
 }
 
 /// Name of the connected controller, if any.
@@ -196,6 +222,30 @@ fn read_pads(sender: &tokio::sync::mpsc::UnboundedSender<PadEvent>) {
         for pad in repeater.due(Instant::now()) {
             if !send(PadEvent::Repeated(pad)) {
                 return;
+            }
+        }
+    }
+}
+
+/// Testing aid: button names (`A`, `Down`, `LB`, ...), one per line, read
+/// from the FIFO named by `EMBYCLIENTPLUS_FAKE_PAD`, arrive as presses —
+/// for driving the controller code without a controller.
+fn read_fake_pad(fifo: &std::path::Path, sender: &tokio::sync::mpsc::UnboundedSender<PadEvent>) {
+    use std::io::BufRead;
+    loop {
+        // Opening blocks until a writer appears; reopen after each one.
+        let Ok(file) = std::fs::File::open(fifo) else {
+            tracing::warn!("can't open the fake pad FIFO {}", fifo.display());
+            return;
+        };
+        for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+            match Pad::from_name(&line) {
+                Some(pad) => {
+                    if sender.send(PadEvent::Pressed(pad)).is_err() {
+                        return;
+                    }
+                }
+                None => tracing::warn!("fake pad: unknown button {line:?}"),
             }
         }
     }

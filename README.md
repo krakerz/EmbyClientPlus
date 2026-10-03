@@ -64,7 +64,7 @@ mpv.conf, controller, updates and logs.
 
 **Controller defaults:**
 
-- **Browsing:** D-pad/stick move, A select, B back, Y home, X item menu, LB/RB tabs, Select search, Start Preferences.
+- **Browsing:** D-pad/stick move, A select, B back, Y home, X item menu, LB/RB tabs, seasons or episodes, Select search, Start Preferences.
 - **Player:** A play/pause, D-pad seek/volume, LB/RB episode, LT/RT chapter, X/Y audio/subtitles, Select skip intro/credits, Start drives the on-screen buttons.
 
 **Steam Game Mode:** add the AppImage (or the installed `bin/embyclientplus`) as a non-Steam

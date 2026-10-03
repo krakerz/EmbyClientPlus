@@ -97,6 +97,9 @@ struct Inner {
     /// Start pressed: the controller moves through the OSD's buttons
     /// instead of seeking, and the OSD stays up.
     controls_mode: Cell<bool>,
+    /// The item last prepared, to tell a restart (quality change) from a
+    /// new title.
+    prepared_id: RefCell<Option<String>>,
     /// Held seek (controller/arrow repeat): where it's headed. mpv seeks
     /// once, when the presses stop, instead of on every repeat.
     scrub_target: Cell<Option<f64>>,
@@ -175,6 +178,7 @@ impl PlayerPage {
             volume_report: RefCell::new(None),
             volume_seen: Cell::new(None),
             controls_mode: Cell::new(false),
+            prepared_id: RefCell::new(None),
             scrub_target: Cell::new(None),
             hold_started: Cell::new(None),
             key_held: Cell::new(None),
@@ -275,7 +279,24 @@ impl PlayerPage {
     /// Readies the page for `item` before its stream is negotiated.
     pub fn prepare(&self, item: &BaseItem, quality: Quality, handlers: Handlers) {
         self.inner.osd.preview.clear();
-        self.inner.controls_mode.set(false);
+        // Restarting the same title (a quality change) keeps the
+        // controller on the OSD buttons, back on the quality one.
+        let same_title = self
+            .inner
+            .prepared_id
+            .replace(Some(item.id.clone()))
+            .as_deref()
+            == Some(item.id.as_str());
+        if same_title && self.inner.controls_mode.get() {
+            let quality_button = self.inner.osd.quality.downgrade();
+            glib::idle_add_local_once(move || {
+                if let Some(button) = quality_button.upgrade() {
+                    button.grab_focus();
+                }
+            });
+        } else {
+            self.inner.controls_mode.set(false);
+        }
         // A scrub still waiting to land belongs to the previous video.
         self.inner.scrub_target.set(None);
         if let Some(pending) = self.inner.scrub_timer.take() {

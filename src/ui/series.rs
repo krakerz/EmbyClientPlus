@@ -156,6 +156,7 @@ pub fn page(ui: &Ui, series: &BaseItem) -> adw::NavigationPage {
     });
     view.seasons.on_change.replace(Some(on_change));
     let chips = Rc::downgrade(&view.seasons);
+    super::set_tab_label(&page, "Season");
     super::set_tab_stepper(&page, move |forward| {
         if let Some(chips) = chips.upgrade() {
             chips.step(forward);

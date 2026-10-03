@@ -2,6 +2,7 @@
 //! activation while browsing, playback control on the player page.
 
 use adw::prelude::*;
+use gtk::glib;
 
 use super::{Ui, library, open_card_menu, preferences};
 use crate::controller::{self, Action, Context, Pad};
@@ -12,6 +13,21 @@ use crate::controller::{self, Action, Context, Pad};
 pub fn handle(window: &adw::ApplicationWindow, ui: Option<&Ui>, pad: Pad, repeat: bool) {
     // Controller use means focus rings matter, like keyboard use.
     window.set_focus_visible(true);
+
+    // The focused widget went away (a page reloaded, a grid rebuilt): put
+    // the cursor back before acting, or the press lands on nothing.
+    if let Some(ui) = ui
+        && !ui.player_visible()
+        && window.visible_dialog().is_none()
+        && restore_focus(window, ui)
+        && matches!(
+            controller::action_for(pad, Context::Browse),
+            Some(Action::Up | Action::Down | Action::Left | Action::Right)
+        )
+    {
+        // A direction just brings the cursor back; it doesn't move it on.
+        return;
+    }
 
     if let Some(ui) = ui
         && ui.player_visible()
@@ -92,6 +108,133 @@ pub fn handle(window: &adw::ApplicationWindow, ui: Option<&Ui>, pad: Pad, repeat
         }
         _ => {}
     }
+}
+
+const LAST_FOCUS_KEY: &str = "embyclientplus-last-focus";
+
+/// Remembers, per page, the widget last focused there, for
+/// [`restore_focus`].
+pub fn track_focus(window: &adw::ApplicationWindow) {
+    let debug = std::env::var_os("EMBYCLIENTPLUS_DEBUG_FOCUS").is_some();
+    window.connect_focus_widget_notify(move |window| {
+        let focus = gtk::prelude::GtkWindowExt::focus(window);
+        if debug {
+            tracing::info!("focus: {}", describe(focus.as_ref()));
+        }
+        let Some(focus) = focus else {
+            return;
+        };
+        // Pages hand focus to their scroller (or a list to itself) when
+        // they open; nothing there reacts to a press. Pass it on to the
+        // first real item inside.
+        if is_container(&focus) {
+            let container = focus.downgrade();
+            glib::idle_add_local_once(move || {
+                if let Some(container) = container.upgrade()
+                    && container.has_focus()
+                {
+                    focus_first_inside(&container);
+                }
+            });
+            return;
+        }
+        if let Some(page) = focus.ancestor(adw::NavigationPage::static_type()) {
+            // SAFETY: only ever stored and read as `glib::WeakRef<gtk::Widget>`.
+            unsafe { page.set_data(LAST_FOCUS_KEY, focus.downgrade()) };
+        }
+    });
+}
+
+/// Widgets that can hold focus but do nothing with a press.
+fn is_container(widget: &gtk::Widget) -> bool {
+    widget.is::<gtk::ScrolledWindow>()
+        || widget.is::<gtk::Viewport>()
+        || widget.is::<gtk::ListBox>()
+        || widget.is::<adw::NavigationPage>()
+        || widget.is::<adw::ToolbarView>()
+}
+
+/// Focuses the first focusable item inside `container`.
+fn focus_first_inside(container: &gtk::Widget) -> bool {
+    if let Some(list) = container.downcast_ref::<gtk::ListBox>()
+        && let Some(row) = list.row_at_index(0)
+    {
+        return row.grab_focus();
+    }
+    let mut child = container.first_child();
+    while let Some(current) = child {
+        if current.child_focus(gtk::DirectionType::TabForward) {
+            return true;
+        }
+        child = current.next_sibling();
+    }
+    false
+}
+
+/// "GtkButton.card-button < GtkBox < AdwClamp ..." for focus logging.
+fn describe(widget: Option<&gtk::Widget>) -> String {
+    let Some(widget) = widget else {
+        return "none".to_string();
+    };
+    let one = |w: &gtk::Widget| {
+        let classes = w.css_classes();
+        let mut text = w.type_().name().to_string();
+        for class in classes.iter().take(2) {
+            text.push('.');
+            text.push_str(class);
+        }
+        text
+    };
+    let mut chain = vec![format!(
+        "{}{}",
+        one(widget),
+        if widget.is_mapped() {
+            ""
+        } else {
+            " (unmapped)"
+        }
+    )];
+    let mut parent = widget.parent();
+    while let Some(p) = parent.take().filter(|_| chain.len() < 6) {
+        chain.push(one(&p));
+        parent = p.parent();
+    }
+    chain.join(" < ")
+}
+
+/// When nothing usable has focus (none, or a widget that's gone or hidden),
+/// focuses the visible page's last focused widget, else its first item
+/// below the header. True if it moved the focus.
+fn restore_focus(window: &adw::ApplicationWindow, ui: &Ui) -> bool {
+    let focus = gtk::prelude::GtkWindowExt::focus(window);
+    if focus
+        .as_ref()
+        .is_some_and(|f| f.is_mapped() && f.is_sensitive() && !is_container(f))
+    {
+        return false;
+    }
+    let Some(page) = ui.nav().visible_page() else {
+        return false;
+    };
+    // SAFETY: see `track_focus`; upgraded immediately.
+    let last = unsafe {
+        page.data::<glib::WeakRef<gtk::Widget>>(LAST_FOCUS_KEY)
+            .and_then(|weak| weak.as_ref().upgrade())
+    };
+    if let Some(last) = last
+        && last.is_mapped()
+        && last.is_sensitive()
+        && !is_container(&last)
+        && last.grab_focus()
+    {
+        return true;
+    }
+    let content: Option<gtk::Widget> = page
+        .child()
+        .and_downcast::<adw::ToolbarView>()
+        .and_then(|toolbar| toolbar.content())
+        .or_else(|| page.child());
+    content.is_some_and(|content| focus_first_inside(&content))
 }
 
 /// Moves focus like the arrow keys would, inside whichever surface holds
