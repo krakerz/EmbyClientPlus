@@ -83,7 +83,7 @@ fn restart(kind: &InstallKind) {
         .and_downcast::<gtk::Application>()
         .and_then(|app| app.active_window())
     {
-        window.close();
+        super::window::shut_down(&window);
     }
 }
 

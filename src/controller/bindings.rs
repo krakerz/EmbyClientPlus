@@ -92,11 +92,13 @@ impl Pad {
     }
 }
 
-/// Where an action applies: browsing pages, or the player.
+/// Where an action applies: browsing pages, the video player, or the
+/// music panel (Now Playing).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Context {
     Browse,
     Player,
+    Music,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -114,6 +116,7 @@ pub enum Action {
     NextTab,
     Search,
     Preferences,
+    OpenMusic,
     // Player.
     PlayPause,
     Leave,
@@ -129,10 +132,16 @@ pub enum Action {
     SubtitleMenu,
     ShowControls,
     Skip,
+    // Music panel.
+    MusicPlayPause,
+    MusicPrevious,
+    MusicNext,
+    MoveInQueue,
+    CloseMusic,
 }
 
 impl Action {
-    pub const ALL: [Action; 26] = [
+    pub const ALL: [Action; 32] = [
         Action::Up,
         Action::Down,
         Action::Left,
@@ -145,6 +154,7 @@ impl Action {
         Action::NextTab,
         Action::Search,
         Action::Preferences,
+        Action::OpenMusic,
         Action::PlayPause,
         Action::Leave,
         Action::SeekBack,
@@ -159,10 +169,17 @@ impl Action {
         Action::SubtitleMenu,
         Action::ShowControls,
         Action::Skip,
+        Action::MusicPlayPause,
+        Action::MusicPrevious,
+        Action::MusicNext,
+        Action::MoveInQueue,
+        Action::CloseMusic,
     ];
 
     pub fn context(self) -> Context {
-        if self >= Action::PlayPause {
+        if self >= Action::MusicPlayPause {
+            Context::Music
+        } else if self >= Action::PlayPause {
             Context::Player
         } else {
             Context::Browse
@@ -198,6 +215,12 @@ impl Action {
             Action::SubtitleMenu => "subtitle_menu",
             Action::ShowControls => "show_controls",
             Action::Skip => "skip",
+            Action::OpenMusic => "open_music",
+            Action::MusicPlayPause => "music_play_pause",
+            Action::MusicPrevious => "music_previous",
+            Action::MusicNext => "music_next",
+            Action::MoveInQueue => "move_in_queue",
+            Action::CloseMusic => "close_music",
         }
     }
 
@@ -229,6 +252,12 @@ impl Action {
             Action::SubtitleMenu => "Subtitle menu",
             Action::ShowControls => "Show controls",
             Action::Skip => "Skip intro/credits",
+            Action::OpenMusic => "Open the music player",
+            Action::MusicPlayPause => "Play / pause",
+            Action::MusicPrevious => "Previous track",
+            Action::MusicNext => "Next track",
+            Action::MoveInQueue => "Move a queue item (then ↑/↓)",
+            Action::CloseMusic => "Back to the library",
         }
     }
 
@@ -244,11 +273,12 @@ impl Action {
             Action::Right | Action::SeekForward => &[Pad::Right],
             Action::Activate | Action::PlayPause => &[Pad::A],
             Action::Back | Action::Leave => &[Pad::B],
-            Action::Home => &[Pad::Y],
-            Action::ContextMenu | Action::AudioMenu => &[Pad::X],
+            Action::Home | Action::MusicPlayPause => &[Pad::Y],
+            Action::ContextMenu | Action::AudioMenu | Action::MoveInQueue => &[Pad::X],
             Action::SubtitleMenu => &[Pad::Y],
-            Action::PreviousTab | Action::PreviousEpisode => &[Pad::LB],
-            Action::NextTab | Action::NextEpisode => &[Pad::RB],
+            Action::PreviousTab | Action::PreviousEpisode | Action::MusicPrevious => &[Pad::LB],
+            Action::NextTab | Action::NextEpisode | Action::MusicNext => &[Pad::RB],
+            Action::OpenMusic | Action::CloseMusic => &[Pad::LT, Pad::RT],
             Action::PreviousChapter => &[Pad::LT],
             Action::NextChapter => &[Pad::RT],
             Action::Search | Action::Skip => &[Pad::Select],

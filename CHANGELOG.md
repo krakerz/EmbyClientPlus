@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-10-03
+
+### Added
+- Music panel for controllers: LT/RT switch between the library and the music panel; in the panel Y plays/pauses, LB/RB change track, and X picks up a queue item to move with ↑/↓ (A/B/X to drop). Remappable under Preferences → Controller → In the Music Player.
+- Quit button in the Preferences header; LB/RB switch Preferences tabs.
+
+### Changed
+- The music panel is full width, with Now Playing on the left and the queue on the right.
+- The controller legend only shows after a controller press; mouse or touch input hides it. It has a solid background and sits at the bottom of the window (just above the music bar while music plays).
+- LB/RB between episodes keep the cursor on the same spot (Play, or the previous/next episode link).
+
+### Fixed
+- Controller: Up from the first episode in a list (and similar list edges) did nothing.
+- Controller: series pages now reliably start the cursor on the first (or last opened) episode.
+- Controller: the cursor could land on nothing while a page was still loading.
+- Controller: the cursor could get lost or stuck in the music panel; closing the panel returns it to where it was.
+- Focused cards in library grids showed a double outline.
+- SVP Manager is now stopped cleanly when the app is closed by Steam ("Exit game") or a termination signal, not only from the window.
+
 ## [0.7.0] — 2026-10-03
 
 ### Added

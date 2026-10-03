@@ -14,6 +14,35 @@ pub fn handle(window: &adw::ApplicationWindow, ui: Option<&Ui>, pad: Pad, repeat
     // Controller use means focus rings matter, like keyboard use.
     window.set_focus_visible(true);
 
+    // The music panel: its own buttons first, then normal navigation.
+    if let Some(ui) = ui
+        && !ui.player_visible()
+        && window.visible_dialog().is_none()
+        && let Some(panel) = ui.music_panel()
+        && panel.is_open()
+    {
+        if music_panel_press(window, ui, &panel, pad) {
+            return;
+        }
+        // Home, Search, Preferences...: leave the panel, then do it.
+        if !matches!(
+            controller::action_for(pad, Context::Browse),
+            Some(
+                Action::Up
+                    | Action::Down
+                    | Action::Left
+                    | Action::Right
+                    | Action::Activate
+                    | Action::Back
+                    | Action::ContextMenu
+            )
+        ) {
+            panel.close();
+        } else {
+            return browse_navigation(window, ui, pad);
+        }
+    }
+
     // The focused widget went away (a page reloaded, a grid rebuilt): put
     // the cursor back before acting, or the press lands on nothing.
     if let Some(ui) = ui
@@ -94,8 +123,18 @@ pub fn handle(window: &adw::ApplicationWindow, ui: Option<&Ui>, pad: Pad, repeat
             }
         }
         Action::PreviousTab | Action::NextTab => {
-            if let Some(ui) = ui {
-                ui.step_tabs(action == Action::NextTab);
+            let forward = action == Action::NextTab;
+            // A dialog with tabs (Preferences) takes LB/RB over the page.
+            if let Some(dialog) = window.visible_dialog() {
+                if let Some(stack) = find_view_stack(dialog.upcast_ref()) {
+                    super::library_page::step_stack(&stack, forward);
+                    // Its tab content is new: start the cursor at its top.
+                    if let Some(page) = stack.visible_child() {
+                        focus_first_inside(&page);
+                    }
+                }
+            } else if let Some(ui) = ui {
+                ui.step_tabs(forward);
             }
         }
         Action::Search => {
@@ -105,6 +144,11 @@ pub fn handle(window: &adw::ApplicationWindow, ui: Option<&Ui>, pad: Pad, repeat
         }
         Action::Preferences if ui.is_some() && window.visible_dialog().is_none() => {
             preferences::show(window);
+        }
+        Action::OpenMusic => {
+            if let Some(panel) = ui.and_then(Ui::music_panel) {
+                panel.open();
+            }
         }
         _ => {}
     }
@@ -128,12 +172,20 @@ pub fn track_focus(window: &adw::ApplicationWindow) {
         // they open; nothing there reacts to a press. Pass it on to the
         // first real item inside.
         if is_container(&focus) {
+            // Its content may still be loading: retry for a moment.
             let container = focus.downgrade();
-            glib::idle_add_local_once(move || {
-                if let Some(container) = container.upgrade()
-                    && container.has_focus()
-                {
-                    focus_first_inside(&container);
+            let tries = std::cell::Cell::new(0);
+            glib::timeout_add_local(CONTAINER_RETRY, move || {
+                tries.set(tries.get() + 1);
+                match container.upgrade() {
+                    Some(container)
+                        if container.has_focus()
+                            && !focus_start(&container)
+                            && tries.get() < CONTAINER_TRIES =>
+                    {
+                        glib::ControlFlow::Continue
+                    }
+                    _ => glib::ControlFlow::Break,
                 }
             });
             return;
@@ -145,13 +197,46 @@ pub fn track_focus(window: &adw::ApplicationWindow) {
     });
 }
 
+const CONTAINER_RETRY: std::time::Duration = std::time::Duration::from_millis(250);
+/// About 3 s of retries for a page whose content is still loading.
+const CONTAINER_TRIES: u32 = 12;
+
 /// Widgets that can hold focus but do nothing with a press.
 fn is_container(widget: &gtk::Widget) -> bool {
-    widget.is::<gtk::ScrolledWindow>()
+    widget.is::<gtk::WindowControls>()
+        || widget.is::<gtk::ScrolledWindow>()
         || widget.is::<gtk::Viewport>()
         || widget.is::<gtk::ListBox>()
         || widget.is::<adw::NavigationPage>()
         || widget.is::<adw::ToolbarView>()
+}
+
+/// The first tab stack inside `widget` (e.g. Preferences' pages).
+fn find_view_stack(widget: &gtk::Widget) -> Option<adw::ViewStack> {
+    if let Some(stack) = widget.downcast_ref::<adw::ViewStack>() {
+        return Some(stack.clone());
+    }
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        if let Some(found) = find_view_stack(&current) {
+            return Some(found);
+        }
+        child = current.next_sibling();
+    }
+    None
+}
+
+/// Puts the cursor where `container`'s page wants it to start (its focus
+/// hook), else on the first item inside.
+fn focus_start(container: &gtk::Widget) -> bool {
+    let hook = container
+        .ancestor(adw::NavigationPage::static_type())
+        .and_downcast::<adw::NavigationPage>()
+        .and_then(|page| super::focus_hook(&page));
+    match hook {
+        Some(hook) => hook(),
+        None => focus_first_inside(container),
+    }
 }
 
 /// Focuses the first focusable item inside `container`.
@@ -199,7 +284,12 @@ fn describe(widget: Option<&gtk::Widget>) -> String {
         chain.push(one(&p));
         parent = p.parent();
     }
-    chain.join(" < ")
+    let page = widget
+        .ancestor(adw::NavigationPage::static_type())
+        .and_downcast::<adw::NavigationPage>()
+        .map(|page| page.title().to_string())
+        .unwrap_or_default();
+    format!("[{page}] {}", chain.join(" < "))
 }
 
 /// When nothing usable has focus (none, or a widget that's gone or hidden),
@@ -213,6 +303,12 @@ fn restore_focus(window: &adw::ApplicationWindow, ui: &Ui) -> bool {
     {
         return false;
     }
+    focus_page(ui)
+}
+
+/// Puts the cursor back on the visible page: its last focused widget,
+/// else where the page wants it to start, else its first item.
+fn focus_page(ui: &Ui) -> bool {
     let Some(page) = ui.nav().visible_page() else {
         return false;
     };
@@ -226,6 +322,11 @@ fn restore_focus(window: &adw::ApplicationWindow, ui: &Ui) -> bool {
         && last.is_sensitive()
         && !is_container(&last)
         && last.grab_focus()
+    {
+        return true;
+    }
+    if let Some(hook) = super::focus_hook(&page)
+        && hook()
     {
         return true;
     }
@@ -251,10 +352,156 @@ fn move_focus(window: &adw::ApplicationWindow, direction: gtk::DirectionType) {
         .and_then(|widget| widget.native())
         .map(|native| native.upcast())
         .unwrap_or_else(|| window.clone().upcast());
-    if focus.is_none() {
+    let Some(focus) = focus else {
         scope.child_focus(gtk::DirectionType::TabForward);
-    } else {
-        scope.child_focus(direction);
+        return;
+    };
+    let moved = scope.child_focus(direction);
+    // Some widgets keep the focus at their edge (a list's first row going
+    // up, for one): then take the nearest item on screen that way.
+    if gtk::prelude::GtkWindowExt::focus(window).as_ref() == Some(&focus) {
+        let target = nearest_in_direction(&scope, &focus, direction);
+        if std::env::var_os("EMBYCLIENTPLUS_DEBUG_FOCUS").is_some() {
+            tracing::info!(
+                "focus stuck ({direction:?}, child_focus {moved}); nearest: {}",
+                describe(target.as_ref())
+            );
+        }
+        if let Some(target) = target {
+            target.grab_focus();
+        }
+    }
+}
+
+/// The focusable item closest to `from` in `direction`, by on-screen
+/// position within `scope`: mostly ahead of it, then least off to the side.
+fn nearest_in_direction(
+    scope: &gtk::Widget,
+    from: &gtk::Widget,
+    direction: gtk::DirectionType,
+) -> Option<gtk::Widget> {
+    let origin = from.compute_bounds(scope)?;
+    let mut best: Option<(f32, gtk::Widget)> = None;
+    let mut stack = vec![scope.clone()];
+    while let Some(widget) = stack.pop() {
+        if !widget.is_mapped() || !widget.is_sensitive() || widget.is_ancestor(from) {
+            continue;
+        }
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            child = current.next_sibling();
+            stack.push(current);
+        }
+        if &widget == from || !widget.is_focusable() || is_container(&widget) {
+            continue;
+        }
+        // Items' own parts (a card button's label) aren't targets.
+        if from.is_ancestor(&widget) {
+            continue;
+        }
+        let Some(rect) = widget.compute_bounds(scope) else {
+            continue;
+        };
+        let Some(score) = direction_score(&origin, &rect, direction) else {
+            continue;
+        };
+        if best.as_ref().is_none_or(|(b, _)| score < *b) {
+            best = Some((score, widget));
+        }
+    }
+    best.map(|(_, widget)| widget)
+}
+
+/// How far `to` is from `from` going `direction`; `None` when it isn't
+/// that way at all. Sideways offset counts double, so the item straight
+/// ahead wins over a closer one off to the side.
+fn direction_score(
+    from: &gtk::graphene::Rect,
+    to: &gtk::graphene::Rect,
+    direction: gtk::DirectionType,
+) -> Option<f32> {
+    let (fx0, fy0, fx1, fy1) = (
+        from.x(),
+        from.y(),
+        from.x() + from.width(),
+        from.y() + from.height(),
+    );
+    let (tx0, ty0, tx1, ty1) = (to.x(), to.y(), to.x() + to.width(), to.y() + to.height());
+    // Gap between the spans on the other axis (0 when they overlap).
+    let gap = |a0: f32, a1: f32, b0: f32, b1: f32| (b0 - a1).max(a0 - b1).max(0.0);
+    const SLACK: f32 = 2.0;
+    let (ahead, side) = match direction {
+        gtk::DirectionType::Up => (fy0 - ty1, gap(fx0, fx1, tx0, tx1)),
+        gtk::DirectionType::Down => (ty0 - fy1, gap(fx0, fx1, tx0, tx1)),
+        gtk::DirectionType::Left => (fx0 - tx1, gap(fy0, fy1, ty0, ty1)),
+        gtk::DirectionType::Right => (tx0 - fx1, gap(fy0, fy1, ty0, ty1)),
+        _ => return None,
+    };
+    (ahead >= -SLACK).then_some(ahead.max(0.0) + side * 2.0)
+}
+
+/// A press while the music panel is open; false when it's not one of the
+/// panel's own (it's then plain navigation, or leaves the panel).
+fn music_panel_press(
+    window: &adw::ApplicationWindow,
+    ui: &Ui,
+    panel: &super::music::MusicPanel,
+    pad: Pad,
+) -> bool {
+    let focus = gtk::prelude::GtkWindowExt::focus(window);
+    // The cursor belongs in the panel while it's open.
+    if !focus
+        .as_ref()
+        .is_some_and(|f| f.is_mapped() && panel.contains(f) && !is_container(f))
+    {
+        panel.focus_default();
+        return matches!(
+            controller::action_for(pad, Context::Browse),
+            Some(Action::Up | Action::Down | Action::Left | Action::Right)
+        );
+    }
+    // A queue item picked up with X: ↑/↓ move it, A/B/X put it down.
+    if panel.moving().is_some() {
+        match (
+            controller::action_for(pad, Context::Browse),
+            controller::action_for(pad, Context::Music),
+        ) {
+            (Some(Action::Up), _) => panel.move_step(true),
+            (Some(Action::Down), _) => panel.move_step(false),
+            (Some(Action::Activate | Action::Back), _) | (_, Some(Action::MoveInQueue)) => {
+                panel.end_move()
+            }
+            _ => {}
+        }
+        return true;
+    }
+    let Some(action) = controller::action_for(pad, Context::Music) else {
+        return false;
+    };
+    if !panel.action(action, focus.as_ref()) {
+        return false;
+    }
+    if action == Action::CloseMusic {
+        focus_page(ui);
+    }
+    true
+}
+
+/// Directions, select, back and item menu, as while browsing.
+fn browse_navigation(window: &adw::ApplicationWindow, ui: &Ui, pad: Pad) {
+    match controller::action_for(pad, Context::Browse) {
+        Some(Action::Up) => move_focus(window, gtk::DirectionType::Up),
+        Some(Action::Down) => move_focus(window, gtk::DirectionType::Down),
+        Some(Action::Left) => horizontal_in(window, false),
+        Some(Action::Right) => horizontal_in(window, true),
+        Some(Action::Activate) => activate_focus(window),
+        Some(Action::Back) => back(window, Some(ui)),
+        Some(Action::ContextMenu) => {
+            if let Some(focus) = gtk::prelude::GtkWindowExt::focus(window) {
+                open_card_menu(&focus);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -375,9 +622,12 @@ fn back(window: &adw::ApplicationWindow, ui: Option<&Ui>) {
         dialog.close();
         return;
     }
-    if let Some(ui) = ui
-        && !ui.close_now_playing()
-    {
-        ui.nav().pop();
+    if let Some(ui) = ui {
+        if ui.close_now_playing() {
+            // Back where the cursor was before the panel opened.
+            focus_page(ui);
+        } else {
+            ui.nav().pop();
+        }
     }
 }
