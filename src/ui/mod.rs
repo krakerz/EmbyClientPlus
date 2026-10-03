@@ -16,6 +16,7 @@ mod legend;
 mod library;
 mod library_page;
 pub mod login;
+mod marquee;
 mod music;
 pub mod player_page;
 mod playlists;

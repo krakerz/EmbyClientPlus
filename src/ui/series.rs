@@ -26,6 +26,9 @@ struct SeriesView {
     /// The episode last opened (season id, row index), so coming back
     /// puts the cursor on it again.
     opened: RefCell<Option<(String, usize)>>,
+    /// Where the cursor was when a reload started; it goes back there once
+    /// the episodes are rebuilt.
+    reload_mark: RefCell<Option<super::gamepad::CursorMark>>,
 }
 
 type SeasonChanged = Box<dyn Fn(usize)>;
@@ -136,6 +139,7 @@ pub fn page(ui: &Ui, series: &BaseItem) -> adw::NavigationPage {
         related,
         season_items: RefCell::new(Vec::new()),
         opened: RefCell::new(None),
+        reload_mark: RefCell::new(None),
     });
 
     let weak = ui.downgrade();
@@ -183,6 +187,13 @@ pub fn page(ui: &Ui, series: &BaseItem) -> adw::NavigationPage {
 }
 
 fn load(ui: &Ui, view: &Rc<SeriesView>, series_id: &str) {
+    // A reload (watch state changed) rebuilds the page: remember where the
+    // cursor was, to put it back once the episodes are in.
+    let mark = view
+        .episodes
+        .ancestor(adw::NavigationPage::static_type())
+        .and_then(|page| super::gamepad::mark_cursor(&page));
+    view.reload_mark.replace(mark);
     let client = ui.client();
     let user_id = ui.user_id();
     let series_id = series_id.to_string();
@@ -293,7 +304,12 @@ fn load_episodes(ui: &Ui, view: &Rc<SeriesView>, series_id: &str, season_id: &st
                     });
                     view.episodes.append(&row);
                 }
-                focus_episode(&view, &wanted);
+                match view.reload_mark.take() {
+                    Some(mark) => {
+                        mark.restore();
+                    }
+                    None => focus_episode(&view, &wanted),
+                }
             }
             Err(e) => ui.report_error("Could not load episodes", &e),
         }

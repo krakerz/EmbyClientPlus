@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-10-03
+
+### Added
+- Update downloads show their progress (percentage and size) in the update notice and in Preferences → Updates.
+- Command line: `-h`/`--help` and `-v`/`--version`.
+- Long titles in the mini player, music panel and queue scroll (marquee) instead of being cut off; queue rows only while they have the cursor or pointer.
+
+### Changed
+- The mini player and music panel keep a fixed width, whatever the titles.
+
+### Fixed
+- Controller: the cursor jumped elsewhere after actions that rebuild a list or page (next/previous track, marking watched, page reloads); it now stays on the same spot.
+- Controller: switching tabs (library tabs, Preferences) remembers each tab's own cursor position.
+
 ## [1.0.0] — 2026-10-03
 
 First stable release.

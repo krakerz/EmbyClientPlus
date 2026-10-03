@@ -5,12 +5,9 @@
 //! mini player leaves too little room, the hints scroll slowly back and
 //! forth on one line (a marquee) instead of being cut off.
 
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
-use std::time::Duration;
+use std::cell::Cell;
 
 use adw::prelude::*;
-use gtk::glib;
 
 use super::Ui;
 use crate::controller::{self, Action, Pad};
@@ -18,10 +15,6 @@ use crate::controller::{self, Action, Pad};
 const MARGIN: i32 = 12;
 /// The legend's own padding and border, left and right together.
 const CHROME: i32 = 30;
-/// Marquee: a step every frame-ish, a rest at each end.
-const MARQUEE_TICK: Duration = Duration::from_millis(30);
-const MARQUEE_STEP: f64 = 1.0;
-const MARQUEE_REST_TICKS: u32 = 50;
 
 pub struct Legend {
     root: gtk::Box,
@@ -29,8 +22,6 @@ pub struct Legend {
     hints: gtk::Box,
     /// The controller was used last (not the mouse or touch screen).
     in_use: Cell<bool>,
-    /// The running marquee, shared with its idle check.
-    marquee: Rc<RefCell<Option<glib::SourceId>>>,
 }
 
 impl Legend {
@@ -53,12 +44,12 @@ impl Legend {
             .css_classes(["legend"])
             .build();
         root.append(&scroller);
+        super::marquee::attach(&scroller);
         Legend {
             root,
             scroller,
             hints,
             in_use: Cell::new(false),
-            marquee: Rc::default(),
         }
     }
 
@@ -83,7 +74,6 @@ impl Legend {
             && window.visible_dialog().is_none();
         self.root.set_visible(shown);
         let Some(ui) = ui.filter(|_| shown) else {
-            self.stop_marquee();
             return;
         };
         super::clear(&self.hints);
@@ -168,68 +158,7 @@ impl Legend {
             hint.append(&gtk::Label::new(Some(text)));
             self.hints.append(&hint);
         }
-        // Whether it fits is known once laid out.
-        let (weak, slot) = (self.scroller.downgrade(), self.marquee.clone());
-        glib::idle_add_local_once(move || {
-            if let Some(scroller) = weak.upgrade() {
-                run_marquee(&scroller, &slot);
-            }
-        });
     }
-
-    fn stop_marquee(&self) {
-        stop_marquee(&self.scroller, &self.marquee);
-    }
-}
-
-fn stop_marquee(scroller: &gtk::ScrolledWindow, slot: &RefCell<Option<glib::SourceId>>) {
-    if let Some(source) = slot.take() {
-        source.remove();
-    }
-    scroller.hadjustment().set_value(0.0);
-}
-
-/// Scrolls the hints back and forth when they don't fit; stops when they
-/// do. A running marquee picks up size changes on its own.
-fn run_marquee(scroller: &gtk::ScrolledWindow, slot: &Rc<RefCell<Option<glib::SourceId>>>) {
-    let adjustment = scroller.hadjustment();
-    if adjustment.upper() - adjustment.page_size() <= 1.0 {
-        stop_marquee(scroller, slot);
-        return;
-    }
-    if slot.borrow().is_some() {
-        return;
-    }
-    adjustment.set_value(0.0);
-    let rest = Cell::new(MARQUEE_REST_TICKS);
-    let forward = Cell::new(true);
-    let weak = scroller.downgrade();
-    let source = glib::timeout_add_local(MARQUEE_TICK, move || {
-        let Some(scroller) = weak.upgrade() else {
-            return glib::ControlFlow::Break;
-        };
-        if rest.get() > 0 {
-            rest.set(rest.get() - 1);
-            return glib::ControlFlow::Continue;
-        }
-        let adjustment = scroller.hadjustment();
-        let end = (adjustment.upper() - adjustment.page_size()).max(0.0);
-        let step = if forward.get() {
-            MARQUEE_STEP
-        } else {
-            -MARQUEE_STEP
-        };
-        let value = adjustment.value() + step;
-        if value >= end || value <= 0.0 {
-            adjustment.set_value(value.clamp(0.0, end));
-            forward.set(!forward.get());
-            rest.set(MARQUEE_REST_TICKS);
-        } else {
-            adjustment.set_value(value);
-        }
-        glib::ControlFlow::Continue
-    });
-    slot.replace(Some(source));
 }
 
 /// The short name printed on a button badge.

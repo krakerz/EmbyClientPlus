@@ -73,6 +73,7 @@ mpv.conf, controller, updates and logs. A **Quit button** in Preferences is hand
 game, with the **Gamepad** layout.
 
 `embyclientplus <file-or-url>` plays a file without Emby, for testing the player or SVP.
+`embyclientplus --help` lists the options (`--version` prints the version).
 
 ## FAQ
 

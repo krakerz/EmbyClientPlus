@@ -135,6 +135,11 @@ fn load(ui: &Ui, view: &Rc<AlbumView>, album_id: &str) {
 }
 
 fn show(ui: &Ui, view: &AlbumView, album: &BaseItem, tracks: &[BaseItem]) {
+    // Rebuilding drops the focused widget; the cursor comes back to its spot.
+    let mark = view
+        .tracks
+        .ancestor(adw::NavigationPage::static_type())
+        .and_then(|page| super::gamepad::mark_cursor(&page));
     view.title.set_label(&album.name);
     images::load(ui, &view.cover, album.poster(), COVER as u32 * 2);
 
@@ -213,6 +218,9 @@ fn show(ui: &Ui, view: &AlbumView, album: &BaseItem, tracks: &[BaseItem]) {
     for index in 0..queue.len() {
         view.tracks
             .append(&track_row(ui, album, &queue, index, multi_disc));
+    }
+    if let Some(mark) = mark {
+        mark.restore();
     }
 }
 

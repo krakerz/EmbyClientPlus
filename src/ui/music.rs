@@ -88,8 +88,8 @@ pub fn attach(ui: &Ui, music: &MusicPlayer, sheet: &adw::BottomSheet) -> MusicPa
         .valign(gtk::Align::Center)
         .hexpand(true)
         .build();
-    text.append(&bar_title);
-    text.append(&bar_artist);
+    text.append(&super::marquee::wrap(&bar_title));
+    text.append(&super::marquee::wrap(&bar_artist));
     let bar_previous = icon_button(icons::SKIP_BACK, "Previous");
     let bar_play = icon_button(icons::PAUSE, "Play/Pause");
     let bar_next = icon_button(icons::SKIP_FORWARD, "Next");
@@ -122,8 +122,7 @@ pub fn attach(ui: &Ui, music: &MusicPlayer, sheet: &adw::BottomSheet) -> MusicPa
     let cover_box = cover_frame(&cover, SHEET_COVER);
     cover_box.set_halign(gtk::Align::Center);
     let title = gtk::Label::builder()
-        .wrap(true)
-        .justify(gtk::Justification::Center)
+        .xalign(0.5)
         .css_classes(["title-2"])
         .build();
     let artist = link_button();
@@ -204,7 +203,7 @@ pub fn attach(ui: &Ui, music: &MusicPlayer, sheet: &adw::BottomSheet) -> MusicPa
         .build();
     body.append(&collapse);
     body.append(&cover_box);
-    body.append(&title);
+    body.append(&super::marquee::wrap(&title));
     body.append(&artist);
     body.append(&album);
     body.append(&seek);
@@ -216,6 +215,7 @@ pub fn attach(ui: &Ui, music: &MusicPlayer, sheet: &adw::BottomSheet) -> MusicPa
     let scrolled = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
         .propagate_natural_height(true)
+        .width_request(BAR_WIDTH)
         .child(&body)
         .build();
     sheet.set_sheet(Some(&scrolled));
@@ -297,6 +297,18 @@ pub fn attach(ui: &Ui, music: &MusicPlayer, sheet: &adw::BottomSheet) -> MusicPa
                 && !view.syncing.get()
             {
                 music.set_volume(scale.value());
+            }
+        });
+    }
+    // Activating a queue row (click, Enter, A) plays it.
+    {
+        let music = music.downgrade();
+        view.queue.connect_row_activated(move |_, row| {
+            if let Some(music) = music.upgrade() {
+                let index = row.index().max(0) as usize;
+                if index != music.queue().position() {
+                    music.jump(index);
+                }
             }
         });
     }
@@ -412,7 +424,10 @@ fn show_track(ui: &Ui, view: &View, item: &BaseItem) {
 const LINK_KEY: &str = "embyclientplus-music-link";
 
 fn set_link(button: &gtk::Button, target: Option<&BaseItem>, text: &str) {
-    button.set_label(text);
+    // SAFETY: see `link_button`; read straight away.
+    if let Some(label) = unsafe { button.data::<gtk::Label>(LINK_LABEL_KEY) } {
+        unsafe { label.as_ref() }.set_label(text);
+    }
     button.set_visible(!text.is_empty());
     button.set_sensitive(target.is_some());
     // SAFETY: this key is only ever stored and read as `Option<BaseItem>`.
@@ -463,6 +478,8 @@ fn rebuild_queue(music: &MusicPlayer, view: &View) {
     if *view.queue_shown.borrow() == (ids.clone(), position) {
         return;
     }
+    // Rebuilding drops the focused row; the cursor comes back to its spot.
+    let mark = super::gamepad::mark_cursor(&view.queue);
     view.queue.remove_all();
     let entries: Vec<BaseItem> = music.queue().entries().cloned().collect();
     let last = entries.len().saturating_sub(1);
@@ -479,6 +496,8 @@ fn rebuild_queue(music: &MusicPlayer, view: &View) {
         && let Some(row) = view.queue.row_at_index(index as i32)
     {
         row.grab_focus();
+    } else if let Some(mark) = mark {
+        mark.restore();
     }
 }
 
@@ -490,12 +509,33 @@ fn queue_row(
     index: usize,
     current: usize,
     last: usize,
-) -> adw::ActionRow {
-    let row = adw::ActionRow::builder()
-        .title(glib::markup_escape_text(&item.name))
-        .subtitle(glib::markup_escape_text(item.artist().unwrap_or_default()))
-        .activatable(index != current)
+) -> gtk::ListBoxRow {
+    // marker · title/artist (marquee) · move/remove buttons
+    let content = gtk::Box::builder()
+        .spacing(12)
+        .margin_start(12)
+        .margin_end(6)
         .build();
+    let row = gtk::ListBoxRow::builder()
+        .activatable(index != current)
+        .child(&content)
+        .build();
+    // Title and artist marquee while the row has the cursor or pointer.
+    let title = gtk::Label::builder().label(&item.name).xalign(0.0).build();
+    let artist = gtk::Label::builder()
+        .label(item.artist().unwrap_or_default())
+        .xalign(0.0)
+        .css_classes(["dim-label", "caption"])
+        .build();
+    let text = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .valign(gtk::Align::Center)
+        .hexpand(true)
+        .margin_top(8)
+        .margin_bottom(8)
+        .build();
+    text.append(&super::marquee::wrap_while_active(&title, &row));
+    text.append(&super::marquee::wrap_while_active(&artist, &row));
     let marker = gtk::Image::builder()
         .icon_name(icons::SONGS)
         .opacity(if index == current { 1.0 } else { 0.0 })
@@ -503,7 +543,8 @@ fn queue_row(
     if index == current {
         row.add_css_class("music-current");
     }
-    row.add_prefix(&marker);
+    content.append(&marker);
+    content.append(&text);
     add_drag_and_drop(music, &row, index);
     if index != current {
         let actions: [(&str, &str, bool, QueueEdit); 3] = [
@@ -538,20 +579,14 @@ fn queue_row(
                     act(&music);
                 }
             });
-            row.add_suffix(&button);
+            content.append(&button);
         }
-        let music = music.downgrade();
-        row.connect_activated(move |_| {
-            if let Some(music) = music.upgrade() {
-                music.jump(index);
-            }
-        });
     }
     row
 }
 
 /// Mouse reordering: drag a queue row onto another to move it there.
-fn add_drag_and_drop(music: &MusicPlayer, row: &adw::ActionRow, index: usize) {
+fn add_drag_and_drop(music: &MusicPlayer, row: &gtk::ListBoxRow, index: usize) {
     let drag = gtk::DragSource::builder()
         .actions(gtk::gdk::DragAction::MOVE)
         .build();
@@ -608,13 +643,20 @@ fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
         .build()
 }
 
+/// A flat button with marquee text (artist/album links in the panel).
 fn link_button() -> gtk::Button {
-    gtk::Button::builder()
-        .halign(gtk::Align::Center)
+    let label = gtk::Label::builder().xalign(0.5).build();
+    let button = gtk::Button::builder()
         .css_classes(["flat"])
         .visible(false)
-        .build()
+        .child(&super::marquee::wrap(&label))
+        .build();
+    // SAFETY: this key is only ever stored and read as `gtk::Label`.
+    unsafe { button.set_data(LINK_LABEL_KEY, label) };
+    button
 }
+
+const LINK_LABEL_KEY: &str = "embyclientplus-link-label";
 
 impl MusicPanel {
     pub fn is_open(&self) -> bool {
