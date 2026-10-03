@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-10-03
+
+### Fixed
+- Controller: Down got stuck on the first row of the music queue (and other scrolling text in the music panel and legend could catch the cursor).
+
 ## [1.1.0] — 2026-10-03
 
 ### Added
