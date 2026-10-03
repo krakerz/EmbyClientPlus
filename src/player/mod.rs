@@ -158,6 +158,31 @@ pub struct Track {
 /// Hardware decoders, in order (copy-back: SVP needs frames in RAM).
 const HWDEC: &str = "vaapi-copy,auto-copy";
 
+/// Options Preferences → Video sets, and their values when mpv started
+/// (mpv's defaults or the user's mpv.conf), for the Auto quality.
+const VIDEO_PROPERTIES: [&str; 10] = [
+    "scale",
+    "cscale",
+    "dscale",
+    "deband",
+    "correct-downscaling",
+    "linear-downscaling",
+    "sigmoid-upscaling",
+    "dither",
+    "deinterlace",
+    "hwdec",
+];
+static STARTED_VIDEO: OnceLock<Vec<(&'static str, String)>> = OnceLock::new();
+
+thread_local! {
+    /// The shader files this app added to mpv's list (see `set_shaders`).
+    static APPLIED_SHADERS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn flag(on: bool) -> &'static str {
+    if on { "yes" } else { "no" }
+}
+
 /// Handle to the app's single libmpv instance.
 #[derive(Clone, Copy)]
 pub struct Player {
@@ -503,6 +528,122 @@ impl Player {
         self.set("video-sync", video_sync)?;
         if enabled {
             self.set("tscale", "oversample")?;
+        }
+        Ok(())
+    }
+
+    /// Scaling and processing per Preferences (`video`). Auto puts back
+    /// what mpv started with: its defaults, or the user's mpv.conf.
+    pub fn apply_video(self, video: &crate::config::VideoSettings) -> Result<()> {
+        use crate::config::VideoQuality;
+        let started = STARTED_VIDEO.get_or_init(|| {
+            VIDEO_PROPERTIES
+                .iter()
+                .map(|&name| {
+                    (
+                        name,
+                        self.mpv.get_property::<String>(name).unwrap_or_default(),
+                    )
+                })
+                .collect()
+        });
+        let initial = |name: &str| {
+            started
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, value)| value.clone())
+                .unwrap_or_default()
+        };
+        let (scale, cscale, dscale, deband) = match video.quality {
+            VideoQuality::Auto => (
+                initial("scale"),
+                initial("cscale"),
+                initial("dscale"),
+                initial("deband"),
+            ),
+            VideoQuality::Fast => (
+                "bilinear".into(),
+                "bilinear".into(),
+                "bilinear".into(),
+                "no".into(),
+            ),
+            VideoQuality::Balanced => (
+                "spline36".into(),
+                "spline36".into(),
+                "mitchell".into(),
+                "no".into(),
+            ),
+            VideoQuality::HighQuality => (
+                "ewa_lanczossharp".into(),
+                "ewa_lanczossharp".into(),
+                "mitchell".into(),
+                "yes".into(),
+            ),
+            VideoQuality::Custom => (
+                video.upscaler.clone(),
+                video.chroma_scaler.clone(),
+                video.downscaler.clone(),
+                flag(video.deband).into(),
+            ),
+        };
+        // mpv's own "fast" profile skips these too; elsewhere they're cheap.
+        let extras = |name: &str| match video.quality {
+            VideoQuality::Auto => initial(name),
+            VideoQuality::Fast => "no".into(),
+            _ => "yes".into(),
+        };
+        let dither = match video.quality {
+            VideoQuality::Auto => initial("dither"),
+            VideoQuality::Fast => "no".into(),
+            _ => "auto".into(),
+        };
+        let hwdec = if video.software_decoding {
+            "no".into()
+        } else {
+            initial("hwdec")
+        };
+        let values = [
+            ("scale", scale),
+            ("cscale", cscale),
+            ("dscale", dscale),
+            ("deband", deband),
+            ("correct-downscaling", extras("correct-downscaling")),
+            ("linear-downscaling", extras("linear-downscaling")),
+            ("sigmoid-upscaling", extras("sigmoid-upscaling")),
+            ("dither", dither),
+            (
+                "deinterlace",
+                (if video.deinterlace { "auto" } else { "no" }).into(),
+            ),
+            ("hwdec", hwdec),
+        ];
+        for (name, value) in values {
+            // An empty value is a valid default for some (cscale): set it too.
+            if self.mpv.get_property::<String>(name).ok().as_deref() != Some(value.as_str()) {
+                self.set(name, value.as_str())?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Puts `files` in mpv's shader list in place of the ones this app set
+    /// before; shaders from the user's mpv.conf stay.
+    pub fn set_shaders(self, files: &[std::path::PathBuf]) -> Result<()> {
+        let files: Vec<String> = files
+            .iter()
+            .map(|f| f.to_string_lossy().into_owned())
+            .collect();
+        let previous = APPLIED_SHADERS.with(|applied| applied.borrow().clone());
+        if previous == files {
+            return Ok(());
+        }
+        for file in &previous {
+            self.command("change-list", &["glsl-shaders", "remove", file])?;
+        }
+        APPLIED_SHADERS.with(|applied| applied.borrow_mut().clear());
+        for file in &files {
+            self.command("change-list", &["glsl-shaders", "append", file])?;
+            APPLIED_SHADERS.with(|applied| applied.borrow_mut().push(file.clone()));
         }
         Ok(())
     }

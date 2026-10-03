@@ -39,6 +39,7 @@ ecp-person-symbolic             user
 ecp-playlist-symbolic           list-music
 ecp-image-symbolic              image
 ecp-picture-symbolic            crop
+ecp-shaders-symbolic            wand-sparkles
 ecp-shuffle-symbolic            shuffle
 ecp-repeat-symbolic             repeat
 ecp-repeat-one-symbolic         repeat-1

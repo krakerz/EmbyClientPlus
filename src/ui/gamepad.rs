@@ -625,11 +625,18 @@ fn move_focus(window: &adw::ApplicationWindow, direction: gtk::DirectionType) {
     {
         return;
     }
-    let scope: gtk::Widget = focus
+    let mut scope: gtk::Widget = focus
         .as_ref()
         .and_then(|widget| widget.native())
         .map(|native| native.upcast())
         .unwrap_or_else(|| window.clone().upcast());
+    // An open dialog is drawn inside the window: never step out of it onto
+    // the page behind.
+    if scope == *window.upcast_ref::<gtk::Widget>()
+        && let Some(dialog) = window.visible_dialog()
+    {
+        scope = dialog.upcast();
+    }
     let Some(focus) = focus else {
         scope.child_focus(gtk::DirectionType::TabForward);
         return;

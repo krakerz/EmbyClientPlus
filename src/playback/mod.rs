@@ -152,6 +152,8 @@ pub struct PlaybackSession {
     stopped: Cell<bool>,
     /// HDR source: SVP stays off unless the title explicitly enables it.
     pub hdr: bool,
+    /// Shader groups found when playback started (none for music).
+    shader_groups: Vec<crate::shaders::Group>,
 }
 
 impl PlaybackSession {
@@ -235,6 +237,12 @@ impl PlaybackSession {
             None => (item.id.clone(), ItemType::Movie),
         };
 
+        // Nothing to sharpen or upscale in music.
+        let shader_groups = if item.is_audio() {
+            Vec::new()
+        } else {
+            crate::shaders::groups()
+        };
         let session = Rc::new(PlaybackSession {
             client,
             player,
@@ -252,6 +260,7 @@ impl PlaybackSession {
             timer: RefCell::new(None),
             stopped: Cell::new(false),
             hdr,
+            shader_groups,
         });
 
         let settings = Settings::load().unwrap_or_default();
@@ -262,6 +271,10 @@ impl PlaybackSession {
         }
         player.set_svp(settings.frame_gen.socket(), svp)?;
         apply_smoothing(player, svp);
+        if let Err(e) = player.apply_video(&settings.video) {
+            tracing::warn!("{e:#}");
+        }
+        session.apply_shaders();
         let subtitle_urls: Vec<&str> = session
             .external_subtitles
             .iter()
@@ -459,6 +472,41 @@ impl PlaybackSession {
         self.remember(|o| o.frame_gen_backend = Some(backend));
     }
 
+    /// The shader groups shown in the player, each with its preset in
+    /// effect for this title (`None`: off).
+    pub fn shaders(&self) -> Vec<(crate::shaders::Group, Option<String>)> {
+        let settings = Settings::load().unwrap_or_default().shaders;
+        let title = self.shader_choices();
+        crate::shaders::active(&self.shader_groups, &settings, &title)
+            .into_iter()
+            .map(|(group, preset)| (group.clone(), preset.map(|p| p.id.clone())))
+            .collect()
+    }
+
+    /// Picks `preset` ("" for off) for `group`, for this title from now on.
+    pub fn set_shader(&self, group: &str, preset: &str) {
+        let mut choices = self.shader_choices();
+        choices.insert(group.to_string(), preset.to_string());
+        self.remember(|o| o.shaders = Some(crate::shaders::encode_choices(&choices)));
+        self.apply_shaders();
+    }
+
+    fn shader_choices(&self) -> crate::shaders::Choices {
+        self.remembered()
+            .and_then(|o| o.shaders)
+            .map(|text| crate::shaders::decode_choices(&text))
+            .unwrap_or_default()
+    }
+
+    fn apply_shaders(&self) {
+        let settings = Settings::load().unwrap_or_default().shaders;
+        let title = self.shader_choices();
+        let active = crate::shaders::active(&self.shader_groups, &settings, &title);
+        if let Err(e) = self.player.set_shaders(&crate::shaders::chain(&active)) {
+            tracing::warn!("{e:#}");
+        }
+    }
+
     fn remembered(&self) -> Option<TitleOverride> {
         Db::open_default()
             .and_then(|db| db.get_override(&self.override_key))
@@ -479,6 +527,7 @@ impl PlaybackSession {
             frame_gen_multiplier: None,
             aspect_mode: None,
             zoom: None,
+            shaders: None,
         });
         change(&mut entry);
         if let Err(e) = Db::open_default().and_then(|db| db.upsert_override(&entry)) {

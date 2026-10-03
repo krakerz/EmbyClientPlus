@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-10-03
+
+### Added
+- Preferences → Video: picture quality presets (Auto, Fast, Balanced, High quality, Custom), with upscaler, chroma scaler, downscaler and debanding choices for Custom.
+- Preferences → Video: deinterlacing for interlaced videos (on by default) and a software decoding switch.
+- Built-in shaders: AMD FSR (Sharp, Balanced, Soft) and Anime4K (modes A, B, C, A+A, B+B, C+A, each Fast or HQ).
+- Your own shaders: each folder in `~/.config/embyclientplus/shaders/` becomes a shader group with its presets.
+- Player: a Shaders button with a submenu per shader group; each group's pick is remembered per title, and groups can be combined.
+- Preferences → Video: show or hide each shader group and choose its default preset.
+- Player: the Shaders button turns green while any shader is on, and its menu shows a check next to each group that has a preset on.
+
+### Changed
+- Player: the SVP button shows its state by colour only, without a pressed background.
+- Player: all buttons, including Back, are now the same round shape, and the control bar is more compact.
+- Player: the SVP button uses an icon, so it sits centred in its button.
+
+### Fixed
+- Controller: moving up or down past the edge of an open dialog no longer jumps the cursor onto the page behind it.
+- Controller: buttons pressed while the Shaders menu is open no longer act on the player behind it.
+
 ## [1.2.0] — 2026-10-03
 
 ### Added
