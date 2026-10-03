@@ -2,13 +2,14 @@
 //! Update button) and the Preferences → Updates group.
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use adw::prelude::*;
 use gtk::{gio, glib};
 
 use crate::config::Settings;
 use crate::runtime::spawn_tokio;
-use crate::update::{self, InstallKind, Update};
+use crate::update::{self, InstallKind, Progress, Update};
 
 /// At start-up, for installed builds with the check enabled.
 pub fn check_on_startup(toasts: &adw::ToastOverlay) {
@@ -44,14 +45,46 @@ pub fn check_on_startup(toasts: &adw::ToastOverlay) {
     });
 }
 
-/// Downloads and installs `found`, then offers a restart.
+/// Installs `found`, calling `on_progress` a few times a second while the
+/// download runs.
+async fn apply_with_progress(
+    kind: InstallKind,
+    found: Update,
+    on_progress: impl Fn(&Progress) + 'static,
+) -> anyhow::Result<()> {
+    let progress = Arc::new(Progress::default());
+    let ticker = {
+        let progress = progress.clone();
+        glib::timeout_add_local(PROGRESS_TICK, move || {
+            on_progress(&progress);
+            glib::ControlFlow::Continue
+        })
+    };
+    let downloading = progress.clone();
+    let result = spawn_tokio(async move { update::apply(&kind, &found, &downloading).await }).await;
+    ticker.remove();
+    result
+}
+
+const PROGRESS_TICK: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// Downloads and installs `found`, then offers a restart. The notice
+/// shows the download's progress meanwhile.
 fn install(toasts: &adw::ToastOverlay, kind: InstallKind, found: Update) {
-    toasts.add_toast(notice(&format!("Downloading {}…", found.version)));
+    let downloading = adw::Toast::builder()
+        .title(format!("Downloading {}…", found.version))
+        .timeout(0)
+        .build();
+    toasts.add_toast(downloading.clone());
     let toasts = toasts.downgrade();
     glib::spawn_future_local(async move {
-        let installing = (kind.clone(), found.clone());
-        let result =
-            spawn_tokio(async move { update::apply(&installing.0, &installing.1).await }).await;
+        let version = found.version.clone();
+        let shown = downloading.clone();
+        let result = apply_with_progress(kind.clone(), found.clone(), move |progress| {
+            shown.set_title(&format!("Downloading {version} — {}", progress.describe()));
+        })
+        .await;
+        downloading.dismiss();
         let Some(toasts) = toasts.upgrade() else {
             return;
         };
@@ -103,6 +136,13 @@ pub fn preferences_group(toasts: &adw::ToastOverlay) -> adw::PreferencesGroup {
         .label("Check for Updates")
         .valign(gtk::Align::Center)
         .build();
+    // Download progress, shown while an update downloads.
+    let bar = gtk::ProgressBar::builder()
+        .valign(gtk::Align::Center)
+        .width_request(140)
+        .visible(false)
+        .build();
+    version.add_suffix(&bar);
     version.add_suffix(&button);
     group.add(&version);
 
@@ -136,7 +176,7 @@ pub fn preferences_group(toasts: &adw::ToastOverlay) -> adw::PreferencesGroup {
         if let Some(update) = found.borrow().clone() {
             button.set_sensitive(false);
             button.set_label("Updating…");
-            install_from_dialog(&dialog, button, &version, kind.clone(), update);
+            install_from_dialog(&dialog, button, &version, &bar, kind.clone(), update);
             return;
         }
         button.set_sensitive(false);
@@ -172,16 +212,35 @@ fn install_from_dialog(
     dialog: &glib::WeakRef<adw::ToastOverlay>,
     button: &gtk::Button,
     row: &adw::ActionRow,
+    bar: &gtk::ProgressBar,
     kind: InstallKind,
     found: Update,
 ) {
     let dialog = dialog.clone();
     let button = button.downgrade();
     let row = row.downgrade();
+    bar.set_fraction(0.0);
+    bar.set_visible(true);
+    let bar = bar.downgrade();
     glib::spawn_future_local(async move {
-        let installing = (kind.clone(), found.clone());
-        let result =
-            spawn_tokio(async move { update::apply(&installing.0, &installing.1).await }).await;
+        let version = found.version.clone();
+        let (shown_row, shown_bar) = (row.clone(), bar.clone());
+        let result = apply_with_progress(kind.clone(), found.clone(), move |progress| {
+            if let Some(row) = shown_row.upgrade() {
+                row.set_subtitle(&format!("Downloading {version} — {}", progress.describe()));
+            }
+            if let Some(bar) = shown_bar.upgrade() {
+                match progress.fraction() {
+                    Some(fraction) => bar.set_fraction(fraction),
+                    // Size unknown: just show that something's happening.
+                    None => bar.pulse(),
+                }
+            }
+        })
+        .await;
+        if let Some(bar) = bar.upgrade() {
+            bar.set_visible(false);
+        }
         let (Some(button), Some(row)) = (button.upgrade(), row.upgrade()) else {
             return;
         };

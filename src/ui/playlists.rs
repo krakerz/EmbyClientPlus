@@ -182,6 +182,11 @@ fn load(ui: &Ui, view: &Rc<PlaylistView>, playlist: &BaseItem) {
 }
 
 fn show(ui: &Ui, view: &Rc<PlaylistView>, playlist: &BaseItem, tracks: &[BaseItem]) {
+    // Rebuilding drops the focused widget; the cursor comes back to its spot.
+    let mark = view
+        .tracks
+        .ancestor(adw::NavigationPage::static_type())
+        .and_then(|page| super::gamepad::mark_cursor(&page));
     if playlist.poster().is_none()
         && let Some(first) = tracks.first()
     {
@@ -223,6 +228,9 @@ fn show(ui: &Ui, view: &Rc<PlaylistView>, playlist: &BaseItem, tracks: &[BaseIte
     for index in 0..tracks.len() {
         view.tracks
             .append(&track_row(ui, view, playlist, &tracks, index));
+    }
+    if let Some(mark) = mark {
+        mark.restore();
     }
 }
 

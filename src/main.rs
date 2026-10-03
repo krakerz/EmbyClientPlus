@@ -1,4 +1,5 @@
 mod auth;
+mod cli;
 mod config;
 mod controller;
 mod db;
@@ -23,12 +24,25 @@ const APP_ID: &str = "io.github.krakerz.EmbyClientPlus";
 pub const APP_NAME: &str = "Emby Client+";
 
 fn main() -> glib::ExitCode {
+    // An argument plays that file/URL directly, skipping Emby (handy for
+    // checking the player and SVP on their own); -v / -h answer and exit.
+    let target = match cli::parse(std::env::args().skip(1)) {
+        cli::Command::Run { target } => target,
+        cli::Command::Version => {
+            println!("{}", cli::version());
+            return glib::ExitCode::SUCCESS;
+        }
+        cli::Command::Help => {
+            println!("{}", cli::help());
+            return glib::ExitCode::SUCCESS;
+        }
+        cli::Command::Unknown(option) => {
+            eprintln!("embyclientplus: unknown option {option} (see --help)");
+            return glib::ExitCode::from(2);
+        }
+    };
     gamescope::prepare_environment();
     logging::init();
-
-    // An argument plays that file/URL directly, skipping Emby (handy for
-    // checking the player and SVP on their own).
-    let target = std::env::args().nth(1);
 
     let app = adw::Application::builder().application_id(APP_ID).build();
     app.connect_activate(move |app| {

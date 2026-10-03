@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -121,35 +122,87 @@ fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
 
 /// Downloads `update` and swaps it in. The running process keeps its
 /// (now unlinked) files; a restart picks up the new version.
-pub async fn apply(kind: &InstallKind, update: &Update) -> Result<()> {
+pub async fn apply(kind: &InstallKind, update: &Update, progress: &Progress) -> Result<()> {
     match kind {
-        InstallKind::Archive(root) => apply_archive(root, update).await,
-        InstallKind::AppImage(path) => apply_appimage(path, update).await,
+        InstallKind::Archive(root) => apply_archive(root, update, progress).await,
+        InstallKind::AppImage(path) => apply_appimage(path, update, progress).await,
         InstallKind::Source => bail!("updates apply to installed builds only"),
     }
 }
 
-async fn download(url: &str, to: &Path) -> Result<()> {
-    let bytes = client()?
+/// How far a download has got, shared with the UI (which polls it).
+#[derive(Debug, Default)]
+pub struct Progress {
+    received: AtomicU64,
+    /// 0 until known (the server may not say).
+    total: AtomicU64,
+}
+
+impl Progress {
+    pub fn received(&self) -> u64 {
+        self.received.load(Ordering::Relaxed)
+    }
+
+    pub fn total(&self) -> Option<u64> {
+        Some(self.total.load(Ordering::Relaxed)).filter(|&t| t > 0)
+    }
+
+    /// 0..=1, when the size is known.
+    pub fn fraction(&self) -> Option<f64> {
+        self.total()
+            .map(|total| (self.received() as f64 / total as f64).clamp(0.0, 1.0))
+    }
+
+    /// "34 % · 35.0 / 101.2 MB", or "35.0 MB" when the size is unknown.
+    pub fn describe(&self) -> String {
+        let mb = |bytes: u64| bytes as f64 / 1_000_000.0;
+        match (self.fraction(), self.total()) {
+            (Some(fraction), Some(total)) => format!(
+                "{:.0} % · {:.1} / {:.1} MB",
+                fraction * 100.0,
+                mb(self.received()),
+                mb(total)
+            ),
+            _ => format!("{:.1} MB", mb(self.received())),
+        }
+    }
+}
+
+/// Streams `url` to `to`, counting into `progress` as it goes.
+async fn download(url: &str, to: &Path, progress: &Progress) -> Result<()> {
+    use std::io::Write;
+    let mut response = client()?
         .get(url)
         .send()
         .await
         .context("download failed")?
         .error_for_status()
-        .context("download failed")?
-        .bytes()
-        .await
-        .context("download interrupted")?;
-    std::fs::write(to, &bytes).with_context(|| format!("couldn't write {}", to.display()))
+        .context("download failed")?;
+    progress
+        .total
+        .store(response.content_length().unwrap_or(0), Ordering::Relaxed);
+    progress.received.store(0, Ordering::Relaxed);
+    let mut file = std::io::BufWriter::new(
+        std::fs::File::create(to).with_context(|| format!("couldn't write {}", to.display()))?,
+    );
+    while let Some(chunk) = response.chunk().await.context("download interrupted")? {
+        file.write_all(&chunk)
+            .with_context(|| format!("couldn't write {}", to.display()))?;
+        progress
+            .received
+            .fetch_add(chunk.len() as u64, Ordering::Relaxed);
+    }
+    file.flush()
+        .with_context(|| format!("couldn't write {}", to.display()))
 }
 
-async fn apply_archive(root: &Path, update: &Update) -> Result<()> {
+async fn apply_archive(root: &Path, update: &Update, progress: &Progress) -> Result<()> {
     // Staged inside the install so the final renames never cross filesystems.
     let staging = root.join(".update");
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging)?;
     let archive = staging.join("update.tar.gz");
-    download(&update.asset_url, &archive).await?;
+    download(&update.asset_url, &archive, progress).await?;
     let status = Command::new("tar")
         .arg("-xzf")
         .arg(&archive)
@@ -191,9 +244,9 @@ fn find_bundle(staging: &Path) -> Option<PathBuf> {
         .find(|dir| has_bundle(dir))
 }
 
-async fn apply_appimage(path: &Path, update: &Update) -> Result<()> {
+async fn apply_appimage(path: &Path, update: &Update, progress: &Progress) -> Result<()> {
     let partial = path.with_extension("AppImage.part");
-    download(&update.asset_url, &partial).await?;
+    download(&update.asset_url, &partial, progress).await?;
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(0o755))?;
     std::fs::rename(&partial, path).context("couldn't replace the AppImage")
@@ -284,8 +337,41 @@ mod tests {
             .block_on(check(&kind))
             .unwrap()
             .expect("the fake release should be newer");
-        runtime.block_on(apply(&kind, &found)).unwrap();
+        runtime
+            .block_on(apply(&kind, &found, &Progress::default()))
+            .unwrap();
         assert!(root.join("bin/embyclientplus-bin").is_file());
         assert!(!root.join(".update").exists());
+    }
+
+    #[test]
+    fn progress_describes_known_and_unknown_sizes() {
+        let progress = Progress::default();
+        progress.received.store(35_000_000, Ordering::Relaxed);
+        assert_eq!(progress.fraction(), None);
+        assert_eq!(progress.describe(), "35.0 MB");
+        progress.total.store(100_000_000, Ordering::Relaxed);
+        assert_eq!(progress.fraction(), Some(0.35));
+        assert_eq!(progress.describe(), "35 % · 35.0 / 100.0 MB");
+    }
+
+    /// Streams a real download and checks the count (not run by default):
+    /// `EMBYCLIENTPLUS_TEST_DOWNLOAD_URL=http://127.0.0.1:8766/big.bin
+    /// cargo test download_counts -- --ignored`
+    #[test]
+    #[ignore]
+    fn download_counts_progress() {
+        let url = std::env::var("EMBYCLIENTPLUS_TEST_DOWNLOAD_URL").unwrap();
+        let to = std::env::temp_dir().join(format!("embyclientplus-dl-{}", std::process::id()));
+        let progress = Progress::default();
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(download(&url, &to, &progress))
+            .unwrap();
+        let size = std::fs::metadata(&to).unwrap().len();
+        assert_eq!(progress.received(), size);
+        assert_eq!(progress.total(), Some(size));
+        assert_eq!(progress.fraction(), Some(1.0));
+        let _ = std::fs::remove_file(&to);
     }
 }

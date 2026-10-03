@@ -116,12 +116,21 @@ fn load(ui: &Ui, view: &Rc<DetailsView>, item_id: &str) {
         .await;
         match result {
             Ok((item, episodes)) => {
+                // Everything below is rebuilt; the cursor comes back to its
+                // spot (or, after LB/RB, to the matching one).
+                let mark = view
+                    .episodes
+                    .ancestor(adw::NavigationPage::static_type())
+                    .and_then(|page| super::gamepad::mark_cursor(&page));
                 show(&ui, &view, &item);
                 show_episodes(&ui, &view, &item, &episodes);
                 super::hero::show_related(&ui, &view.related, &item);
-                // The buttons were just rebuilt; once is enough after that.
-                place_cursor(&view);
-                view.arrived_at.set(None);
+                if view.arrived_at.get().is_some() {
+                    place_cursor(&view);
+                    view.arrived_at.set(None);
+                } else if let Some(mark) = mark {
+                    mark.restore();
+                }
             }
             Err(e) => ui.report_error("Could not load details", &e),
         }

@@ -1,6 +1,8 @@
 //! Turns controller presses into UI actions: focus movement and
 //! activation while browsing, playback control on the player page.
 
+use std::cell::RefCell;
+
 use adw::prelude::*;
 use gtk::glib;
 
@@ -128,13 +130,18 @@ pub fn handle(window: &adw::ApplicationWindow, ui: Option<&Ui>, pad: Pad, repeat
             if let Some(dialog) = window.visible_dialog() {
                 if let Some(stack) = find_view_stack(dialog.upcast_ref()) {
                     super::library_page::step_stack(&stack, forward);
-                    // Its tab content is new: start the cursor at its top.
-                    if let Some(page) = stack.visible_child() {
-                        focus_first_inside(&page);
-                    }
+                    focus_tab(&stack);
                 }
             } else if let Some(ui) = ui {
                 ui.step_tabs(forward);
+                // Library-style tabs: the cursor follows to the new tab.
+                // (Seasons and episodes place it themselves.)
+                if let Some(page) = ui.nav().visible_page()
+                    && super::tab_label(&page) == "Tabs"
+                    && let Some(stack) = find_view_stack(page.upcast_ref())
+                {
+                    focus_tab(&stack);
+                }
             }
         }
         Action::Search => {
@@ -165,34 +172,240 @@ pub fn track_focus(window: &adw::ApplicationWindow) {
         if debug {
             tracing::info!("focus: {}", describe(focus.as_ref()));
         }
-        let Some(focus) = focus else {
+        // The focused widget went away (a list or page rebuilt after an
+        // action, a page opened): put the cursor back where it was, or on
+        // the page's first item.
+        let Some(focus) = focus.filter(|f| !is_container(f)) else {
+            let container = gtk::prelude::GtkWindowExt::focus(window);
+            recover_focus(window, container);
             return;
         };
-        // Pages hand focus to their scroller (or a list to itself) when
-        // they open; nothing there reacts to a press. Pass it on to the
-        // first real item inside.
-        if is_container(&focus) {
-            // Its content may still be loading: retry for a moment.
-            let container = focus.downgrade();
-            let tries = std::cell::Cell::new(0);
-            glib::timeout_add_local(CONTAINER_RETRY, move || {
-                tries.set(tries.get() + 1);
-                match container.upgrade() {
-                    Some(container)
-                        if container.has_focus()
-                            && !focus_start(&container)
-                            && tries.get() < CONTAINER_TRIES =>
-                    {
-                        glib::ControlFlow::Continue
-                    }
-                    _ => glib::ControlFlow::Break,
-                }
-            });
+        let anchor: gtk::Widget = focus
+            .ancestor(adw::NavigationPage::static_type())
+            .unwrap_or_else(|| window.clone().upcast());
+        let Some(spot) = Spot::of(&anchor, &focus) else {
             return;
+        };
+        if let Some(page) = anchor.downcast_ref::<adw::NavigationPage>() {
+            // SAFETY: only ever stored and read as `Spot`.
+            unsafe { page.set_data(LAST_FOCUS_KEY, spot.clone()) };
         }
-        if let Some(page) = focus.ancestor(adw::NavigationPage::static_type()) {
-            // SAFETY: only ever stored and read as `glib::WeakRef<gtk::Widget>`.
-            unsafe { page.set_data(LAST_FOCUS_KEY, focus.downgrade()) };
+        // Each tab (library tabs, Preferences pages) keeps its own spot too.
+        if let Some(tab) = tab_root(&focus)
+            && let Some(tab_spot) = Spot::of(&tab, &focus)
+        {
+            // SAFETY: only ever stored and read as `Spot`.
+            unsafe { tab.set_data(LAST_FOCUS_KEY, tab_spot) };
+        }
+        LAST_SPOT.with(|last| last.replace(Some(spot)));
+    });
+}
+
+thread_local! {
+    /// Where the cursor last was, anywhere in the window.
+    static LAST_SPOT: RefCell<Option<Spot>> = const { RefCell::new(None) };
+}
+
+/// Where the cursor was: the widget, and its position (child indexes)
+/// under its page — or under the window, outside pages (music panel,
+/// dialogs). When a rebuild replaces the widget, the same position in the
+/// new content is the same item (row 5 of the list is still row 5).
+#[derive(Clone)]
+struct Spot {
+    widget: glib::WeakRef<gtk::Widget>,
+    anchor: glib::WeakRef<gtk::Widget>,
+    path: Vec<usize>,
+}
+
+impl Spot {
+    fn of(anchor: &gtk::Widget, widget: &gtk::Widget) -> Option<Spot> {
+        let mut path = Vec::new();
+        let mut current = widget.clone();
+        while &current != anchor {
+            let mut index = 0;
+            let mut sibling = current.prev_sibling();
+            while let Some(previous) = sibling {
+                index += 1;
+                sibling = previous.prev_sibling();
+            }
+            path.push(index);
+            current = current.parent()?;
+        }
+        path.reverse();
+        Some(Spot {
+            widget: widget.downgrade(),
+            anchor: anchor.downgrade(),
+            path,
+        })
+    }
+
+    /// Puts the cursor back: on the widget if it's still there, else at
+    /// its position. `exact`: only if that whole position exists again
+    /// (content still loading otherwise); else the nearest one.
+    fn restore(&self, exact: bool) -> bool {
+        if let Some(widget) = self.widget.upgrade()
+            && usable(&widget)
+            && widget.grab_focus()
+        {
+            return true;
+        }
+        let Some(anchor) = self.anchor.upgrade().filter(|a| a.is_mapped()) else {
+            return false;
+        };
+        let mut current = anchor;
+        for &index in &self.path {
+            let mut child = current.first_child();
+            let mut position = 0;
+            let mut last = None;
+            while let Some(c) = child {
+                if position == index {
+                    last = Some(c.clone());
+                    break;
+                }
+                position += 1;
+                child = c.next_sibling();
+                last = Some(c);
+            }
+            let Some(next) = last else {
+                break;
+            };
+            if position != index && exact {
+                return false;
+            }
+            current = next;
+        }
+        if usable(&current) && current.grab_focus() {
+            return true;
+        }
+        if exact && !current.is_mapped() {
+            return false;
+        }
+        current.is_mapped() && focus_first_inside(&current)
+    }
+}
+
+/// The tab `widget` is in: the child of its nearest tab stack.
+fn tab_root(widget: &gtk::Widget) -> Option<gtk::Widget> {
+    let stack = widget.ancestor(adw::ViewStack::static_type())?;
+    let mut current = widget.clone();
+    // The tab is the stack's own page child (GTK wraps it in internals).
+    loop {
+        let parent = current.parent()?;
+        if parent == stack || parent.parent().as_ref() == Some(&stack) {
+            return Some(current);
+        }
+        current = parent;
+    }
+}
+
+/// After switching tabs: the cursor goes to the new tab's own last spot,
+/// or its first item (once its content is there).
+fn focus_tab(stack: &adw::ViewStack) {
+    let stack = stack.downgrade();
+    let tries = std::cell::Cell::new(0);
+    glib::timeout_add_local(CONTAINER_RETRY, move || {
+        tries.set(tries.get() + 1);
+        let Some(tab) = stack.upgrade().and_then(|s| s.visible_child()) else {
+            return glib::ControlFlow::Break;
+        };
+        // SAFETY: see `track_focus`; cloned out immediately.
+        let spot = unsafe { tab.data::<Spot>(LAST_FOCUS_KEY).map(|s| s.as_ref().clone()) };
+        let placed = match spot {
+            Some(spot) => spot.restore(false),
+            None => focus_first_inside(&tab),
+        };
+        if placed || tries.get() >= CONTAINER_TRIES {
+            glib::ControlFlow::Break
+        } else {
+            glib::ControlFlow::Continue
+        }
+    });
+}
+
+/// Where the cursor is inside `anchor`, taken before rebuilding that part
+/// of the window, so it can go back to the same position afterwards.
+pub(super) struct CursorMark(Spot);
+
+pub(super) fn mark_cursor(anchor: &impl IsA<gtk::Widget>) -> Option<CursorMark> {
+    let anchor = anchor.as_ref();
+    let focus = anchor.root()?.focus()?;
+    if !focus.is_ancestor(anchor) {
+        return None;
+    }
+    Spot::of(anchor, &focus).map(CursorMark)
+}
+
+impl CursorMark {
+    /// Back to the marked position (or the nearest one that exists).
+    pub(super) fn restore(&self) -> bool {
+        self.0.restore(false)
+    }
+}
+
+/// A widget the cursor can sit on.
+fn usable(widget: &gtk::Widget) -> bool {
+    widget.is_mapped() && widget.is_sensitive() && widget.is_focusable() && !is_container(widget)
+}
+
+/// The cursor is on nothing, or on a container: bring it back to its last
+/// spot (once it exists again) or, on a newly opened page, to where the
+/// page starts it. Retries for a moment while content loads.
+fn recover_focus(window: &adw::ApplicationWindow, container: Option<gtk::Widget>) {
+    let page = container
+        .as_ref()
+        .and_then(|c| c.ancestor(adw::NavigationPage::static_type()))
+        .and_downcast::<adw::NavigationPage>();
+    // SAFETY: see `track_focus`; cloned out immediately.
+    let page_spot = page.as_ref().and_then(|page| unsafe {
+        page.data::<Spot>(LAST_FOCUS_KEY)
+            .map(|s| s.as_ref().clone())
+    });
+    let spot = match (&container, page_spot) {
+        (Some(_), Some(spot)) => Some(spot),
+        // A page seen for the first time starts where it wants to.
+        (Some(_), None) if page.is_some() => None,
+        _ => LAST_SPOT.with(|last| last.borrow().clone()),
+    };
+    if container.is_none() && spot.is_none() {
+        return;
+    }
+    let window = window.downgrade();
+    let container = container.map(|c| c.downgrade());
+    let tries = std::cell::Cell::new(0);
+    glib::timeout_add_local(CONTAINER_RETRY, move || {
+        tries.set(tries.get() + 1);
+        let Some(window) = window.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
+        let focus = gtk::prelude::GtkWindowExt::focus(&window);
+        let container = container.as_ref().and_then(|c| c.upgrade());
+        // Something else took the cursor meanwhile (the user moved).
+        let still_lost = match (&focus, &container) {
+            (None, _) => true,
+            (Some(focus), Some(container)) => focus == container,
+            (Some(focus), None) => !usable(focus),
+        };
+        if !still_lost {
+            return glib::ControlFlow::Break;
+        }
+        let last_try = tries.get() >= CONTAINER_TRIES;
+        let placed = match &spot {
+            Some(spot) => spot.restore(!last_try),
+            None => false,
+        };
+        if placed {
+            return glib::ControlFlow::Break;
+        }
+        if let Some(container) = &container
+            && (spot.is_none() || last_try)
+            && focus_start(container)
+        {
+            return glib::ControlFlow::Break;
+        }
+        if last_try {
+            glib::ControlFlow::Break
+        } else {
+            glib::ControlFlow::Continue
         }
     });
 }
@@ -270,8 +483,12 @@ fn describe(widget: Option<&gtk::Widget>) -> String {
         }
         text
     };
+    let row = widget
+        .downcast_ref::<gtk::ListBoxRow>()
+        .map(|row| format!(" #{}", row.index()))
+        .unwrap_or_default();
     let mut chain = vec![format!(
-        "{}{}",
+        "{}{row}{}",
         one(widget),
         if widget.is_mapped() {
             ""
@@ -312,17 +529,12 @@ fn focus_page(ui: &Ui) -> bool {
     let Some(page) = ui.nav().visible_page() else {
         return false;
     };
-    // SAFETY: see `track_focus`; upgraded immediately.
-    let last = unsafe {
-        page.data::<glib::WeakRef<gtk::Widget>>(LAST_FOCUS_KEY)
-            .and_then(|weak| weak.as_ref().upgrade())
+    // SAFETY: see `track_focus`; cloned out immediately.
+    let spot = unsafe {
+        page.data::<Spot>(LAST_FOCUS_KEY)
+            .map(|s| s.as_ref().clone())
     };
-    if let Some(last) = last
-        && last.is_mapped()
-        && last.is_sensitive()
-        && !is_container(&last)
-        && last.grab_focus()
-    {
+    if spot.is_some_and(|spot| spot.restore(false)) {
         return true;
     }
     if let Some(hook) = super::focus_hook(&page)
