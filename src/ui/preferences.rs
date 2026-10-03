@@ -36,7 +36,7 @@ const LANGUAGES: [(&str, &str); 16] = [
 pub fn show(parent: &impl IsA<gtk::Widget>) {
     let settings = Settings::load().unwrap_or_default();
     // A plain dialog rather than AdwPreferencesDialog, whose header has no
-    // room for the version label.
+    // room for the Quit button.
     let toasts = adw::ToastOverlay::new();
     let page = adw::PreferencesPage::builder()
         .title("General")
@@ -359,17 +359,6 @@ pub fn show(parent: &impl IsA<gtk::Widget>) {
                 .build(),
         )
         .build();
-    header.pack_start(
-        &gtk::Label::builder()
-            .label(format!(
-                "{} {}",
-                crate::APP_NAME,
-                crate::update::current_version()
-            ))
-            .margin_start(6)
-            .css_classes(["dim-label", "caption-heading"])
-            .build(),
-    );
     // Quitting from here is easier with a controller than Steam's menu.
     let quit = gtk::Button::builder()
         .label("Quit")

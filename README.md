@@ -65,6 +65,7 @@ VapourSynth, so SVP 4 attaches just as it does to a standalone mpv.
 - Start button in the player brings up the OSD's buttons in a navigable mode (D-pad/stick to move, A to press, B or Start to leave).
 
 **Other:**
+- Adjustable UI size (50–200%) with the reset/−/+ buttons next to Home's menu; remembered between sessions.
 - Emby login and auto-login (token stored securely in system keyring with plaintext fallback).
 - Theme: Light, Dark, or Follow system.
 - Optional: load your own `~/.config/mpv/mpv.conf` (shaders, scalers, subtitle styling; app-managed options are ignored).

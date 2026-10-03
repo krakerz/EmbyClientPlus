@@ -863,10 +863,47 @@ fn add_home_button(header: &adw::HeaderBar) {
 /// Height of the fan-art banner on series and details pages.
 const BANNER_HEIGHT: i32 = 360;
 
+/// UI scale limits and step (Home's −/+ buttons).
+pub const UI_SCALE_MIN: f64 = 0.5;
+pub const UI_SCALE_MAX: f64 = 2.0;
+pub const UI_SCALE_STEP: f64 = 0.1;
+
+thread_local! {
+    static UI_SCALE: Cell<f64> = const { Cell::new(1.0) };
+    /// The font DPI before any scaling, in GTK's 1024ths.
+    static BASE_DPI: Cell<i32> = const { Cell::new(0) };
+}
+
+/// The UI scale in effect; 1.0 as designed.
+pub fn ui_scale() -> f64 {
+    UI_SCALE.get()
+}
+
+/// `px` at the UI scale: artwork and card sizes go through this.
+pub fn scaled(px: i32) -> i32 {
+    (f64::from(px) * ui_scale()).round() as i32
+}
+
+/// Sets the UI scale: text right away (through the font DPI), artwork as
+/// pages are built (see [`scaled`]).
+pub fn apply_ui_scale(scale: f64) {
+    let scale = scale.clamp(UI_SCALE_MIN, UI_SCALE_MAX);
+    UI_SCALE.set(scale);
+    let Some(settings) = gtk::Settings::default() else {
+        return;
+    };
+    if BASE_DPI.get() == 0 {
+        let dpi = settings.gtk_xft_dpi();
+        BASE_DPI.set(if dpi > 0 { dpi } else { 96 * 1024 });
+    }
+    settings.set_gtk_xft_dpi((f64::from(BASE_DPI.get()) * scale).round() as i32);
+}
+
 /// Pins `picture` to exactly `width`×`height`. A `gtk::Picture` reports
 /// its image's own size as its natural size, so without a cap the layout
 /// grows it to whatever resolution the server sent.
 fn fixed_picture(picture: &gtk::Picture, width: i32, height: i32) -> adw::Clamp {
+    let (width, height) = (scaled(width), scaled(height));
     picture.set_size_request(width, height);
     let clamp = |orientation, size, child: &gtk::Widget| {
         adw::Clamp::builder()
@@ -916,13 +953,13 @@ fn fixed_picture_child(wrapper: &gtk::Widget) -> Option<gtk::Picture> {
 fn banner() -> (gtk::Picture, adw::Clamp) {
     let picture = gtk::Picture::builder()
         .content_fit(gtk::ContentFit::Cover)
-        .height_request(BANNER_HEIGHT)
+        .height_request(scaled(BANNER_HEIGHT))
         .hexpand(true)
         .build();
     let clamp = adw::Clamp::builder()
         .orientation(gtk::Orientation::Vertical)
-        .maximum_size(BANNER_HEIGHT)
-        .tightening_threshold(BANNER_HEIGHT)
+        .maximum_size(scaled(BANNER_HEIGHT))
+        .tightening_threshold(scaled(BANNER_HEIGHT))
         .child(&picture)
         .build();
     (picture, clamp)

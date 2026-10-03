@@ -134,11 +134,16 @@ popover modelbutton:focus-visible {
     background: @accent_bg_color;
     color: @accent_fg_color;
 }
-.watched-badge {
-    background: alpha(@accent_bg_color, 0.9);
-    color: @accent_fg_color;
+.watched-mark {
+    background: @success_color;
+    color: @window_bg_color;
     border-radius: 999px;
-    padding: 3px;
+    padding: 2px;
+    -gtk-icon-size: 10px;
+}
+.unplayed-count {
+    color: @accent_color;
+    font-weight: bold;
 }
 ";
 
@@ -266,6 +271,7 @@ pub fn build(app: &adw::Application, player: Player) -> adw::ApplicationWindow {
     toasts.set_child(Some(&content));
     let window_settings = Settings::load().unwrap_or_default().window;
     apply_theme(window_settings.theme);
+    super::apply_ui_scale(window_settings.ui_scale);
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title(crate::APP_NAME)

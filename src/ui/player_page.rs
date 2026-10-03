@@ -1003,7 +1003,16 @@ impl Inner {
                 }
             }
         ));
-        self.page.add_controller(keys);
+        // On the window, not the page: key events only travel the widgets on
+        // the way to the focus, and after a click elsewhere (or a page
+        // change) the focus can be outside the player, or on nothing.
+        self.page.connect_realize(move |page| {
+            if keys.widget().is_none()
+                && let Some(root) = page.root()
+            {
+                root.add_controller(keys.clone());
+            }
+        });
 
         // Page lifecycle: tick only while shown; leaving stops playback.
         self.page.connect_shown(glib::clone!(
@@ -1648,6 +1657,15 @@ impl Inner {
     }
 
     fn key(self: &Rc<Self>, key: gdk::Key) -> glib::Propagation {
+        // Only while the player is what's on screen (not under a dialog).
+        let dialog_open = self
+            .page
+            .root()
+            .and_downcast::<adw::ApplicationWindow>()
+            .is_some_and(|window| window.visible_dialog().is_some());
+        if !self.page.is_mapped() || dialog_open {
+            return glib::Propagation::Proceed;
+        }
         let player = self.player;
         match key {
             gdk::Key::space | gdk::Key::k => warn(player.toggle_pause()),

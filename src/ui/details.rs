@@ -243,7 +243,7 @@ fn scroll_to_current(strip: &gtk::Box, season: &[BaseItem], item_id: &str) {
     let Some(scroller) = strip.last_child().and_downcast::<gtk::ScrolledWindow>() else {
         return;
     };
-    let card = f64::from(Shape::Landscape.size().0);
+    let card = f64::from(super::scaled(Shape::Landscape.size().0));
     let step = card + f64::from(super::rows::CARD_SPACING);
     // Cards start after the row's side margin.
     let card_start = f64::from(super::rows::ROW_MARGIN) + step * index as f64;

@@ -54,10 +54,16 @@ pub struct Card {
     pub root: gtk::Box,
     picture: gtk::Picture,
     progress: gtk::ProgressBar,
-    watched: gtk::Image,
     placeholder: gtk::Image,
     title: gtk::Label,
+    /// The line under the title: subtitle (year, episode), then the status
+    /// at its end.
+    details: gtk::Box,
     subtitle: gtk::Label,
+    /// Unwatched episode count (series, seasons).
+    unplayed: gtk::Label,
+    /// Watched: a check in a circle, in place of the count.
+    watched: gtk::Image,
 }
 
 impl Card {
@@ -73,15 +79,6 @@ impl Card {
             .margin_bottom(8)
             .visible(false)
             .build();
-        let watched = gtk::Image::builder()
-            .icon_name(crate::ui::icons::WATCHED)
-            .halign(gtk::Align::End)
-            .valign(gtk::Align::Start)
-            .margin_top(6)
-            .margin_end(6)
-            .css_classes(["watched-badge"])
-            .visible(false)
-            .build();
         let frame = gtk::Overlay::builder()
             .child(&super::fixed_picture(&picture, width, height))
             .overflow(gtk::Overflow::Hidden)
@@ -92,7 +89,6 @@ impl Card {
             })
             .build();
         frame.add_overlay(&progress);
-        frame.add_overlay(&watched);
         let placeholder = super::placeholder_for(&picture, crate::ui::icons::IMAGE);
         frame.add_overlay(&placeholder);
 
@@ -105,26 +101,43 @@ impl Card {
             .build();
         let subtitle = gtk::Label::builder()
             .xalign(0.0)
+            .hexpand(true)
             .ellipsize(gtk::pango::EllipsizeMode::End)
             .max_width_chars(1)
             .css_classes(["dim-label", "caption"])
             .build();
+        let unplayed = gtk::Label::builder()
+            .css_classes(["unplayed-count", "caption", "numeric"])
+            .visible(false)
+            .build();
+        let watched = gtk::Image::builder()
+            .icon_name(crate::ui::icons::WATCHED)
+            .valign(gtk::Align::Center)
+            .css_classes(["watched-mark"])
+            .visible(false)
+            .build();
+        let details = gtk::Box::builder().spacing(6).build();
+        details.append(&subtitle);
+        details.append(&unplayed);
+        details.append(&watched);
         let root = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
-            .width_request(width)
+            .width_request(super::scaled(width))
             .halign(gtk::Align::Center)
             .build();
         root.append(&frame);
         root.append(&title);
-        root.append(&subtitle);
+        root.append(&details);
         Card {
             root,
             picture,
             progress,
-            watched,
             placeholder,
             title,
+            details,
             subtitle,
+            unplayed,
+            watched,
         }
     }
 
@@ -133,18 +146,22 @@ impl Card {
         let sized = frame.child().expect("card frame has a picture");
         let picture = super::fixed_picture_child(&sized).expect("card picture is pinned");
         let progress: gtk::ProgressBar = child(sized.next_sibling());
-        let watched: gtk::Image = child(progress.next_sibling());
-        let placeholder: gtk::Image = child(watched.next_sibling());
+        let placeholder: gtk::Image = child(progress.next_sibling());
         let title: gtk::Label = child(frame.next_sibling());
-        let subtitle: gtk::Label = child(title.next_sibling());
+        let details: gtk::Box = child(title.next_sibling());
+        let subtitle: gtk::Label = child(details.first_child());
+        let unplayed: gtk::Label = child(subtitle.next_sibling());
+        let watched: gtk::Image = child(unplayed.next_sibling());
         Card {
             root: root.clone(),
             picture,
             progress,
-            watched,
             placeholder,
             title,
+            details,
             subtitle,
+            unplayed,
+            watched,
         }
     }
 
@@ -152,7 +169,6 @@ impl Card {
         let (title, subtitle) = labels(item, shape);
         self.title.set_label(&title);
         self.subtitle.set_label(&subtitle);
-        self.subtitle.set_visible(!subtitle.is_empty());
         match item.progress() {
             Some(fraction) => {
                 self.progress.set_fraction(fraction);
@@ -160,7 +176,17 @@ impl Card {
             }
             None => self.progress.set_visible(false),
         }
-        self.watched.set_visible(item.played());
+        let played = item.played();
+        let unplayed = item.unplayed_count();
+        self.watched.set_visible(played);
+        self.unplayed.set_label(&if unplayed >= 1000 {
+            "1k+".to_string()
+        } else {
+            unplayed.to_string()
+        });
+        self.unplayed.set_visible(unplayed > 0 && !played);
+        self.details
+            .set_visible(!subtitle.is_empty() || self.unplayed.is_visible() || played);
         self.placeholder
             .set_icon_name(Some(crate::ui::icons::placeholder(&item.item_type)));
         let (image, width) = match shape {
