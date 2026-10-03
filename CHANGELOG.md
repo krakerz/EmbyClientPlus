@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-10-03
+
+### Added
+- Preferences → Playback: "Keep the screen on" stops the screen blanking and the system sleeping while a video plays (on by default; music and paused videos don't count).
+
+### Changed
+- Preferences → Display: the fullscreen setting now applies everywhere and right away. "Gamescope only" (the old Auto) keeps the app fullscreen in Steam Game Mode; "Always" keeps it fullscreen on the desktop too, and leaving the player no longer drops it out of fullscreen.
+
+### Fixed
+- Controller: LB/RB on tabbed pages (library tabs, Search, Preferences) no longer nudge the cursor sideways to a neighbouring item after switching tabs.
+- Controller: Y (Home), View (Search) and the music button no longer act on the page behind an open dialog; with an item menu open, buttons that don't navigate it close it instead.
+- Genre and tag tiles show a single focus ring around the cover instead of two.
+- Series pages with many seasons: LB/RB now scroll the season row so the selected season stays on screen.
+
 ## [1.1.1] — 2026-10-03
 
 ### Fixed

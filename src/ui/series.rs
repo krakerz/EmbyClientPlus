@@ -97,6 +97,7 @@ impl SeasonChips {
         self.selected.set(selected);
         self.buttons.replace(buttons);
         self.quiet.set(false);
+        self.reveal_selected();
     }
 
     /// Moves to the next/previous season (controller bumpers), notifying.
@@ -110,6 +111,46 @@ impl SeasonChips {
         if let Some(button) = buttons.get(next) {
             button.set_active(true);
         }
+        drop(buttons);
+        self.reveal_selected();
+    }
+
+    /// Scrolls the row so the selected chip is in view (with many seasons
+    /// it may be off screen). Retries briefly until the row is laid out.
+    fn reveal_selected(&self) {
+        let Some(chip) = self.buttons.borrow().get(self.selected.get()).cloned() else {
+            return;
+        };
+        let (root, row) = (self.root.downgrade(), self.row.downgrade());
+        let tries = Cell::new(0);
+        glib::timeout_add_local(std::time::Duration::from_millis(30), move || {
+            tries.set(tries.get() + 1);
+            let (Some(root), Some(row)) = (root.upgrade(), row.upgrade()) else {
+                return glib::ControlFlow::Break;
+            };
+            let adjustment = root.hadjustment();
+            let page = adjustment.page_size();
+            let bounds = chip.compute_bounds(&row).filter(|b| b.width() > 0.0);
+            let Some(bounds) = bounds.filter(|_| page > 0.0) else {
+                return if tries.get() < 20 {
+                    glib::ControlFlow::Continue
+                } else {
+                    glib::ControlFlow::Break
+                };
+            };
+            // Some room either side, so the neighbouring chips peek in.
+            let margin = 48.0;
+            let (start, end) = (
+                f64::from(bounds.x()),
+                f64::from(bounds.x() + bounds.width()),
+            );
+            if start - margin < adjustment.value() {
+                adjustment.set_value(start - margin);
+            } else if end + margin > adjustment.value() + page {
+                adjustment.set_value(end + margin - page);
+            }
+            glib::ControlFlow::Break
+        });
     }
 }
 
