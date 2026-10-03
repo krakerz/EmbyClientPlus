@@ -15,6 +15,7 @@ use crate::controller::{self, Action, Context, Pad};
 pub fn handle(window: &adw::ApplicationWindow, ui: Option<&Ui>, pad: Pad, repeat: bool) {
     // Controller use means focus rings matter, like keyboard use.
     window.set_focus_visible(true);
+    end_tab_switch();
 
     // The music panel: its own buttons first, then normal navigation.
     if let Some(ui) = ui
@@ -107,6 +108,17 @@ pub fn handle(window: &adw::ApplicationWindow, ui: Option<&Ui>, pad: Pad, repeat
     let Some(action) = controller::action_for(pad, Context::Browse) else {
         return;
     };
+    // An item menu is open: buttons that don't move through it close it,
+    // rather than acting on the page behind.
+    if !matches!(
+        action,
+        Action::Up | Action::Down | Action::Left | Action::Right | Action::Activate | Action::Back
+    ) && close_popover(window)
+    {
+        return;
+    }
+    // Neither does anything behind an open dialog.
+    let page_free = window.visible_dialog().is_none();
     match action {
         Action::Up => move_focus(window, gtk::DirectionType::Up),
         Action::Down => move_focus(window, gtk::DirectionType::Down),
@@ -114,7 +126,7 @@ pub fn handle(window: &adw::ApplicationWindow, ui: Option<&Ui>, pad: Pad, repeat
         Action::Right => horizontal_in(window, true),
         Action::Activate => activate_focus(window),
         Action::Back => back(window, ui),
-        Action::Home => {
+        Action::Home if page_free => {
             if let Some(ui) = ui {
                 ui.nav().pop_to_tag("home");
             }
@@ -129,30 +141,31 @@ pub fn handle(window: &adw::ApplicationWindow, ui: Option<&Ui>, pad: Pad, repeat
             // A dialog with tabs (Preferences) takes LB/RB over the page.
             if let Some(dialog) = window.visible_dialog() {
                 if let Some(stack) = find_view_stack(dialog.upcast_ref()) {
-                    super::library_page::step_stack(&stack, forward);
-                    focus_tab(&stack);
+                    switch_tab(&stack, || super::library_page::step_stack(&stack, forward));
                 }
             } else if let Some(ui) = ui {
-                ui.step_tabs(forward);
                 // Library-style tabs: the cursor follows to the new tab.
                 // (Seasons and episodes place it themselves.)
-                if let Some(page) = ui.nav().visible_page()
-                    && super::tab_label(&page) == "Tabs"
-                    && let Some(stack) = find_view_stack(page.upcast_ref())
-                {
-                    focus_tab(&stack);
+                let stack = ui
+                    .nav()
+                    .visible_page()
+                    .filter(|page| super::tab_label(page) == "Tabs")
+                    .and_then(|page| find_view_stack(page.upcast_ref()));
+                match stack {
+                    Some(stack) => switch_tab(&stack, || ui.step_tabs(forward)),
+                    None => ui.step_tabs(forward),
                 }
             }
         }
-        Action::Search => {
+        Action::Search if page_free => {
             if let Some(ui) = ui {
                 ui.start_search();
             }
         }
-        Action::Preferences if ui.is_some() && window.visible_dialog().is_none() => {
+        Action::Preferences if ui.is_some() && page_free => {
             preferences::show(window);
         }
-        Action::OpenMusic => {
+        Action::OpenMusic if page_free => {
             if let Some(panel) = ui.and_then(Ui::music_panel) {
                 panel.open();
             }
@@ -172,38 +185,49 @@ pub fn track_focus(window: &adw::ApplicationWindow) {
         if debug {
             tracing::info!("focus: {}", describe(focus.as_ref()));
         }
-        // The focused widget went away (a list or page rebuilt after an
-        // action, a page opened): put the cursor back where it was, or on
-        // the page's first item.
-        let Some(focus) = focus.filter(|f| !is_container(f)) else {
-            let container = gtk::prelude::GtkWindowExt::focus(window);
-            recover_focus(window, container);
-            return;
-        };
-        let anchor: gtk::Widget = focus
-            .ancestor(adw::NavigationPage::static_type())
-            .unwrap_or_else(|| window.clone().upcast());
-        let Some(spot) = Spot::of(&anchor, &focus) else {
-            return;
-        };
-        if let Some(page) = anchor.downcast_ref::<adw::NavigationPage>() {
-            // SAFETY: only ever stored and read as `Spot`.
-            unsafe { page.set_data(LAST_FOCUS_KEY, spot.clone()) };
+        if TAB_SWITCH.get() == 0 {
+            focus_changed(window);
         }
-        // Each tab (library tabs, Preferences pages) keeps its own spot too.
-        if let Some(tab) = tab_root(&focus)
-            && let Some(tab_spot) = Spot::of(&tab, &focus)
-        {
-            // SAFETY: only ever stored and read as `Spot`.
-            unsafe { tab.set_data(LAST_FOCUS_KEY, tab_spot) };
-        }
-        LAST_SPOT.with(|last| last.replace(Some(spot)));
     });
+}
+
+/// Remembers where the cursor now is, or recovers it when it's lost.
+fn focus_changed(window: &adw::ApplicationWindow) {
+    let focus = gtk::prelude::GtkWindowExt::focus(window);
+    // The focused widget went away (a list or page rebuilt after an
+    // action, a page opened): put the cursor back where it was, or on
+    // the page's first item.
+    let Some(focus) = focus.filter(|f| !is_container(f)) else {
+        let container = gtk::prelude::GtkWindowExt::focus(window);
+        recover_focus(window, container);
+        return;
+    };
+    let anchor: gtk::Widget = focus
+        .ancestor(adw::NavigationPage::static_type())
+        .unwrap_or_else(|| window.clone().upcast());
+    let Some(spot) = Spot::of(&anchor, &focus) else {
+        return;
+    };
+    if let Some(page) = anchor.downcast_ref::<adw::NavigationPage>() {
+        // SAFETY: only ever stored and read as `Spot`.
+        unsafe { page.set_data(LAST_FOCUS_KEY, spot.clone()) };
+    }
+    // Each tab (library tabs, Preferences pages) keeps its own spot too.
+    if let Some(tab) = tab_root(&focus)
+        && let Some(tab_spot) = Spot::of(&tab, &focus)
+    {
+        // SAFETY: only ever stored and read as `Spot`.
+        unsafe { tab.set_data(LAST_FOCUS_KEY, tab_spot) };
+    }
+    LAST_SPOT.with(|last| last.replace(Some(spot)));
 }
 
 thread_local! {
     /// Where the cursor last was, anywhere in the window.
     static LAST_SPOT: RefCell<Option<Spot>> = const { RefCell::new(None) };
+    /// The tab switch still placing the cursor (0: none); see [`switch_tab`].
+    static TAB_SWITCH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static NEXT_TAB_SWITCH: std::cell::Cell<u32> = const { std::cell::Cell::new(1) };
 }
 
 /// Where the cursor was: the widget, and its position (child indexes)
@@ -284,42 +308,84 @@ impl Spot {
     }
 }
 
-/// The tab `widget` is in: the child of its nearest tab stack.
+/// The tab `widget` is in: the visible child of its nearest tab stack
+/// (where [`place_in_tab`] looks for the tab's spot).
 fn tab_root(widget: &gtk::Widget) -> Option<gtk::Widget> {
-    let stack = widget.ancestor(adw::ViewStack::static_type())?;
-    let mut current = widget.clone();
-    // The tab is the stack's own page child (GTK wraps it in internals).
-    loop {
-        let parent = current.parent()?;
-        if parent == stack || parent.parent().as_ref() == Some(&stack) {
-            return Some(current);
-        }
-        current = parent;
-    }
+    let stack = widget
+        .ancestor(adw::ViewStack::static_type())
+        .and_downcast::<adw::ViewStack>()?;
+    stack.visible_child().filter(|tab| widget.is_ancestor(tab))
 }
 
-/// After switching tabs: the cursor goes to the new tab's own last spot,
-/// or its first item (once its content is there).
-fn focus_tab(stack: &adw::ViewStack) {
+/// Switches `stack`'s tab with `step`, then puts the cursor on the new
+/// tab's own spot (or its first item) as soon as its content is laid out.
+/// Until then the cursor is in limbo: anything it lands on meanwhile is
+/// neither remembered nor recovered from, or it shows as a sideways jump.
+fn switch_tab(stack: &adw::ViewStack, step: impl FnOnce()) {
+    let id = NEXT_TAB_SWITCH.get();
+    NEXT_TAB_SWITCH.set(id.wrapping_add(1).max(1));
+    TAB_SWITCH.set(id);
+    step();
     let stack = stack.downgrade();
-    let tries = std::cell::Cell::new(0);
-    glib::timeout_add_local(CONTAINER_RETRY, move || {
-        tries.set(tries.get() + 1);
-        let Some(tab) = stack.upgrade().and_then(|s| s.visible_child()) else {
+    let started = std::time::Instant::now();
+    glib::timeout_add_local(TAB_RETRY, move || {
+        // A newer press took over.
+        if TAB_SWITCH.get() != id {
             return glib::ControlFlow::Break;
-        };
-        // SAFETY: see `track_focus`; cloned out immediately.
-        let spot = unsafe { tab.data::<Spot>(LAST_FOCUS_KEY).map(|s| s.as_ref().clone()) };
-        let placed = match spot {
-            Some(spot) => spot.restore(false),
-            None => focus_first_inside(&tab),
-        };
-        if placed || tries.get() >= CONTAINER_TRIES {
-            glib::ControlFlow::Break
-        } else {
-            glib::ControlFlow::Continue
         }
+        let stack = stack.upgrade().filter(|s| s.is_mapped());
+        let placed = stack.as_ref().is_some_and(place_in_tab);
+        if !placed && stack.is_some() && started.elapsed() < TAB_PATIENCE {
+            return glib::ControlFlow::Continue;
+        }
+        TAB_SWITCH.set(0);
+        if let Some(window) = stack
+            .and_then(|s| s.root())
+            .and_downcast::<adw::ApplicationWindow>()
+        {
+            focus_changed(&window);
+        }
+        glib::ControlFlow::Break
     });
+}
+
+/// Ends a pending [`switch_tab`]: a new press acts on the cursor as it is.
+fn end_tab_switch() {
+    TAB_SWITCH.set(0);
+}
+
+const TAB_RETRY: std::time::Duration = std::time::Duration::from_millis(30);
+const TAB_PATIENCE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The cursor goes to the visible tab's own last spot, or its first item.
+/// True once it's on a real item there.
+fn place_in_tab(stack: &adw::ViewStack) -> bool {
+    let (Some(tab), Some(root)) = (stack.visible_child(), stack.root()) else {
+        return false;
+    };
+    let focus = root.focus();
+    // The stack put it back on the tab's last item itself.
+    if focus
+        .as_ref()
+        .is_some_and(|f| usable(f) && f.is_ancestor(&tab))
+    {
+        return true;
+    }
+    // A scroller took the cursor before its content was in: start over, or
+    // moving on from it never reaches the content.
+    if focus.is_some_and(|f| !usable(&f)) {
+        root.set_focus(None::<&gtk::Widget>);
+    }
+    // SAFETY: see `track_focus`; cloned out immediately.
+    let spot = unsafe { tab.data::<Spot>(LAST_FOCUS_KEY).map(|s| s.as_ref().clone()) };
+    let placed = match spot {
+        Some(spot) => spot.restore(false),
+        None => focus_first_inside(&tab),
+    };
+    placed
+        && root
+            .focus()
+            .is_some_and(|f| usable(&f) && f.is_ancestor(&tab))
 }
 
 /// Where the cursor is inside `anchor`, taken before rebuilding that part

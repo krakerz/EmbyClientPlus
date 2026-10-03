@@ -113,6 +113,8 @@ struct Inner {
     svp_checked_at: Cell<Option<Instant>>,
     /// The "SVP Manager isn't running" toast shows once per item.
     svp_warned: Cell<bool>,
+    /// Held while a video plays, so the screen stays on.
+    screen_inhibit: RefCell<Option<(gtk::Application, u32)>>,
 }
 
 struct Osd {
@@ -186,6 +188,7 @@ impl PlayerPage {
             volume_osd_timer: RefCell::new(None),
             svp_checked_at: Cell::new(None),
             svp_warned: Cell::new(false),
+            screen_inhibit: RefCell::new(None),
         });
         CURRENT.with(|current| *current.borrow_mut() = Rc::downgrade(&inner));
         inner.connect(&overlay);
@@ -1005,6 +1008,7 @@ impl Inner {
                     tick.remove();
                 }
                 inner.set_fullscreen(false);
+                inner.keep_screen_on(false);
                 inner.page.set_cursor(None::<&gdk::Cursor>);
                 inner.session.replace(None);
                 if let Some(handlers) = inner.handlers() {
@@ -1032,6 +1036,7 @@ impl Inner {
                     crate::ui::icons::PAUSE
                 });
                 self.show_osd();
+                self.keep_screen_on(!paused);
                 if let Some(session) = self.session() {
                     session.report_progress(Some(if paused { "Pause" } else { "Unpause" }));
                 }
@@ -1049,6 +1054,7 @@ impl Inner {
                 if let Some(session) = self.session() {
                     session.apply_initial_tracks();
                 }
+                self.keep_screen_on(!self.player.is_paused());
                 self.refresh_duration();
                 self.rebuild_menus();
             }
@@ -1549,6 +1555,33 @@ impl Inner {
 
     fn window(&self) -> Option<gtk::Window> {
         self.page.root().and_downcast::<gtk::Window>()
+    }
+
+    /// Stops the screen blanking and the system sleeping while a video
+    /// plays (not music), if Preferences wants that.
+    fn keep_screen_on(&self, playing: bool) {
+        let wanted = playing
+            && self.session().is_some_and(|s| !s.item.is_audio())
+            && crate::config::Settings::load()
+                .unwrap_or_default()
+                .playback
+                .keep_screen_on;
+        let mut held = self.screen_inhibit.borrow_mut();
+        if wanted == held.is_some() {
+            return;
+        }
+        if let Some((app, cookie)) = held.take() {
+            app.uninhibit(cookie);
+        } else if let Some(window) = self.window()
+            && let Some(app) = window.application()
+        {
+            let flags = gtk::ApplicationInhibitFlags::IDLE | gtk::ApplicationInhibitFlags::SUSPEND;
+            let cookie = app.inhibit(Some(&window), flags, Some("Playing a video"));
+            // 0: nothing on this system can inhibit (no portal or session manager).
+            if cookie != 0 {
+                *held = Some((app, cookie));
+            }
+        }
     }
 
     fn toggle_fullscreen(&self) {

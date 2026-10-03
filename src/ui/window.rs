@@ -86,7 +86,8 @@ button:focus-visible { outline: 3px solid @accent_color; outline-offset: 1px; }
 .card-button:focus-visible { outline: none; }
 /* Grid cells draw their own focus box around the whole card; the ring on
    the artwork (below) is the one to show. */
-gridview > child:focus-visible {
+gridview > child:focus-visible,
+flowboxchild:focus-visible {
     outline: none;
     background: none;
 }
@@ -519,14 +520,13 @@ fn logout(state: &Rc<State>, expired: bool) {
     }
 }
 
-/// Whether the app keeps the whole window fullscreen (gamescope with the
-/// default "auto" setting, or "always"), so the player never shrinks it.
+/// Whether the app keeps the whole window fullscreen (the Fullscreen
+/// setting, for here), so the player never shrinks it.
 pub fn fullscreen_locked() -> bool {
-    crate::gamescope::detected()
-        && Settings::load()
-            .unwrap_or_default()
-            .window
-            .start_fullscreen(true)
+    Settings::load()
+        .unwrap_or_default()
+        .window
+        .start_fullscreen(crate::gamescope::detected())
 }
 
 fn replace_child(stack: &gtk::Stack, name: &str, child: &impl IsA<gtk::Widget>) {

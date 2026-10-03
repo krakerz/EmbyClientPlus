@@ -79,7 +79,7 @@ impl Default for WindowSettings {
 impl WindowSettings {
     pub fn start_fullscreen(&self, in_gamescope: bool) -> bool {
         match self.fullscreen {
-            FullscreenMode::Auto => in_gamescope,
+            FullscreenMode::GamescopeOnly => in_gamescope,
             FullscreenMode::Always => true,
             FullscreenMode::Never => false,
         }
@@ -91,7 +91,9 @@ impl WindowSettings {
 pub enum FullscreenMode {
     /// Fullscreen in gamescope (Steam Game Mode), windowed elsewhere.
     #[default]
-    Auto,
+    #[serde(alias = "auto")]
+    GamescopeOnly,
+    /// Fullscreen everywhere, desktop included.
     Always,
     Never,
 }
@@ -179,6 +181,10 @@ pub struct PlaybackSettings {
     /// Web trailers: show captions in the preferred subtitle language.
     #[serde(default = "default_true")]
     pub trailer_captions: bool,
+    /// Keep the screen from blanking or the system sleeping while a video
+    /// plays (not music, not while paused).
+    #[serde(default = "default_true")]
+    pub keep_screen_on: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -251,6 +257,7 @@ impl Default for PlaybackSettings {
             bar_fill: default_bar_fill(),
             trailer_quality: TrailerQuality::default(),
             trailer_captions: true,
+            keep_screen_on: true,
         }
     }
 }
@@ -467,6 +474,10 @@ mod tests {
         assert!(!window.start_fullscreen(false));
         let parsed: Settings = toml::from_str("[window]\nfullscreen = \"never\"\n").unwrap();
         assert!(!parsed.window.start_fullscreen(true));
+        let parsed: Settings = toml::from_str("[window]\nfullscreen = \"auto\"\n").unwrap();
+        assert_eq!(parsed.window.fullscreen, FullscreenMode::GamescopeOnly);
+        let parsed: Settings = toml::from_str("[window]\nfullscreen = \"always\"\n").unwrap();
+        assert!(parsed.window.start_fullscreen(false));
         assert_eq!(parsed.window.width, 1280);
     }
 

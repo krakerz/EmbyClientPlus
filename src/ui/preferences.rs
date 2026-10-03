@@ -143,6 +143,16 @@ pub fn show(parent: &impl IsA<gtk::Widget>) {
         save(|s| s.playback.trailer_captions = on);
     });
     playback.add(&trailer_captions);
+    let keep_screen_on = adw::SwitchRow::builder()
+        .title("Keep the screen on")
+        .subtitle("While a video plays; music and paused videos let it sleep as usual")
+        .active(settings.playback.keep_screen_on)
+        .build();
+    keep_screen_on.connect_active_notify(|row| {
+        let on = row.is_active();
+        save(|s| s.playback.keep_screen_on = on);
+    });
+    playback.add(&keep_screen_on);
     page.add(&playback);
 
     // Display.
@@ -165,11 +175,15 @@ pub fn show(parent: &impl IsA<gtk::Widget>) {
         save(|s| s.window.height = value);
     });
     let fullscreen = adw::ComboRow::builder()
-        .title("Start fullscreen")
-        .subtitle("Auto: fullscreen in Steam Game Mode (gamescope) only")
-        .model(&gtk::StringList::new(&["Auto", "Always", "Never"]))
+        .title("Fullscreen")
+        .subtitle("Keeps the whole app fullscreen, the player included")
+        .model(&gtk::StringList::new(&[
+            "Gamescope only",
+            "Always",
+            "Never",
+        ]))
         .selected(match settings.window.fullscreen {
-            FullscreenMode::Auto => 0,
+            FullscreenMode::GamescopeOnly => 0,
             FullscreenMode::Always => 1,
             FullscreenMode::Never => 2,
         })
@@ -178,9 +192,12 @@ pub fn show(parent: &impl IsA<gtk::Widget>) {
         let mode = match row.selected() {
             1 => FullscreenMode::Always,
             2 => FullscreenMode::Never,
-            _ => FullscreenMode::Auto,
+            _ => FullscreenMode::GamescopeOnly,
         };
         save(|s| s.window.fullscreen = mode);
+        if let Some(window) = row.root().and_downcast::<gtk::Window>() {
+            window.set_fullscreened(super::window::fullscreen_locked());
+        }
     });
     let theme = adw::ComboRow::builder()
         .title("Theme")
