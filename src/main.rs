@@ -12,6 +12,7 @@ mod playback;
 mod player;
 mod remote;
 mod runtime;
+mod shaders;
 mod svp;
 mod ui;
 mod update;

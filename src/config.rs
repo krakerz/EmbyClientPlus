@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -16,6 +17,10 @@ pub struct Settings {
     pub subtitles: SubtitleSettings,
     #[serde(default)]
     pub frame_gen: FrameGenSettings,
+    #[serde(default)]
+    pub video: VideoSettings,
+    #[serde(default)]
+    pub shaders: ShaderSettings,
     #[serde(default)]
     pub controller: ControllerSettings,
     #[serde(default)]
@@ -37,6 +42,99 @@ impl Default for UpdateSettings {
         Self {
             check_on_start: true,
         }
+    }
+}
+
+/// How mpv scales and processes the picture.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VideoSettings {
+    #[serde(default)]
+    pub quality: VideoQuality,
+    /// The Custom quality's scalers (mpv filter names) and debanding.
+    #[serde(default = "default_upscaler")]
+    pub upscaler: String,
+    #[serde(default = "default_upscaler")]
+    pub chroma_scaler: String,
+    #[serde(default = "default_downscaler")]
+    pub downscaler: String,
+    #[serde(default)]
+    pub deband: bool,
+    /// Deinterlace sources flagged as interlaced.
+    #[serde(default = "default_true")]
+    pub deinterlace: bool,
+    /// Decode in software instead of the GPU.
+    #[serde(default)]
+    pub software_decoding: bool,
+}
+
+impl Default for VideoSettings {
+    fn default() -> Self {
+        Self {
+            quality: VideoQuality::default(),
+            upscaler: default_upscaler(),
+            chroma_scaler: default_upscaler(),
+            downscaler: default_downscaler(),
+            deband: false,
+            deinterlace: true,
+            software_decoding: false,
+        }
+    }
+}
+
+fn default_upscaler() -> String {
+    "spline36".into()
+}
+
+fn default_downscaler() -> String {
+    "mitchell".into()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoQuality {
+    /// mpv's own defaults, or the user's mpv.conf.
+    #[default]
+    Auto,
+    Fast,
+    Balanced,
+    HighQuality,
+    Custom,
+}
+
+impl VideoQuality {
+    pub const ALL: [VideoQuality; 5] = [
+        VideoQuality::Auto,
+        VideoQuality::Fast,
+        VideoQuality::Balanced,
+        VideoQuality::HighQuality,
+        VideoQuality::Custom,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            VideoQuality::Auto => "Auto (mpv defaults / mpv.conf)",
+            VideoQuality::Fast => "Fast",
+            VideoQuality::Balanced => "Balanced",
+            VideoQuality::HighQuality => "High quality",
+            VideoQuality::Custom => "Custom",
+        }
+    }
+}
+
+/// Shader groups (see `shaders`): which are left out of the player, and
+/// each group's preset for titles without their own choice ("" = off).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ShaderSettings {
+    /// Hidden rather than shown, so new custom folders appear on their own.
+    #[serde(default)]
+    pub hidden: Vec<String>,
+    #[serde(default)]
+    pub defaults: BTreeMap<String, String>,
+}
+
+impl ShaderSettings {
+    pub fn shown(&self, group: &str) -> bool {
+        !self.hidden.iter().any(|g| g == group)
     }
 }
 

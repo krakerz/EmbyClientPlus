@@ -6,7 +6,7 @@ use gtk::{gio, glib};
 
 use crate::config::{
     DEFAULT_SVP_SOCKET, EpisodeArt, FrameGenBackend, FullscreenMode, Settings, Theme,
-    TrailerQuality,
+    TrailerQuality, VideoQuality,
 };
 use crate::controller::{self, Action, Context};
 use crate::db::Db;
@@ -340,6 +340,12 @@ pub fn show(parent: &impl IsA<gtk::Widget>) {
         crate::ui::icons::SETTINGS,
     );
     stack.add_titled_with_icon(
+        &video_page(&settings),
+        Some("video"),
+        "Video",
+        crate::ui::icons::PICTURE,
+    );
+    stack.add_titled_with_icon(
         &controller_page(),
         Some("controller"),
         "Controller",
@@ -390,6 +396,225 @@ pub fn show(parent: &impl IsA<gtk::Widget>) {
         .child(&toasts)
         .build();
     dialog.present(Some(parent));
+}
+
+/// mpv scalers offered for the Custom quality: (mpv name, label).
+const SCALERS: [(&str, &str); 7] = [
+    ("bilinear", "Bilinear (cheapest)"),
+    ("catmull_rom", "Bicubic (Catmull-Rom)"),
+    ("mitchell", "Mitchell (soft)"),
+    ("spline36", "Spline36"),
+    ("lanczos", "Lanczos"),
+    ("ewa_lanczos", "EWA Lanczos"),
+    ("ewa_lanczossharp", "EWA Lanczos Sharp (heaviest)"),
+];
+
+/// Picture quality (scalers, deinterlacing, decoding) and shaders. Both
+/// apply from the next video played.
+fn video_page(settings: &Settings) -> adw::PreferencesPage {
+    let page = adw::PreferencesPage::builder()
+        .title("Video")
+        .icon_name(crate::ui::icons::PICTURE)
+        .build();
+
+    let quality_group = adw::PreferencesGroup::builder()
+        .title("Picture Quality")
+        .description(
+            "Applies from the next video. Heavier scalers cost more GPU, more so with SVP (every interpolated frame is scaled).",
+        )
+        .build();
+    let labels: Vec<&str> = VideoQuality::ALL.iter().map(|q| q.label()).collect();
+    let quality = adw::ComboRow::builder()
+        .title("Quality preset")
+        .subtitle("Fast suits the Steam Deck; High quality uses mpv's best scalers and debanding")
+        .model(&gtk::StringList::new(&labels))
+        .selected(
+            VideoQuality::ALL
+                .iter()
+                .position(|q| *q == settings.video.quality)
+                .unwrap_or(0) as u32,
+        )
+        .build();
+    quality_group.add(&quality);
+
+    let scaler_row = |title: &str, subtitle: &str, current: &str| {
+        let labels: Vec<&str> = SCALERS.iter().map(|(_, label)| *label).collect();
+        adw::ComboRow::builder()
+            .title(title)
+            .subtitle(subtitle)
+            .model(&gtk::StringList::new(&labels))
+            .selected(
+                SCALERS
+                    .iter()
+                    .position(|(name, _)| *name == current)
+                    .unwrap_or(3) as u32,
+            )
+            .build()
+    };
+    let upscaler = scaler_row(
+        "Upscaler",
+        "When the video is smaller than the screen",
+        &settings.video.upscaler,
+    );
+    let chroma = scaler_row(
+        "Chroma scaler",
+        "Colour detail; subtle differences",
+        &settings.video.chroma_scaler,
+    );
+    let downscaler = scaler_row(
+        "Downscaler",
+        "When the video is larger than the screen",
+        &settings.video.downscaler,
+    );
+    let scaler_saved = |field: fn(&mut crate::config::VideoSettings) -> &mut String| {
+        move |row: &adw::ComboRow| {
+            if let Some((name, _)) = SCALERS.get(row.selected() as usize) {
+                save(|s| *field(&mut s.video) = (*name).to_string());
+            }
+        }
+    };
+    upscaler.connect_selected_notify(scaler_saved(|v| &mut v.upscaler));
+    chroma.connect_selected_notify(scaler_saved(|v| &mut v.chroma_scaler));
+    downscaler.connect_selected_notify(scaler_saved(|v| &mut v.downscaler));
+    let deband = adw::SwitchRow::builder()
+        .title("Debanding")
+        .subtitle("Smooths colour banding in gradients")
+        .active(settings.video.deband)
+        .build();
+    deband.connect_active_notify(|row| {
+        let on = row.is_active();
+        save(|s| s.video.deband = on);
+    });
+    let custom_rows: Vec<gtk::Widget> = vec![
+        upscaler.upcast(),
+        chroma.upcast(),
+        downscaler.upcast(),
+        deband.upcast(),
+    ];
+    for row in &custom_rows {
+        row.set_sensitive(settings.video.quality == VideoQuality::Custom);
+        quality_group.add(row);
+    }
+    quality.connect_selected_notify(move |row| {
+        let chosen = VideoQuality::ALL
+            .get(row.selected() as usize)
+            .copied()
+            .unwrap_or_default();
+        for row in &custom_rows {
+            row.set_sensitive(chosen == VideoQuality::Custom);
+        }
+        save(|s| s.video.quality = chosen);
+    });
+    let deinterlace = adw::SwitchRow::builder()
+        .title("Deinterlace")
+        .subtitle("Only for videos marked as interlaced (DVDs, TV recordings)")
+        .active(settings.video.deinterlace)
+        .build();
+    deinterlace.connect_active_notify(|row| {
+        let on = row.is_active();
+        save(|s| s.video.deinterlace = on);
+    });
+    quality_group.add(&deinterlace);
+    let software = adw::SwitchRow::builder()
+        .title("Software decoding")
+        .subtitle("Decode on the CPU instead of the GPU; for videos the GPU decodes wrongly")
+        .active(settings.video.software_decoding)
+        .build();
+    software.connect_active_notify(|row| {
+        let on = row.is_active();
+        save(|s| s.video.software_decoding = on);
+    });
+    quality_group.add(&software);
+    page.add(&quality_group);
+
+    let shader_group = adw::PreferencesGroup::builder()
+        .title("Shaders")
+        .description(
+            "Shown groups get a submenu in the player's Shaders button, where each title keeps its own pick. One preset per group; presets of different groups stack. Upscalers only work when the video is smaller than the screen.",
+        )
+        .build();
+    for group in crate::shaders::groups() {
+        let shown = adw::SwitchRow::builder()
+            .title(&group.name)
+            .subtitle("Show in the player")
+            .active(settings.shaders.shown(&group.id))
+            .build();
+        let mut labels = vec!["Off".to_string()];
+        labels.extend(group.presets.iter().map(|p| p.name.clone()));
+        let current = settings
+            .shaders
+            .defaults
+            .get(&group.id)
+            .and_then(|id| group.presets.iter().position(|p| &p.id == id))
+            .map_or(0, |index| index + 1);
+        let default = adw::ComboRow::builder()
+            .title(format!("{} by default", group.name))
+            .subtitle("For titles without their own pick")
+            .model(&gtk::StringList::new(
+                &labels.iter().map(String::as_str).collect::<Vec<_>>(),
+            ))
+            .selected(current as u32)
+            .sensitive(shown.is_active())
+            .build();
+        let group_id = group.id.clone();
+        shown.connect_active_notify(glib::clone!(
+            #[weak]
+            default,
+            move |row| {
+                let on = row.is_active();
+                default.set_sensitive(on);
+                save(|s| {
+                    s.shaders.hidden.retain(|g| g != &group_id);
+                    if !on {
+                        s.shaders.hidden.push(group_id.clone());
+                    }
+                });
+            }
+        ));
+        let (group_id, presets) = (group.id.clone(), group.presets.clone());
+        default.connect_selected_notify(move |row| {
+            let preset = match row.selected() {
+                0 => String::new(),
+                n => presets
+                    .get(n as usize - 1)
+                    .map(|p| p.id.clone())
+                    .unwrap_or_default(),
+            };
+            save(|s| {
+                s.shaders.defaults.insert(group_id.clone(), preset);
+            });
+        });
+        shader_group.add(&shown);
+        shader_group.add(&default);
+    }
+    if let Some(dir) = crate::shaders::custom_dir() {
+        let row = adw::ActionRow::builder()
+            .title("Your shaders")
+            .subtitle(format!(
+                "{}: one folder per group, each .glsl file (or folder of them) a preset. Read when Preferences opens.",
+                dir.display()
+            ))
+            .build();
+        let open = gtk::Button::builder()
+            .label("Open Folder")
+            .valign(gtk::Align::Center)
+            .build();
+        open.connect_clicked(move |_| {
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                tracing::warn!("could not create {}: {e}", dir.display());
+            }
+            let uri = gio::File::for_path(&dir).uri();
+            if let Err(e) =
+                gio::AppInfo::launch_default_for_uri(&uri, None::<&gio::AppLaunchContext>)
+            {
+                tracing::warn!("could not open {uri}: {e}");
+            }
+        });
+        row.add_suffix(&open);
+        shader_group.add(&row);
+    }
+    page.add(&shader_group);
+    page
 }
 
 /// How long "Press a button…" waits before giving up.

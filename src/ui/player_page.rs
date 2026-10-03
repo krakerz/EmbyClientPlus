@@ -134,6 +134,7 @@ struct Osd {
     subtitles: gtk::MenuButton,
     quality: gtk::MenuButton,
     picture: gtk::MenuButton,
+    shaders: gtk::MenuButton,
     svp: gtk::ToggleButton,
     fullscreen: gtk::Button,
     skip: gtk::Button,
@@ -367,7 +368,9 @@ impl Osd {
             gtk::Button::builder()
                 .icon_name(icon)
                 .tooltip_text(tooltip)
-                .css_classes(["flat", "circular"])
+                .css_classes(["flat", "circular", "osd-button"])
+                // Never stretched by a taller neighbour: stays a circle.
+                .valign(gtk::Align::Center)
                 .build()
         };
         let menu_button = |icon: &str, tooltip: &str| {
@@ -375,7 +378,8 @@ impl Osd {
                 .icon_name(icon)
                 .tooltip_text(tooltip)
                 .direction(gtk::ArrowType::Up)
-                .css_classes(["flat", "circular"])
+                .css_classes(["flat", "circular", "osd-button"])
+                .valign(gtk::Align::Center)
                 .build()
         };
 
@@ -455,10 +459,19 @@ impl Osd {
         let quality = menu_button(crate::ui::icons::QUALITY, "Quality");
         let picture = menu_button(crate::ui::icons::PICTURE, "Picture");
         picture.set_menu_model(Some(&picture_menu()));
+        let shaders = menu_button(crate::ui::icons::SHADERS, "Shaders");
         let svp = gtk::ToggleButton::builder()
-            .label("SVP")
+            // An icon, not a label: text carries the font's line spacing and
+            // never sits quite centred in the circle.
+            .child(
+                &gtk::Image::builder()
+                    .icon_name(crate::ui::icons::SVP)
+                    .pixel_size(24)
+                    .build(),
+            )
             .tooltip_text("Frame interpolation through SVP (remembered for this title)")
-            .css_classes(["flat"])
+            .css_classes(["flat", "svp-toggle", "osd-button"])
+            .valign(gtk::Align::Center)
             .build();
         let fullscreen = icon_button(crate::ui::icons::FULLSCREEN, "Fullscreen (F)");
 
@@ -474,6 +487,7 @@ impl Osd {
         end.append(&subtitles);
         end.append(&quality);
         end.append(&picture);
+        end.append(&shaders);
         end.append(&svp);
         end.append(&fullscreen);
         buttons.set_start_widget(Some(&start));
@@ -615,6 +629,7 @@ impl Osd {
             subtitles,
             quality,
             picture,
+            shaders,
             svp,
             fullscreen,
             skip,
@@ -640,6 +655,7 @@ impl Osd {
             &self.subtitles,
             &self.quality,
             &self.picture,
+            &self.shaders,
         ]
         .iter()
         .any(|button| button.is_active())
@@ -1194,6 +1210,138 @@ impl Inner {
             .position(|q| *q == self.quality.get())
             .unwrap_or(0);
         set_state(&self.actions, "quality", (current as i32).to_variant());
+        self.rebuild_shader_menu();
+    }
+
+    /// The Shaders menu: one row per group shown (Preferences), checked
+    /// while it has a preset on, each opening its list (Off and presets).
+    /// Hand-built: menu models can't put a check before a submenu's arrow.
+    fn rebuild_shader_menu(&self) {
+        let groups = self.session().map(|s| s.shaders()).unwrap_or_default();
+        self.osd.shaders.set_visible(!groups.is_empty());
+        show_shaders_on(
+            &self.osd.shaders,
+            groups.iter().any(|(_, preset)| preset.is_some()),
+        );
+        let popover = gtk::Popover::builder().css_classes(["menu"]).build();
+        let stack = gtk::Stack::builder()
+            .transition_type(gtk::StackTransitionType::SlideLeftRight)
+            .vhomogeneous(false)
+            .hhomogeneous(false)
+            .interpolate_size(true)
+            .build();
+        let main = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        stack.add_named(&main, Some("groups"));
+        // Each group's pick, shared by its row and its page.
+        let picks: Rc<Vec<RefCell<Option<String>>>> = Rc::new(
+            groups
+                .iter()
+                .map(|(_, preset)| RefCell::new(preset.clone()))
+                .collect(),
+        );
+        let session = self.session().map(|s| Rc::downgrade(&s));
+        let button = self.osd.shaders.downgrade();
+        for (index, (group, _)) in groups.into_iter().enumerate() {
+            let page_name = format!("g{index}");
+            let check = check_icon();
+            check.set_opacity(if picks[index].borrow().is_some() {
+                1.0
+            } else {
+                0.0
+            });
+            let row = menu_row(
+                &group.name,
+                None,
+                Some(&check),
+                Some(crate::ui::icons::NEXT),
+            );
+            main.append(&row);
+
+            let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            let back = menu_row(
+                &group.name,
+                Some(&gtk::Image::from_icon_name(crate::ui::icons::BACK)),
+                None,
+                None,
+            );
+            back.add_css_class("heading");
+            page.append(&back);
+            page.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+            let mut options: Vec<(String, String)> = vec![(String::new(), "Off".into())];
+            options.extend(group.presets.iter().map(|p| (p.id.clone(), p.name.clone())));
+            let marks: Vec<gtk::Image> = options.iter().map(|_| check_icon()).collect();
+            let show_marks = {
+                let (marks, ids) = (
+                    marks.clone(),
+                    options.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(),
+                );
+                move |pick: &Option<String>| {
+                    let current = pick.clone().unwrap_or_default();
+                    for (mark, id) in marks.iter().zip(&ids) {
+                        mark.set_opacity(if *id == current { 1.0 } else { 0.0 });
+                    }
+                }
+            };
+            show_marks(&picks[index].borrow());
+            for ((id, label), mark) in options.into_iter().zip(marks) {
+                let option = menu_row(&label, Some(&mark), None, None);
+                let (session, group_id, picks, check, show_marks, button, popover) = (
+                    session.clone(),
+                    group.id.clone(),
+                    picks.clone(),
+                    check.clone(),
+                    show_marks.clone(),
+                    button.clone(),
+                    popover.downgrade(),
+                );
+                option.connect_clicked(move |_| {
+                    let Some(session) = session.as_ref().and_then(Weak::upgrade) else {
+                        return;
+                    };
+                    session.set_shader(&group_id, &id);
+                    let pick = (!id.is_empty()).then(|| id.clone());
+                    check.set_opacity(if pick.is_some() { 1.0 } else { 0.0 });
+                    show_marks(&pick);
+                    picks[index].replace(pick);
+                    if let Some(button) = button.upgrade() {
+                        show_shaders_on(&button, picks.iter().any(|p| p.borrow().is_some()));
+                    }
+                    if let Some(popover) = popover.upgrade() {
+                        popover.popdown();
+                    }
+                });
+                page.append(&option);
+            }
+            stack.add_named(&page, Some(&page_name));
+
+            let to_page = (stack.downgrade(), page.downgrade());
+            row.connect_clicked(move |_| {
+                if let (Some(stack), Some(page)) = (to_page.0.upgrade(), to_page.1.upgrade()) {
+                    stack.set_visible_child(&page);
+                    // On the group's current pick, else its first entry.
+                    focus_checked(&page);
+                }
+            });
+            let to_main = (stack.downgrade(), main.downgrade());
+            back.connect_clicked(move |_| {
+                if let (Some(stack), Some(main)) = (to_main.0.upgrade(), to_main.1.upgrade()) {
+                    stack.set_visible_child(&main);
+                    main.child_focus(gtk::DirectionType::TabForward);
+                }
+            });
+        }
+        popover.set_child(Some(&stack));
+        let main_ref = main.downgrade();
+        popover.connect_closed(glib::clone!(
+            #[weak]
+            stack,
+            move |_| {
+                if let Some(main) = main_ref.upgrade() {
+                    stack.set_visible_child(&main);
+                }
+            }
+        ));
+        self.osd.shaders.set_popover(Some(&popover));
     }
 
     fn start_tick(self: &Rc<Self>) {
@@ -1644,6 +1792,80 @@ fn titles(item: &BaseItem) -> (String, String) {
                 .map(|y| y.to_string())
                 .unwrap_or_default(),
         ),
+    }
+}
+
+/// Green Shaders button while any group has a preset on.
+fn show_shaders_on(button: &gtk::MenuButton, on: bool) {
+    if on {
+        button.add_css_class("shaders-active");
+    } else {
+        button.remove_css_class("shaders-active");
+    }
+}
+
+/// A menu entry: optional leading icon, label, then an optional mark and
+/// trailing icon.
+fn menu_row(
+    label: &str,
+    leading: Option<&gtk::Image>,
+    mark: Option<&gtk::Image>,
+    trailing: Option<&str>,
+) -> gtk::Button {
+    let line = gtk::Box::builder().spacing(12).build();
+    if let Some(leading) = leading {
+        line.append(leading);
+    }
+    line.append(
+        &gtk::Label::builder()
+            .label(label)
+            .xalign(0.0)
+            .hexpand(true)
+            .build(),
+    );
+    if let Some(mark) = mark {
+        line.append(mark);
+    }
+    if let Some(icon) = trailing {
+        line.append(&gtk::Image::from_icon_name(icon));
+    }
+    gtk::Button::builder()
+        .child(&line)
+        .css_classes(["flat", "menu-row"])
+        .build()
+}
+
+/// A check mark; hidden by opacity so rows keep their alignment.
+fn check_icon() -> gtk::Image {
+    gtk::Image::from_icon_name(crate::ui::icons::WATCHED)
+}
+
+/// Focuses the entry of `page` whose check shows, else its first entry.
+fn focus_checked(page: &gtk::Box) {
+    let mut child = page.first_child();
+    let mut first = None;
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        let Some(row) = widget.downcast_ref::<gtk::Button>() else {
+            continue;
+        };
+        // Skip the back row at the top.
+        if row.has_css_class("heading") {
+            continue;
+        }
+        first.get_or_insert_with(|| row.clone());
+        let checked = row
+            .child()
+            .and_then(|line| line.first_child())
+            .and_downcast::<gtk::Image>()
+            .is_some_and(|mark| mark.opacity() > 0.5);
+        if checked {
+            row.grab_focus();
+            return;
+        }
+    }
+    if let Some(row) = first {
+        row.grab_focus();
     }
 }
 

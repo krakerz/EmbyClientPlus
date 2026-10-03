@@ -20,8 +20,30 @@ const CSS: &str = "
 .card-button { padding: 0; }
 .player-bar {
     margin: 12px;
-    padding: 8px 14px;
+    padding: 4px 14px;
     border-radius: 14px;
+}
+/* Every player button is the same true circle (hover and focus ring
+   included), text ones like SVP too. */
+button.osd-button,
+menubutton.osd-button > button {
+    min-width: 36px;
+    min-height: 36px;
+    padding: 0;
+    border-radius: 999px;
+}
+/* The hand-built Shaders menu, laid out like the other player menus. */
+button.menu-row {
+    min-width: 200px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-weight: normal;
+}
+button.menu-row:hover,
+button.menu-row:focus-visible {
+    background: @accent_bg_color;
+    color: @accent_fg_color;
+    outline: none;
 }
 .scrub-preview {
     padding: 8px;
@@ -61,13 +83,18 @@ const CSS: &str = "
     padding: 10px 22px;
     font-weight: bold;
 }
-.large-button {
-    min-width: 48px;
-    min-height: 48px;
+button.osd-button.large-button {
+    min-width: 44px;
+    min-height: 44px;
 }
 .svp-active { color: @success_color; }
 .svp-waiting { color: @warning_color; }
 .svp-missing { color: @error_color; }
+.shaders-active { color: @success_color; }
+/* SVP's on/off shows in its colour, like the Shaders button: no pressed
+   background. */
+button.svp-toggle:checked { background: none; }
+button.svp-toggle:checked:hover { background: alpha(currentColor, 0.07); }
 .person-card { border-radius: 999px; }
 .art-placeholder { opacity: 0.45; }
 .category-tile { border-radius: 14px; }

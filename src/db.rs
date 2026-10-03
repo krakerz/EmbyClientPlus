@@ -65,6 +65,8 @@ pub struct TitleOverride {
     pub aspect_mode: Option<String>,
     /// Extra zoom (log2 steps) on top of the automatic fit.
     pub zoom: Option<f64>,
+    /// Shader preset per group (see `shaders::encode_choices`).
+    pub shaders: Option<String>,
 }
 
 /// How a library grid was last sorted and filtered (Emby `SortBy` and
@@ -126,7 +128,11 @@ impl Db {
         )
         .context("failed to initialize view_prefs schema")?;
         // Columns added after the first release; older databases lack them.
-        for (column, kind) in [("aspect_mode", "TEXT"), ("zoom", "REAL")] {
+        for (column, kind) in [
+            ("aspect_mode", "TEXT"),
+            ("zoom", "REAL"),
+            ("shaders", "TEXT"),
+        ] {
             let exists = conn
                 .prepare("SELECT 1 FROM pragma_table_info('title_overrides') WHERE name = ?1")?
                 .exists([column])?;
@@ -144,7 +150,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT emby_item_id, item_type, audio_language, subtitle_language,
                     subtitle_forced_only, frame_gen_backend, frame_gen_multiplier,
-                    aspect_mode, zoom
+                    aspect_mode, zoom, shaders
              FROM title_overrides WHERE emby_item_id = ?1",
         )?;
         let mut rows = stmt.query([emby_item_id])?;
@@ -168,6 +174,7 @@ impl Db {
             frame_gen_multiplier: row.get::<_, Option<i64>>(6)?.map(|v| v as u32),
             aspect_mode: row.get(7)?,
             zoom: row.get(8)?,
+            shaders: row.get(9)?,
         }))
     }
 
@@ -176,8 +183,8 @@ impl Db {
             "INSERT INTO title_overrides
                 (emby_item_id, item_type, audio_language, subtitle_language,
                  subtitle_forced_only, frame_gen_backend, frame_gen_multiplier,
-                 aspect_mode, zoom)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 aspect_mode, zoom, shaders)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(emby_item_id) DO UPDATE SET
                 item_type = excluded.item_type,
                 audio_language = excluded.audio_language,
@@ -186,7 +193,8 @@ impl Db {
                 frame_gen_backend = excluded.frame_gen_backend,
                 frame_gen_multiplier = excluded.frame_gen_multiplier,
                 aspect_mode = excluded.aspect_mode,
-                zoom = excluded.zoom",
+                zoom = excluded.zoom,
+                shaders = excluded.shaders",
             rusqlite::params![
                 entry.emby_item_id,
                 entry.item_type.as_str(),
@@ -197,6 +205,7 @@ impl Db {
                 entry.frame_gen_multiplier.map(|v| v as i64),
                 entry.aspect_mode,
                 entry.zoom,
+                entry.shaders,
             ],
         )?;
         Ok(())
@@ -272,6 +281,7 @@ mod tests {
             frame_gen_multiplier: Some(2),
             aspect_mode: None,
             zoom: None,
+            shaders: None,
         };
 
         db.upsert_override(&entry).unwrap();
@@ -298,6 +308,7 @@ mod tests {
             frame_gen_multiplier: None,
             aspect_mode: None,
             zoom: None,
+            shaders: None,
         };
         db.upsert_override(&entry).unwrap();
 
@@ -337,6 +348,7 @@ mod tests {
             frame_gen_multiplier: None,
             aspect_mode: None,
             zoom: None,
+            shaders: None,
         };
         db.upsert_override(&entry).unwrap();
         db.delete_override("movie-2").unwrap();
@@ -360,6 +372,7 @@ mod tests {
                 frame_gen_multiplier: None,
                 aspect_mode: None,
                 zoom: None,
+                shaders: None,
             })
             .unwrap();
         }
