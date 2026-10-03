@@ -73,6 +73,7 @@ pub fn page(ui: &Ui) -> adw::NavigationPage {
             .menu_model(&menu)
             .build(),
     );
+    header.pack_end(&ui_scale_buttons(ui));
 
     let page = scrolled_page("Home", Some("home"), &header, &content);
 
@@ -275,4 +276,77 @@ fn show(ui: &Ui, content: &gtk::Box, data: HomeData) {
             More::Library(Box::new(library.clone())),
         ));
     }
+}
+
+/// Reset, smaller, bigger: the UI scale, saved for the next start.
+fn ui_scale_buttons(ui: &Ui) -> gtk::Box {
+    let reset = gtk::Button::builder()
+        .icon_name(crate::ui::icons::RESET)
+        .build();
+    let smaller = gtk::Button::builder()
+        .icon_name("list-remove-symbolic")
+        .build();
+    let bigger = gtk::Button::builder()
+        .icon_name("list-add-symbolic")
+        .build();
+    let buttons = gtk::Box::builder().spacing(2).build();
+    buttons.append(
+        &gtk::Label::builder()
+            .label(format!("v{}", crate::update::current_version()))
+            .margin_end(4)
+            .css_classes(["dim-label", "caption-heading"])
+            .build(),
+    );
+    for button in [&reset, &smaller, &bigger] {
+        buttons.append(button);
+    }
+    let refresh = {
+        let (reset, smaller, bigger) = (reset.downgrade(), smaller.downgrade(), bigger.downgrade());
+        move || {
+            let (Some(reset), Some(smaller), Some(bigger)) =
+                (reset.upgrade(), smaller.upgrade(), bigger.upgrade())
+            else {
+                return;
+            };
+            let scale = super::ui_scale();
+            let percent = (scale * 100.0).round();
+            reset.set_tooltip_text(Some(&format!("Reset UI size ({percent}% now)")));
+            smaller.set_tooltip_text(Some(&format!("Smaller UI ({percent}% now)")));
+            bigger.set_tooltip_text(Some(&format!("Bigger UI ({percent}% now)")));
+            reset.set_sensitive((scale - 1.0).abs() > 0.001);
+            smaller.set_sensitive(scale > super::UI_SCALE_MIN + 0.001);
+            bigger.set_sensitive(scale < super::UI_SCALE_MAX - 0.001);
+        }
+    };
+    refresh();
+    let change = {
+        let weak = ui.downgrade();
+        move |target: Option<f64>| {
+            let scale = target.unwrap_or(1.0);
+            // Whole steps, so repeated presses never drift (1.1 + 0.1 ...).
+            // Divided, not multiplied, so 0.7 is stored as 0.7.
+            let scale = ((scale / super::UI_SCALE_STEP).round() / super::UI_SCALE_STEP.recip())
+                .clamp(super::UI_SCALE_MIN, super::UI_SCALE_MAX);
+            super::apply_ui_scale(scale);
+            if let Err(e) = crate::config::Settings::update(|s| s.window.ui_scale = scale) {
+                tracing::warn!("could not save the UI scale: {e:#}");
+            }
+            // Pages rebuild with the new artwork sizes.
+            if let Some(ui) = weak.upgrade() {
+                ui.data_changed();
+            }
+            refresh();
+        }
+    };
+    let change = std::rc::Rc::new(change);
+    reset.connect_clicked({
+        let change = change.clone();
+        move |_| change(None)
+    });
+    smaller.connect_clicked({
+        let change = change.clone();
+        move |_| change(Some(super::ui_scale() - super::UI_SCALE_STEP))
+    });
+    bigger.connect_clicked(move |_| change(Some(super::ui_scale() + super::UI_SCALE_STEP)));
+    buttons
 }

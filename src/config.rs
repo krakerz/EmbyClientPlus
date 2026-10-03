@@ -150,6 +150,10 @@ pub struct WindowSettings {
     pub fullscreen: FullscreenMode,
     #[serde(default)]
     pub theme: Theme,
+    /// Size of everything (text, artwork) relative to the design, from
+    /// Home's −/+ buttons; 1.0 as designed.
+    #[serde(default = "default_ui_scale")]
+    pub ui_scale: f64,
 }
 
 /// Colour scheme. Dark by default: SteamOS reports a light preference, so
@@ -170,6 +174,7 @@ impl Default for WindowSettings {
             height: default_height(),
             fullscreen: FullscreenMode::default(),
             theme: Theme::default(),
+            ui_scale: default_ui_scale(),
         }
     }
 }
@@ -194,6 +199,10 @@ pub enum FullscreenMode {
     /// Fullscreen everywhere, desktop included.
     Always,
     Never,
+}
+
+fn default_ui_scale() -> f64 {
+    1.0
 }
 
 /// The Steam Deck's screen.

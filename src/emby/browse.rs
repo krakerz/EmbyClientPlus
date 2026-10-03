@@ -447,6 +447,14 @@ impl BaseItem {
         self.user_data.as_ref().is_some_and(|data| data.played)
     }
 
+    /// Episodes not yet watched (series, seasons); 0 when unknown.
+    pub fn unplayed_count(&self) -> i32 {
+        self.user_data
+            .as_ref()
+            .and_then(|data| data.unplayed_item_count)
+            .unwrap_or(0)
+    }
+
     pub fn is_favorite(&self) -> bool {
         self.user_data.as_ref().is_some_and(|data| data.is_favorite)
     }

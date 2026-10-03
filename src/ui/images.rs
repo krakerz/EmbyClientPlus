@@ -75,6 +75,8 @@ pub fn load_with_client(
     image: Option<ImageRef>,
     max_width: u32,
 ) {
+    // Bigger on screen needs more pixels to stay sharp.
+    let max_width = (f64::from(max_width) * super::ui_scale()).ceil() as u32;
     let path = image.map(|image| EmbyClient::image_path(&image, max_width));
     set_requested(picture, path.clone());
     let Some(path) = path else {

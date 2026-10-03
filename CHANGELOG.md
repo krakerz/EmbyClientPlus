@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-10-03
+
+### Added
+- UI size buttons (reset, −, +) next to Home's menu scale text and artwork from 50% to 200%; the size is remembered.
+- Series and season cards show how many episodes are still unwatched, at the end of the line under the title.
+
+### Changed
+- The app version now shows next to the UI size buttons on Home, instead of in the Preferences header.
+- The watched mark moved off the artwork to the end of the line under the title, as a green check in a circle.
+
+### Fixed
+- Keyboard: Space and the arrow keys in the player sometimes did nothing until the player was clicked.
+
 ## [1.3.0] — 2026-10-03
 
 ### Added
