@@ -370,6 +370,16 @@ fn episode_row(ui: &Ui, episode: &BaseItem) -> adw::ActionRow {
         let remaining = (ticks as f64 * (1.0 - fraction)) as i64;
         details.push(format!("{} left", format_runtime(remaining)));
     }
+    if let Some(aired) = episode
+        .premiere_date
+        .as_deref()
+        .and_then(super::format_date)
+    {
+        details.push(format!("Aired {aired}"));
+    }
+    if let Some(added) = episode.date_created.as_deref().and_then(super::format_date) {
+        details.push(format!("Added {added}"));
+    }
     row.set_subtitle(&glib::markup_escape_text(&details.join(" · ")));
 
     let thumb = gtk::Picture::builder()
@@ -401,6 +411,8 @@ fn episode_row(ui: &Ui, episode: &BaseItem) -> adw::ActionRow {
     }
     row.add_suffix(&gtk::Image::from_icon_name(crate::ui::icons::NEXT));
 
+    let target = episode.clone();
+    super::card::attach_menu(ui, &row, move || Some(target.clone()));
     let weak = ui.downgrade();
     let target = episode.clone();
     row.connect_activated(move |_| {

@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-10-05
+
+### Added
+- Downloads for offline playback: Download in a movie's or episode's menu saves the original file (with its artwork and details) to a folder you choose in Preferences; the Downloads page (Home's menu) lists them, shows progress and deletes them.
+- Downloaded titles play from disk, with SVP and shaders as usual; the next downloaded episode plays after each one, and progress still syncs to Emby when the server is reachable.
+- When the server can't be reached, Home says so, with Try Again and a shortcut to your downloads.
+- History page (Home's menu): everything you played, newest first, grouped by day.
+- Standalone player: `embyclientplus --player [file|url]` opens just the player (SVP, shaders, picture options, tracks), and plays the next video in the folder after each one.
+- Without a file, the standalone player starts on a page where you can drop files or links, open a file or URL, or pick a video from your downloads folder; its Preferences leave out the server settings.
+- Preferences → Keyboard: change the player's keyboard shortcuts.
+- Each title remembers its own volume (including boost above 100%); Preferences → Playback sets the default.
+- Preferences → Playback: option to hide the player controls while paused too.
+- Episode rows and details show when an episode aired and when it was added.
+
+### Fixed
+- Rows and grids with only a few items no longer spread their cards across the whole width.
+- The Fast, Balanced, High quality and Custom picture presets failed to apply some settings (deinterlacing, decoding).
+- The Preferences tabs no longer cut off "Controller".
+
 ## [1.4.0] — 2026-10-03
 
 ### Added

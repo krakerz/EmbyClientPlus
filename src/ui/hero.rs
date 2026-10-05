@@ -299,6 +299,14 @@ pub fn meta_line(item: &BaseItem) -> String {
     if let Some(score) = item.community_rating {
         parts.push(format!("★ {score:.1}"));
     }
+    if item.item_type == "Episode"
+        && let Some(aired) = item.premiere_date.as_deref().and_then(super::format_date)
+    {
+        parts.push(format!("Aired {aired}"));
+    }
+    if let Some(added) = item.date_created.as_deref().and_then(super::format_date) {
+        parts.push(format!("Added {added}"));
+    }
     if item.played() {
         parts.push("Watched".to_string());
     } else if let Some(unplayed) = item

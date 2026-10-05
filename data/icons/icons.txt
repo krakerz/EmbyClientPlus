@@ -67,3 +67,6 @@ view-reveal-symbolic            eye
 view-conceal-symbolic           eye-off
 list-add-symbolic               plus
 list-remove-symbolic            minus
+ecp-keyboard-symbolic           keyboard
+ecp-download-symbolic           download
+ecp-history-symbolic            clock

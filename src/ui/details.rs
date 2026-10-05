@@ -55,6 +55,10 @@ pub fn page(ui: &Ui, item: &BaseItem) -> adw::NavigationPage {
     hero.extra.append(&related);
     let header = adw::HeaderBar::new();
     let page = scrolled_page(&item.name, None, &header, &hero.root);
+    // X / right-click on the page: the title's own menu (download, watched,
+    // favourite...). Cards below keep theirs.
+    let target = item.clone();
+    super::card::attach_menu(ui, &hero.root, move || Some(target.clone()));
     let view = Rc::new(DetailsView {
         hero,
         episodes,

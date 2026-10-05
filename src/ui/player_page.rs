@@ -334,12 +334,21 @@ impl PlayerPage {
     }
 
     /// Hooks up a started session: markers, neighbours, menus, SVP state.
-    pub fn attach(&self, session: Rc<PlaybackSession>, client: &std::sync::Arc<EmbyClient>) {
+    /// `client`: the Emby server it plays from; `None` for local files.
+    pub fn attach(
+        &self,
+        session: Rc<PlaybackSession>,
+        client: Option<&std::sync::Arc<EmbyClient>>,
+    ) {
         let inner = &self.inner;
-        inner
-            .osd
-            .preview
-            .load(client, &session.item, session.trickplay_source());
+        if let Some(client) = client {
+            inner
+                .osd
+                .preview
+                .load(client, &session.item, session.trickplay_source());
+        }
+        // Nothing to transcode without a server.
+        inner.osd.quality.set_visible(session.is_from_server());
         inner.osd.previous.set_sensitive(session.previous.is_some());
         inner.osd.next.set_sensitive(session.next.is_some());
         inner.osd.svp.set_active(session.svp_enabled());
@@ -352,7 +361,9 @@ impl PlayerPage {
         }
         if let Some(next) = &session.next {
             inner.osd.up_next_title.set_label(&next.episode_label());
-            images::load_with_client(client, &inner.osd.up_next_picture, next.landscape(), 384);
+            if let Some(client) = client {
+                images::load_with_client(client, &inner.osd.up_next_picture, next.landscape(), 384);
+            }
         }
         let (aspect, zoom) = session.picture();
         inner.session.replace(Some(session));
@@ -1541,6 +1552,7 @@ impl Inner {
             let Some(inner) = weak.upgrade() else { return };
             inner.volume_report.take();
             if let Some(session) = inner.session() {
+                session.remember_volume();
                 session.report_progress(Some("VolumeChange"));
             }
         });
@@ -1667,33 +1679,38 @@ impl Inner {
             return glib::Propagation::Proceed;
         }
         let player = self.player;
-        match key {
-            gdk::Key::space | gdk::Key::k => warn(player.toggle_pause()),
-            gdk::Key::Left => {
+        let Some(action) =
+            crate::keys::key_name(key).and_then(|name| crate::keys::bindings().action_for(&name))
+        else {
+            return glib::Propagation::Proceed;
+        };
+        use crate::keys::KeyAction;
+        match action {
+            KeyAction::PlayPause => warn(player.toggle_pause()),
+            KeyAction::SeekBack => {
                 self.show_osd();
                 self.seek_by(-SEEK_STEP, self.key_repeating(key));
             }
-            gdk::Key::Right => {
+            KeyAction::SeekForward => {
                 self.show_osd();
                 self.seek_by(SEEK_STEP, self.key_repeating(key));
             }
-            gdk::Key::Up => warn(player.set_volume(player.volume() + VOLUME_STEP)),
-            gdk::Key::Down => warn(player.set_volume(player.volume() - VOLUME_STEP)),
-            gdk::Key::m => warn(player.toggle_mute()),
-            gdk::Key::n | gdk::Key::N => self.play_neighbour(true),
-            gdk::Key::p | gdk::Key::P => self.play_neighbour(false),
-            gdk::Key::Page_Down => self.seek_chapter(true),
-            gdk::Key::Page_Up => self.seek_chapter(false),
-            gdk::Key::F11 | gdk::Key::f => self.toggle_fullscreen(),
-            gdk::Key::Escape => self.leave(),
-            _ => return glib::Propagation::Proceed,
+            KeyAction::VolumeUp => warn(player.set_volume(player.volume() + VOLUME_STEP)),
+            KeyAction::VolumeDown => warn(player.set_volume(player.volume() - VOLUME_STEP)),
+            KeyAction::Mute => warn(player.toggle_mute()),
+            KeyAction::NextEpisode => self.play_neighbour(true),
+            KeyAction::PreviousEpisode => self.play_neighbour(false),
+            KeyAction::NextChapter => self.seek_chapter(true),
+            KeyAction::PreviousChapter => self.seek_chapter(false),
+            KeyAction::Fullscreen => self.toggle_fullscreen(),
+            KeyAction::Leave => self.leave(),
         }
         self.show_osd();
         glib::Propagation::Stop
     }
 
     /// Reveals the OSD and cursor, then hides both after a quiet spell
-    /// (unless paused or a menu is open).
+    /// (unless a menu is open, or paused without "hide when paused").
     fn show_osd(self: &Rc<Self>) {
         self.osd.top.set_reveal_child(true);
         self.osd.bottom.set_reveal_child(true);
@@ -1708,7 +1725,12 @@ impl Inner {
             if !inner.page.is_mapped() {
                 return;
             }
-            if inner.player.is_paused() || inner.osd.menu_open() || inner.controls_mode.get() {
+            let held_by_pause = inner.player.is_paused()
+                && !crate::config::Settings::load()
+                    .unwrap_or_default()
+                    .playback
+                    .hide_osd_when_paused;
+            if held_by_pause || inner.osd.menu_open() || inner.controls_mode.get() {
                 inner.show_osd();
                 return;
             }
@@ -1786,8 +1808,11 @@ impl Inner {
             .ancestor(adw::NavigationView::static_type())
             .and_downcast::<adw::NavigationView>()
             && nav.visible_page().as_ref() == Some(&self.page)
+            // The standalone player is the only page: leaving it closes.
+            && !nav.pop()
+            && let Some(window) = self.window()
         {
-            nav.pop();
+            window.close();
         }
     }
 }

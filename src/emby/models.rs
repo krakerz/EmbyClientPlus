@@ -194,7 +194,7 @@ pub struct PlaybackInfoResponse {
 // the rest (direct-play/transcode flags, subtitle delivery info) are for
 // M9 (subtitle rendering) and smarter media-source selection later.
 #[allow(dead_code)]
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct MediaSource {
     pub id: String,
@@ -283,6 +283,10 @@ pub struct BaseItem {
     pub index_number: Option<i32>,
     pub parent_index_number: Option<i32>,
     pub production_year: Option<i32>,
+    /// When it first aired / was released (ISO 8601).
+    pub premiere_date: Option<String>,
+    /// When it was added to the server (ISO 8601).
+    pub date_created: Option<String>,
     pub overview: Option<String>,
     pub run_time_ticks: Option<i64>,
     pub official_rating: Option<String>,
@@ -386,6 +390,8 @@ pub struct UserItemData {
     pub played_percentage: Option<f64>,
     pub unplayed_item_count: Option<i32>,
     pub is_favorite: bool,
+    /// When it was last played (ISO 8601, UTC).
+    pub last_played_date: Option<String>,
 }
 
 /// One "Because you watched X" row from `/Movies/Recommendations`.

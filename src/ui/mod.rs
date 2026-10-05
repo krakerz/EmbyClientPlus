@@ -5,9 +5,11 @@ mod album;
 mod card;
 mod category_tile;
 mod details;
+mod downloads;
 mod favorites;
 mod gamepad;
 mod hero;
+mod history;
 mod home;
 pub mod icons;
 mod image_disk_cache;
@@ -25,6 +27,8 @@ mod rows;
 mod scrub_preview;
 mod search;
 mod series;
+mod standalone;
+pub use standalone::present as present_standalone;
 mod updates;
 pub mod window;
 
@@ -267,6 +271,10 @@ impl Ui {
         self.push(&favorites::page(self));
     }
 
+    pub fn open_history(&self) {
+        self.push(&history::page(self));
+    }
+
     pub fn data_generation(&self) -> u64 {
         self.inner.data_generation.get()
     }
@@ -442,6 +450,10 @@ impl Ui {
         if item.is_audio() {
             return self.play_song(item);
         }
+        // Downloaded: from disk, offline or not.
+        if let Some(download) = crate::downloads::find(&item.id) {
+            return self.play_download(&download, start_ticks);
+        }
         // The current session's quality carries over to the next episode;
         // otherwise the configured default applies.
         let quality = self
@@ -491,7 +503,7 @@ impl Ui {
             match started {
                 Ok(session) => {
                     ui.inner.playback.replace(Some(session.clone()));
-                    ui.inner.player_page.attach(session, &ui.client());
+                    ui.inner.player_page.attach(session, Some(&ui.client()));
                 }
                 Err(e) if e.downcast_ref::<crate::remote::NeedsYtDlp>().is_some() => {
                     ui.open_in_browser(
@@ -552,6 +564,55 @@ impl Ui {
         let audio = session.audio_stream_index();
         let item = session.item.clone();
         self.play_with(&item, position, quality, audio);
+    }
+
+    /// Plays a downloaded title from its file. Progress still goes to the
+    /// server, when it's reachable; previous/next are the other downloaded
+    /// episodes.
+    pub fn play_download(&self, download: &crate::downloads::Download, start_ticks: i64) {
+        self.inner.music.stop();
+        self.stop_playback();
+        let page = &self.inner.player_page;
+        page.prepare(&download.item, Quality::Original, self.player_handlers());
+        if self.inner.nav.visible_page().as_ref() != Some(page.page()) {
+            self.push(page.page());
+        }
+        let (previous, next) = crate::downloads::neighbours(download);
+        let item = &download.item;
+        let media = crate::playback::LocalMedia {
+            target: download.file.to_string_lossy().into_owned(),
+            item: item.clone(),
+            previous: previous.map(|d| d.item),
+            next: next.map(|d| d.item),
+            // The same choices as when streaming it.
+            override_key: item.series_id.clone().unwrap_or_else(|| item.id.clone()),
+            client: Some(self.client()),
+        };
+        let ui = self.clone();
+        glib::spawn_future_local(async move {
+            match PlaybackSession::start_local(ui.inner.player, media, start_ticks).await {
+                Ok(session) => {
+                    ui.inner.playback.replace(Some(session.clone()));
+                    ui.inner.player_page.attach(session, Some(&ui.client()));
+                }
+                Err(e) => {
+                    ui.report_error("Playback failed", &e);
+                    ui.inner.nav.pop();
+                }
+            }
+        });
+    }
+
+    pub fn open_downloads(&self) {
+        self.push(&downloads::page(self));
+    }
+
+    pub fn download(&self, item: &BaseItem) {
+        downloads::start(self, item);
+    }
+
+    pub fn delete_download(&self, item: &BaseItem) {
+        downloads::remove(self, item);
     }
 
     /// Plays a web link (a movie's YouTube trailer) without an Emby session.
@@ -985,6 +1046,35 @@ fn clear(container: &gtk::Box) {
 }
 
 /// "1 h 24 min" / "24 min" from Emby's 100ns ticks.
+/// "1.4 GB", or "350 MB" under a gigabyte.
+pub fn format_size(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 {
+        format!("{:.1} GB", bytes as f64 / 1e9)
+    } else {
+        format!("{:.0} MB", bytes as f64 / 1e6)
+    }
+}
+
+/// "3 Oct 2026" from an Emby date ("2026-10-03T00:00:00.0000000Z").
+pub fn format_date(iso: &str) -> Option<String> {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let date = iso.get(..10)?;
+    let mut parts = date.split('-');
+    let year: i32 = parts.next()?.parse().ok()?;
+    let month: usize = parts.next()?.parse().ok()?;
+    let day: u32 = parts.next()?.parse().ok()?;
+    // Emby's "unknown" placeholder.
+    if year < 1900 {
+        return None;
+    }
+    Some(format!(
+        "{day} {} {year}",
+        MONTHS.get(month.checked_sub(1)?)?
+    ))
+}
+
 fn format_runtime(ticks: i64) -> String {
     let minutes = (ticks / crate::playback::TICKS_PER_SECOND / 60).max(0);
     match (minutes / 60, minutes % 60) {
@@ -1010,6 +1100,16 @@ mod tests {
     use super::*;
 
     const SECOND: i64 = crate::playback::TICKS_PER_SECOND;
+
+    #[test]
+    fn date_formatting() {
+        assert_eq!(
+            format_date("2026-10-03T00:00:00.0000000Z").as_deref(),
+            Some("3 Oct 2026")
+        );
+        assert_eq!(format_date("0001-01-01T00:00:00.0000000Z"), None);
+        assert_eq!(format_date("garbage"), None);
+    }
 
     #[test]
     fn runtime_formatting() {

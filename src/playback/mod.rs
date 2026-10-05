@@ -130,9 +130,25 @@ pub struct TrackEntry {
     pub selected: bool,
 }
 
+/// What [`PlaybackSession::start_local`] plays.
+pub struct LocalMedia {
+    /// A file path or URL.
+    pub target: String,
+    /// Stands in for an Emby item: name, chapters, episode numbers.
+    pub item: BaseItem,
+    pub previous: Option<BaseItem>,
+    pub next: Option<BaseItem>,
+    /// Where per-title choices (SVP, tracks, volume, shaders) are kept.
+    pub override_key: String,
+    /// The server a downloaded title came from: progress and watched state
+    /// still go there (when it's reachable). `None` for plain files.
+    pub client: Option<Arc<EmbyClient>>,
+}
+
 /// One playing item, from load until it's stopped or replaced.
 pub struct PlaybackSession {
-    client: Arc<EmbyClient>,
+    /// `None` for local files and links: nothing is reported anywhere.
+    client: Option<Arc<EmbyClient>>,
     player: Player,
     /// The item with its chapters.
     pub item: BaseItem,
@@ -154,6 +170,8 @@ pub struct PlaybackSession {
     pub hdr: bool,
     /// Shader groups found when playback started (none for music).
     shader_groups: Vec<crate::shaders::Group>,
+    /// The volume this title started at, so only real changes are saved.
+    start_volume: Cell<f64>,
 }
 
 impl PlaybackSession {
@@ -244,7 +262,7 @@ impl PlaybackSession {
             crate::shaders::groups()
         };
         let session = Rc::new(PlaybackSession {
-            client,
+            client: Some(client),
             player,
             markers: Markers::from_chapters(&item.chapters),
             item,
@@ -261,20 +279,10 @@ impl PlaybackSession {
             stopped: Cell::new(false),
             hdr,
             shader_groups,
+            start_volume: Cell::new(player.volume()),
         });
 
-        let settings = Settings::load().unwrap_or_default();
-        // Nothing to interpolate in music.
-        let svp = session.svp_enabled() && !session.item.is_audio();
-        if svp && settings.frame_gen.auto_start_svp() {
-            crate::svp::ensure_running();
-        }
-        player.set_svp(settings.frame_gen.socket(), svp)?;
-        apply_smoothing(player, svp);
-        if let Err(e) = player.apply_video(&settings.video) {
-            tracing::warn!("{e:#}");
-        }
-        session.apply_shaders();
+        session.set_up_player()?;
         let subtitle_urls: Vec<&str> = session
             .external_subtitles
             .iter()
@@ -288,8 +296,66 @@ impl PlaybackSession {
             external_audio.as_deref(),
         )?;
         session.report_playing();
+        session.start_progress_timer();
+        Ok(session)
+    }
 
-        let weak = Rc::downgrade(&session);
+    /// Plays a local file, or a link (a video page through yt-dlp), with
+    /// the same player setup as an Emby title but no server: `media` says
+    /// what it is and where per-title choices are kept.
+    pub async fn start_local(
+        player: Player,
+        media: LocalMedia,
+        start_ticks: i64,
+    ) -> Result<Rc<Self>> {
+        let target = media.target.clone();
+        let options = crate::remote::Options::from_settings(&Settings::load().unwrap_or_default());
+        let stream = spawn_tokio(async move {
+            tokio::task::spawn_blocking(move || crate::remote::resolve(&target, &options)).await?
+        })
+        .await?;
+        let source = MediaSource {
+            id: media.item.id.clone(),
+            ..Default::default()
+        };
+        let session = Rc::new(PlaybackSession {
+            client: media.client,
+            player,
+            markers: Markers::from_chapters(&media.item.chapters),
+            item: media.item,
+            previous: media.previous,
+            next: media.next,
+            quality: Quality::Original,
+            override_key: media.override_key,
+            override_type: ItemType::Series,
+            source,
+            play_session_id: String::new(),
+            external_subtitles: Vec::new(),
+            last_ticks: Cell::new(start_ticks),
+            timer: RefCell::new(None),
+            stopped: Cell::new(false),
+            hdr: false,
+            shader_groups: crate::shaders::groups(),
+            start_volume: Cell::new(player.volume()),
+        });
+        session.set_up_player()?;
+        let subtitles: Vec<&str> = stream.subtitle.as_deref().into_iter().collect();
+        player.load_at(
+            &stream.url,
+            start_ticks as f64 / TICKS_PER_SECOND as f64,
+            &subtitles,
+            stream.audio.as_deref(),
+        )?;
+        if session.client.is_some() {
+            session.report_playing();
+            session.start_progress_timer();
+        }
+        Ok(session)
+    }
+
+    /// Reports the position to Emby every so often while playing.
+    fn start_progress_timer(self: &Rc<Self>) {
+        let weak = Rc::downgrade(self);
         let timer = glib::timeout_add_local(PROGRESS_INTERVAL, move || match weak.upgrade() {
             Some(session) => {
                 session.report_progress(Some("TimeUpdate"));
@@ -297,8 +363,41 @@ impl PlaybackSession {
             }
             None => glib::ControlFlow::Break,
         });
-        session.timer.replace(Some(timer));
-        Ok(session)
+        self.timer.replace(Some(timer));
+    }
+
+    /// SVP, smoothing, picture quality, volume and shaders for this title,
+    /// before its file loads.
+    fn set_up_player(&self) -> Result<()> {
+        let (player, settings) = (self.player, Settings::load().unwrap_or_default());
+        // Nothing to interpolate in music.
+        let svp = self.svp_enabled() && !self.item.is_audio();
+        if svp && settings.frame_gen.auto_start_svp() {
+            crate::svp::ensure_running();
+        }
+        player.set_svp(settings.frame_gen.socket(), svp)?;
+        apply_smoothing(player, svp);
+        if let Err(e) = player.apply_video(&settings.video) {
+            tracing::warn!("{e:#}");
+        }
+        // Each title keeps its own volume (music keeps the player's).
+        if !self.item.is_audio() {
+            let volume = self
+                .remembered()
+                .and_then(|o| o.volume)
+                .unwrap_or(settings.playback.default_volume);
+            if let Err(e) = player.set_volume(volume) {
+                tracing::warn!("{e:#}");
+            }
+            self.start_volume.set(volume);
+        }
+        self.apply_shaders();
+        Ok(())
+    }
+
+    /// Whether this plays from an Emby server (else a local file or link).
+    pub fn is_from_server(&self) -> bool {
+        self.client.is_some()
     }
 
     /// Picks the starting audio/subtitle tracks once mpv has loaded the
@@ -483,6 +582,17 @@ impl PlaybackSession {
             .collect()
     }
 
+    /// Remembers the current volume for this title, once it differs from
+    /// what the title started at.
+    pub fn remember_volume(&self) {
+        let volume = self.player.volume().round();
+        if self.item.is_audio() || (volume - self.start_volume.get()).abs() < 0.5 {
+            return;
+        }
+        self.start_volume.set(volume);
+        self.remember(|o| o.volume = Some(volume));
+    }
+
     /// Picks `preset` ("" for off) for `group`, for this title from now on.
     pub fn set_shader(&self, group: &str, preset: &str) {
         let mut choices = self.shader_choices();
@@ -528,6 +638,7 @@ impl PlaybackSession {
             aspect_mode: None,
             zoom: None,
             shaders: None,
+            volume: None,
         });
         change(&mut entry);
         if let Err(e) = Db::open_default().and_then(|db| db.upsert_override(&entry)) {
@@ -548,8 +659,10 @@ impl PlaybackSession {
         if self.stopped.get() {
             return;
         }
+        let Some(client) = self.client.clone() else {
+            return;
+        };
         let request = self.progress_request(event);
-        let client = self.client.clone();
         spawn_detached(async move {
             if let Err(e) = client.report_progress(&request).await {
                 tracing::warn!("progress report failed: {e:#}");
@@ -558,8 +671,10 @@ impl PlaybackSession {
     }
 
     fn report_playing(&self) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
         let request = self.progress_request(None);
-        let client = self.client.clone();
         spawn_detached(async move {
             if let Err(e) = client.report_playing(&request).await {
                 tracing::warn!("playing report failed: {e:#}");
@@ -630,7 +745,7 @@ impl PlaybackSession {
             play_session_id: self.play_session_id.clone(),
             position_ticks,
         };
-        let client = self.client.clone();
+        let client = self.client.clone()?;
         Some(async move {
             if let Err(e) = client.report_stopped(&request).await {
                 tracing::warn!("stopped report failed: {e:#}");

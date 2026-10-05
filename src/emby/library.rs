@@ -9,7 +9,7 @@ impl EmbyClient {
     pub async fn series_episodes(&self, series_id: &str, user_id: &str) -> Result<Vec<BaseItem>> {
         let result: QueryResult<BaseItem> = self
             .get(&format!(
-                "/emby/Shows/{series_id}/Episodes?UserId={user_id}&SortBy=ParentIndexNumber,IndexNumber&SortOrder=Ascending&Fields=Overview"
+                "/emby/Shows/{series_id}/Episodes?UserId={user_id}&SortBy=ParentIndexNumber,IndexNumber&SortOrder=Ascending&Fields=Overview,PremiereDate,DateCreated"
             ))
             .await?;
         Ok(result.items)

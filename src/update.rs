@@ -153,6 +153,16 @@ impl Progress {
             .map(|total| (self.received() as f64 / total as f64).clamp(0.0, 1.0))
     }
 
+    /// A new transfer of `total` bytes (0 when unknown) begins.
+    pub fn start(&self, total: u64) {
+        self.total.store(total, Ordering::Relaxed);
+        self.received.store(0, Ordering::Relaxed);
+    }
+
+    pub fn add(&self, bytes: u64) {
+        self.received.fetch_add(bytes, Ordering::Relaxed);
+    }
+
     /// "34 % · 35.0 / 101.2 MB", or "35.0 MB" when the size is unknown.
     pub fn describe(&self) -> String {
         let mb = |bytes: u64| bytes as f64 / 1_000_000.0;

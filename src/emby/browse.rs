@@ -4,8 +4,7 @@ use super::EmbyClient;
 use super::models::{BaseItem, QueryResult, Recommendation};
 
 /// Extra fields every browse request asks for, on top of Emby's defaults.
-pub(super) const FIELDS: &str =
-    "Overview,ProductionYear,OfficialRating,CommunityRating,PrimaryImageAspectRatio,Genres";
+pub(super) const FIELDS: &str = "Overview,ProductionYear,PremiereDate,DateCreated,OfficialRating,CommunityRating,PrimaryImageAspectRatio,Genres";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageKind {
@@ -52,13 +51,19 @@ pub struct ItemQuery {
     /// Only items that have these images, e.g. "Primary".
     pub image_types: Option<&'static str>,
     pub artist_id: Option<String>,
+    /// More `Fields` on top of [`FIELDS`].
+    pub extra_fields: Option<&'static str>,
     pub start: usize,
     pub limit: usize,
 }
 
 impl ItemQuery {
     fn to_query_string(&self) -> String {
-        let mut params = vec![("Fields", FIELDS.to_string())];
+        let fields = match self.extra_fields {
+            Some(extra) => format!("{FIELDS},{extra}"),
+            None => FIELDS.to_string(),
+        };
+        let mut params = vec![("Fields", fields)];
         let sort_by = match (self.sort_by, &self.search_term) {
             (Some(sort_by), _) => Some(sort_by),
             (None, Some(_)) => None,
@@ -221,6 +226,28 @@ impl EmbyClient {
             query.to_query_string()
         ))
         .await
+    }
+
+    /// What was played, newest first: watched and partly watched movies and
+    /// episodes (Emby can't ask for both at once), up to `limit`.
+    pub async fn history(&self, user_id: &str, limit: usize) -> Result<Vec<BaseItem>> {
+        let mut played = Vec::new();
+        for filter in ["IsPlayed", "IsResumable"] {
+            let query = ItemQuery {
+                include_types: Some("Movie,Episode"),
+                recursive: true,
+                sort_by: Some("DatePlayed"),
+                descending: true,
+                filters: vec![filter],
+                // Not in Emby's documented list, but what its own client
+                // asks for to get `UserData.LastPlayedDate`.
+                extra_fields: Some("UserDataLastPlayedDate"),
+                limit,
+                ..Default::default()
+            };
+            played.extend(self.items(user_id, &query).await?.items);
+        }
+        Ok(newest_played(played, limit))
     }
 
     pub async fn seasons(&self, series_id: &str, user_id: &str) -> Result<Vec<BaseItem>> {
@@ -526,6 +553,22 @@ pub(super) fn encode(value: &str) -> String {
     out
 }
 
+/// `items` by last played date, newest first, each once, at most `limit`.
+fn newest_played(mut items: Vec<BaseItem>, limit: usize) -> Vec<BaseItem> {
+    let played_at = |item: &BaseItem| {
+        item.user_data
+            .as_ref()
+            .and_then(|data| data.last_played_date.clone())
+            .unwrap_or_default()
+    };
+    // ISO 8601 dates in UTC sort as text.
+    items.sort_by_key(|item| std::cmp::Reverse(played_at(item)));
+    let mut seen = std::collections::HashSet::new();
+    items.retain(|item| seen.insert(item.id.clone()) && !played_at(item).is_empty());
+    items.truncate(limit);
+    items
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -662,5 +705,29 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(movie.episode_label(), "Heat");
+    }
+
+    #[test]
+    fn history_merges_newest_first_without_duplicates() {
+        let item = |id: &str, played: Option<&str>| BaseItem {
+            id: id.into(),
+            user_data: Some(crate::emby::models::UserItemData {
+                last_played_date: played.map(Into::into),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let merged = super::newest_played(
+            vec![
+                item("a", Some("2026-10-01T10:00:00Z")),
+                item("b", Some("2026-10-03T09:00:00Z")),
+                item("a", Some("2026-10-01T10:00:00Z")),
+                item("never", None),
+                item("c", Some("2026-10-02T09:00:00Z")),
+            ],
+            10,
+        );
+        let ids: Vec<&str> = merged.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, ["b", "c", "a"]);
     }
 }

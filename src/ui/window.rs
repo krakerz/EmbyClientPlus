@@ -579,7 +579,7 @@ pub fn apply_theme(theme: crate::config::Theme) {
     adw::StyleManager::default().set_color_scheme(scheme);
 }
 
-fn load_css() {
+pub(super) fn load_css() {
     let provider = gtk::CssProvider::new();
     provider.load_from_string(CSS);
     if let Some(display) = gdk::Display::default() {
