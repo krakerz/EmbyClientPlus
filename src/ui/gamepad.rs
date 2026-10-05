@@ -64,46 +64,9 @@ pub fn handle(window: &adw::ApplicationWindow, ui: Option<&Ui>, pad: Pad, repeat
     if let Some(ui) = ui
         && ui.player_visible()
         && window.visible_dialog().is_none()
+        && player_press(window, ui.player_page(), pad, repeat)
     {
-        let page = ui.player_page();
-        // Start: the OSD's buttons, driven like a page (directions move, A
-        // presses or opens, B or Start leave). Menus opened there work as
-        // below.
-        if page.controls_mode() && !page.menu_open() {
-            match controller::action_for(pad, Context::Browse) {
-                Some(Action::Back | Action::Preferences) => page.leave_controls_mode(),
-                Some(Action::Up) => move_focus(window, gtk::DirectionType::Up),
-                Some(Action::Down) => move_focus(window, gtk::DirectionType::Down),
-                Some(Action::Left) => horizontal_in(window, false),
-                Some(Action::Right) => horizontal_in(window, true),
-                Some(Action::Activate) => activate_focus(window),
-                _ => {}
-            }
-            return;
-        }
-        if !page.menu_open() {
-            if let Some(action) = controller::action_for(pad, Context::Player) {
-                ui.player_page().controller_action(action, repeat);
-            }
-            return;
-        }
-        // A player menu is open: the controller stays in the player. It moves
-        // through the menu, picks or closes it; any other button (like the
-        // one that opened it) just closes it, and never leaves the player.
-        match controller::action_for(pad, Context::Browse) {
-            Some(
-                Action::Up
-                | Action::Down
-                | Action::Left
-                | Action::Right
-                | Action::Activate
-                | Action::Back,
-            ) => {}
-            _ => {
-                close_popover(window);
-                return;
-            }
-        }
+        return;
     }
     let Some(action) = controller::action_for(pad, Context::Browse) else {
         return;
@@ -171,6 +134,54 @@ pub fn handle(window: &adw::ApplicationWindow, ui: Option<&Ui>, pad: Pad, repeat
             }
         }
         _ => {}
+    }
+}
+
+/// A press while `page` (the player) is on screen. False when it's for
+/// moving through an open menu, which the caller does as while browsing.
+pub fn player_press(
+    window: &adw::ApplicationWindow,
+    page: &super::player_page::PlayerPage,
+    pad: Pad,
+    repeat: bool,
+) -> bool {
+    // Start: the OSD's buttons, driven like a page (directions move, A
+    // presses or opens, B or Start leave). Menus opened there work as
+    // below.
+    if page.controls_mode() && !page.menu_open() {
+        match controller::action_for(pad, Context::Browse) {
+            Some(Action::Back | Action::Preferences) => page.leave_controls_mode(),
+            Some(Action::Up) => move_focus(window, gtk::DirectionType::Up),
+            Some(Action::Down) => move_focus(window, gtk::DirectionType::Down),
+            Some(Action::Left) => horizontal_in(window, false),
+            Some(Action::Right) => horizontal_in(window, true),
+            Some(Action::Activate) => activate_focus(window),
+            _ => {}
+        }
+        return true;
+    }
+    if !page.menu_open() {
+        if let Some(action) = controller::action_for(pad, Context::Player) {
+            page.controller_action(action, repeat);
+        }
+        return true;
+    }
+    // A player menu is open: the controller stays in the player. It moves
+    // through the menu, picks or closes it; any other button (like the
+    // one that opened it) just closes it, and never leaves the player.
+    match controller::action_for(pad, Context::Browse) {
+        Some(
+            Action::Up
+            | Action::Down
+            | Action::Left
+            | Action::Right
+            | Action::Activate
+            | Action::Back,
+        ) => false,
+        _ => {
+            close_popover(window);
+            true
+        }
     }
 }
 
@@ -552,6 +563,12 @@ fn describe(widget: Option<&gtk::Widget>) -> String {
     let row = widget
         .downcast_ref::<gtk::ListBoxRow>()
         .map(|row| format!(" #{}", row.index()))
+        .or_else(|| {
+            widget
+                .downcast_ref::<gtk::Button>()
+                .and_then(|b| b.label())
+                .map(|label| format!(" '{label}'"))
+        })
         .unwrap_or_default();
     let mut chain = vec![format!(
         "{}{row}{}",

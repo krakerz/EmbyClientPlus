@@ -34,6 +34,16 @@ const LANGUAGES: [(&str, &str); 16] = [
 ];
 
 pub fn show(parent: &impl IsA<gtk::Widget>) {
+    show_with(parent, true);
+}
+
+/// For the standalone player: no server, so none of its settings.
+pub fn show_player_only(parent: &impl IsA<gtk::Widget>) {
+    show_with(parent, false);
+}
+
+/// `server`: settings for an Emby server (streaming quality, Home) apply.
+fn show_with(parent: &impl IsA<gtk::Widget>, server: bool) {
     let settings = Settings::load().unwrap_or_default();
     // A plain dialog rather than AdwPreferencesDialog, whose header has no
     // room for the Quit button.
@@ -103,7 +113,9 @@ pub fn show(parent: &impl IsA<gtk::Widget>) {
             save(|s| s.playback.set_bitrate_cap_kbps(kbps));
         }
     });
-    playback.add(&quality);
+    if server {
+        playback.add(&quality);
+    }
     let mpv_conf = adw::SwitchRow::builder()
         .title("Use my mpv.conf")
         .subtitle("Loads ~/.config/mpv/mpv.conf (shaders, scalers, …) on the next start; the app's socket, output and decoding options still win")
@@ -153,7 +165,29 @@ pub fn show(parent: &impl IsA<gtk::Widget>) {
         save(|s| s.playback.keep_screen_on = on);
     });
     playback.add(&keep_screen_on);
+    let hide_paused = adw::SwitchRow::builder()
+        .title("Hide player controls when paused")
+        .subtitle("Otherwise they stay on screen while paused")
+        .active(settings.playback.hide_osd_when_paused)
+        .build();
+    hide_paused.connect_active_notify(|row| {
+        let on = row.is_active();
+        save(|s| s.playback.hide_osd_when_paused = on);
+    });
+    playback.add(&hide_paused);
+    let volume = adw::SpinRow::with_range(0.0, 130.0, 5.0);
+    volume.set_title("Default volume");
+    volume.set_subtitle(
+        "For titles without their own; each title remembers its own, up to 130% (boost)",
+    );
+    volume.set_value(settings.playback.default_volume);
+    volume.connect_value_notify(|row| {
+        let value = row.value();
+        save(|s| s.playback.default_volume = value);
+    });
+    playback.add(&volume);
     page.add(&playback);
+    page.add(&downloads_group(parent.upcast_ref()));
 
     // Display.
     let display = adw::PreferencesGroup::builder()
@@ -243,7 +277,9 @@ pub fn show(parent: &impl IsA<gtk::Widget>) {
         save(|s| s.home.episode_art = art);
     });
     home.add(&art);
-    page.add(&home);
+    if server {
+        page.add(&home);
+    }
 
     // Languages.
     let languages = adw::PreferencesGroup::builder()
@@ -351,6 +387,12 @@ pub fn show(parent: &impl IsA<gtk::Widget>) {
         "Controller",
         crate::ui::icons::CONTROLLER,
     );
+    stack.add_titled_with_icon(
+        &keyboard_page(),
+        Some("keyboard"),
+        "Keyboard",
+        crate::ui::icons::KEYBOARD,
+    );
     let header = adw::HeaderBar::builder()
         .title_widget(
             &adw::ViewSwitcher::builder()
@@ -380,11 +422,69 @@ pub fn show(parent: &impl IsA<gtk::Widget>) {
     toasts.set_child(Some(&toolbar));
     let dialog = adw::Dialog::builder()
         .title("Preferences")
-        .content_width(680)
+        .content_width(780)
         .content_height(820)
         .child(&toasts)
         .build();
     dialog.present(Some(parent));
+}
+
+/// Where downloads are saved: typed (works in Game Mode, where file
+/// choosers don't show) or picked with Choose… on the desktop.
+fn downloads_group(parent: &gtk::Widget) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder()
+        .title("Downloads")
+        .description(
+            "Titles downloaded for offline playback (Download in a movie's or episode's menu)",
+        )
+        .build();
+    let folder = adw::EntryRow::builder()
+        .title("Download folder")
+        .text(crate::downloads::folder().to_string_lossy())
+        .show_apply_button(true)
+        .build();
+    folder.connect_apply(|row| {
+        let text = row.text().trim().to_string();
+        save(|s| s.downloads.folder = (!text.is_empty()).then_some(text));
+        row.set_text(&crate::downloads::folder().to_string_lossy());
+    });
+    if !crate::gamescope::detected() {
+        let choose = gtk::Button::builder()
+            .label("Choose…")
+            .valign(gtk::Align::Center)
+            .build();
+        let window = parent.root().and_downcast::<gtk::Window>();
+        choose.connect_clicked(glib::clone!(
+            #[weak]
+            folder,
+            move |_| {
+                let dialog = gtk::FileDialog::builder()
+                    .title("Choose the download folder")
+                    .modal(true)
+                    .build();
+                dialog.set_initial_folder(Some(&gio::File::for_path(crate::downloads::folder())));
+                dialog.select_folder(
+                    window.as_ref(),
+                    None::<&gio::Cancellable>,
+                    glib::clone!(
+                        #[weak]
+                        folder,
+                        move |result| {
+                            let Some(path) = result.ok().and_then(|f| f.path()) else {
+                                return; // cancelled
+                            };
+                            let value = path.to_string_lossy().into_owned();
+                            folder.set_text(&value);
+                            save(|s| s.downloads.folder = Some(value));
+                        }
+                    ),
+                );
+            }
+        ));
+        folder.add_suffix(&choose);
+    }
+    group.add(&folder);
+    group
 }
 
 /// mpv scalers offered for the Custom quality: (mpv name, label).
@@ -733,6 +833,121 @@ fn capture_binding(action: Action, row: &adw::ActionRow) {
             }
         }
     });
+}
+
+/// Player keyboard shortcuts, one row per action.
+fn keyboard_page() -> adw::PreferencesPage {
+    use crate::keys::KeyAction;
+    let page = adw::PreferencesPage::builder()
+        .title("Keyboard")
+        .icon_name(crate::ui::icons::KEYBOARD)
+        .build();
+    let group = adw::PreferencesGroup::builder()
+        .title("In the Player")
+        .description(
+            "Change a shortcut, then press the new key. A key moves off any other action using it.",
+        )
+        .build();
+    let reset = gtk::Button::builder()
+        .label("Reset to Defaults")
+        .valign(gtk::Align::Center)
+        .build();
+    group.set_header_suffix(Some(&reset));
+    let mut rows: Vec<(KeyAction, adw::ActionRow)> = Vec::new();
+    let mut buttons = Vec::new();
+    for action in KeyAction::ALL {
+        let row = adw::ActionRow::builder().title(action.label()).build();
+        let change = gtk::Button::builder()
+            .label("Change")
+            .valign(gtk::Align::Center)
+            .build();
+        row.add_suffix(&change);
+        group.add(&row);
+        rows.push((action, row));
+        buttons.push((action, change));
+    }
+    page.add(&group);
+    let rows = std::rc::Rc::new(rows);
+    refresh_keys(&rows);
+    for (action, change) in buttons {
+        let rows = std::rc::Rc::downgrade(&rows);
+        change.connect_clicked(move |button| {
+            if let Some(rows) = rows.upgrade() {
+                capture_key(action, button, &rows);
+            }
+        });
+    }
+    reset.connect_clicked({
+        let rows = rows.clone();
+        move |_| {
+            crate::keys::set_bindings(crate::keys::KeyBindings::default());
+            refresh_keys(&rows);
+        }
+    });
+    page
+}
+
+fn refresh_keys(rows: &[(crate::keys::KeyAction, adw::ActionRow)]) {
+    let bindings = crate::keys::bindings();
+    for (action, row) in rows {
+        let keys = bindings.keys(*action);
+        let text = if keys.is_empty() {
+            "Not set".to_string()
+        } else {
+            keys.iter()
+                .map(|k| crate::keys::key_label(k))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        row.set_subtitle(&glib::markup_escape_text(&text));
+    }
+}
+
+/// "Press a key…": the next key pressed becomes `action`'s shortcut.
+fn capture_key(
+    action: crate::keys::KeyAction,
+    button: &gtk::Button,
+    rows: &std::rc::Rc<Vec<(crate::keys::KeyAction, adw::ActionRow)>>,
+) {
+    // On the dialog: it's always on the way to the focused Change button.
+    let Some(host) = button.ancestor(adw::Dialog::static_type()) else {
+        return;
+    };
+    if let Some((_, row)) = rows.iter().find(|(a, _)| *a == action) {
+        row.set_subtitle("Press a key…");
+    }
+    let keys = gtk::EventControllerKey::new();
+    // Ahead of everything, so Escape or Space become shortcuts instead of
+    // closing the dialog or pressing the button.
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let done = std::rc::Rc::new(std::cell::Cell::new(false));
+    let finish = {
+        let (host, keys, done, rows) = (host.downgrade(), keys.clone(), done.clone(), rows.clone());
+        move || {
+            if done.replace(true) {
+                return;
+            }
+            if let Some(host) = host.upgrade() {
+                host.remove_controller(&keys);
+            }
+            refresh_keys(&rows);
+        }
+    };
+    keys.connect_key_pressed({
+        let finish = finish.clone();
+        move |_, key, _, _| {
+            if let Some(name) = crate::keys::key_name(key) {
+                let mut bindings = crate::keys::bindings();
+                bindings.set(action, &name);
+                crate::keys::set_bindings(bindings);
+            }
+            // Removed after this handler returns, not from inside it.
+            glib::idle_add_local_once(finish.clone());
+            glib::Propagation::Stop
+        }
+    });
+    host.add_controller(keys);
+    glib::timeout_add_local_once(CAPTURE_TIMEOUT, finish);
 }
 
 /// "SVP folder" with Choose… and Reset. Only detection uses it: the

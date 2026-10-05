@@ -67,6 +67,8 @@ pub struct TitleOverride {
     pub zoom: Option<f64>,
     /// Shader preset per group (see `shaders::encode_choices`).
     pub shaders: Option<String>,
+    /// mpv volume (0–130, above 100 boosts), if changed for this title.
+    pub volume: Option<f64>,
 }
 
 /// How a library grid was last sorted and filtered (Emby `SortBy` and
@@ -132,6 +134,7 @@ impl Db {
             ("aspect_mode", "TEXT"),
             ("zoom", "REAL"),
             ("shaders", "TEXT"),
+            ("volume", "REAL"),
         ] {
             let exists = conn
                 .prepare("SELECT 1 FROM pragma_table_info('title_overrides') WHERE name = ?1")?
@@ -150,7 +153,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT emby_item_id, item_type, audio_language, subtitle_language,
                     subtitle_forced_only, frame_gen_backend, frame_gen_multiplier,
-                    aspect_mode, zoom, shaders
+                    aspect_mode, zoom, shaders, volume
              FROM title_overrides WHERE emby_item_id = ?1",
         )?;
         let mut rows = stmt.query([emby_item_id])?;
@@ -175,6 +178,7 @@ impl Db {
             aspect_mode: row.get(7)?,
             zoom: row.get(8)?,
             shaders: row.get(9)?,
+            volume: row.get(10)?,
         }))
     }
 
@@ -183,8 +187,8 @@ impl Db {
             "INSERT INTO title_overrides
                 (emby_item_id, item_type, audio_language, subtitle_language,
                  subtitle_forced_only, frame_gen_backend, frame_gen_multiplier,
-                 aspect_mode, zoom, shaders)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 aspect_mode, zoom, shaders, volume)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(emby_item_id) DO UPDATE SET
                 item_type = excluded.item_type,
                 audio_language = excluded.audio_language,
@@ -194,7 +198,8 @@ impl Db {
                 frame_gen_multiplier = excluded.frame_gen_multiplier,
                 aspect_mode = excluded.aspect_mode,
                 zoom = excluded.zoom,
-                shaders = excluded.shaders",
+                shaders = excluded.shaders,
+                volume = excluded.volume",
             rusqlite::params![
                 entry.emby_item_id,
                 entry.item_type.as_str(),
@@ -206,6 +211,7 @@ impl Db {
                 entry.aspect_mode,
                 entry.zoom,
                 entry.shaders,
+                entry.volume,
             ],
         )?;
         Ok(())
@@ -282,6 +288,7 @@ mod tests {
             aspect_mode: None,
             zoom: None,
             shaders: None,
+            volume: None,
         };
 
         db.upsert_override(&entry).unwrap();
@@ -309,6 +316,7 @@ mod tests {
             aspect_mode: None,
             zoom: None,
             shaders: None,
+            volume: None,
         };
         db.upsert_override(&entry).unwrap();
 
@@ -349,6 +357,7 @@ mod tests {
             aspect_mode: None,
             zoom: None,
             shaders: None,
+            volume: None,
         };
         db.upsert_override(&entry).unwrap();
         db.delete_override("movie-2").unwrap();
@@ -373,6 +382,7 @@ mod tests {
                 aspect_mode: None,
                 zoom: None,
                 shaders: None,
+                volume: None,
             })
             .unwrap();
         }

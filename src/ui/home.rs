@@ -65,6 +65,8 @@ pub fn page(ui: &Ui) -> adw::NavigationPage {
     });
     let menu = gio::Menu::new();
     menu.append(Some("Refresh"), Some("home.refresh"));
+    menu.append(Some("History"), Some("home.history"));
+    menu.append(Some("Downloads"), Some("home.downloads"));
     menu.append(Some("Preferences"), Some("home.preferences"));
     menu.append(Some("Log Out"), Some("home.logout"));
     header.pack_end(
@@ -149,6 +151,26 @@ pub fn page(ui: &Ui) -> adw::NavigationPage {
         move |_, _| super::preferences::show(&content)
     ));
     actions.add_action(&preferences);
+    let history = gio::SimpleAction::new("history", None);
+    history.connect_activate({
+        let weak = ui.downgrade();
+        move |_, _| {
+            if let Some(ui) = weak.upgrade() {
+                ui.open_history();
+            }
+        }
+    });
+    actions.add_action(&history);
+    let downloads = gio::SimpleAction::new("downloads", None);
+    downloads.connect_activate({
+        let weak = ui.downgrade();
+        move |_, _| {
+            if let Some(ui) = weak.upgrade() {
+                ui.open_downloads();
+            }
+        }
+    });
+    actions.add_action(&downloads);
     actions.add_action(&logout);
     page.insert_action_group("home", Some(&actions));
 
@@ -224,10 +246,59 @@ fn load(ui: &Ui, content: &gtk::Box) {
             Ok(data) => show(&ui, &content, data),
             Err(e) => {
                 clear(&content);
-                ui.report_error("Could not load home", &e);
+                tracing::warn!("Could not load home: {e:#}");
+                content.append(&unreachable(&ui, &content));
             }
         }
     });
+}
+
+/// Home when the server can't be reached: try again, or watch downloads.
+fn unreachable(ui: &Ui, content: &gtk::Box) -> adw::StatusPage {
+    let buttons = gtk::Box::builder()
+        .spacing(12)
+        .halign(gtk::Align::Center)
+        .build();
+    let retry = gtk::Button::builder()
+        .label("Try Again")
+        .css_classes(["pill"])
+        .build();
+    retry.connect_clicked({
+        let (weak, content) = (ui.downgrade(), content.downgrade());
+        move |_| {
+            if let (Some(ui), Some(content)) = (weak.upgrade(), content.upgrade()) {
+                clear(&content);
+                content.append(&loading());
+                load(&ui, &content);
+            }
+        }
+    });
+    buttons.append(&retry);
+    let downloaded = crate::downloads::list().len();
+    if downloaded > 0 {
+        let open = gtk::Button::builder()
+            .label(format!("Downloads ({downloaded})"))
+            .css_classes(["pill", "suggested-action"])
+            .build();
+        let weak = ui.downgrade();
+        open.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.open_downloads();
+            }
+        });
+        buttons.append(&open);
+    }
+    adw::StatusPage::builder()
+        .icon_name(crate::ui::icons::DOWNLOAD)
+        .title("Can't reach your Emby server")
+        .description(if downloaded > 0 {
+            "Your downloads still play offline"
+        } else {
+            "Check that the server is on and reachable, then try again"
+        })
+        .child(&buttons)
+        .vexpand(true)
+        .build()
 }
 
 fn show(ui: &Ui, content: &gtk::Box, data: HomeData) {

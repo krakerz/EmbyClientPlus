@@ -88,7 +88,6 @@ impl EmbyClient {
             .with_context(|| format!("GET {path} returned an unparsable body"))
     }
 
-    #[allow(dead_code)] // Phase 2: own subtitle layer (TODO.md)
     async fn get_text(&self, path: &str) -> Result<String> {
         let response = self
             .http
@@ -185,6 +184,50 @@ impl EmbyClient {
             "{}/emby/Videos/{item_id}/stream?static=true&mediaSourceId={media_source_id}&api_key={token}",
             self.base_url
         ))
+    }
+
+    /// An item as Emby sends it (kept beside a download as its metadata).
+    pub async fn item_json(&self, user_id: &str, item_id: &str) -> Result<String> {
+        self.get_text(&format!(
+            "/emby/Users/{user_id}/Items/{item_id}?Fields=Chapters,Overview,PremiereDate,DateCreated,MediaSources,ProductionYear,Genres"
+        ))
+        .await
+    }
+
+    /// Streams `url` into `file`, counting bytes into `progress`; stops
+    /// early (with an error) once `cancelled` turns true.
+    pub async fn download_to(
+        &self,
+        url: &str,
+        file: &std::path::Path,
+        progress: &crate::update::Progress,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<()> {
+        use std::io::Write;
+        let mut response = self
+            .http
+            .get(url)
+            .headers(self.headers()?)
+            .send()
+            .await
+            .context("download failed")?
+            .error_for_status()
+            .context("download failed")?;
+        progress.start(response.content_length().unwrap_or(0));
+        let mut out = std::io::BufWriter::new(
+            std::fs::File::create(file)
+                .with_context(|| format!("couldn't write {}", file.display()))?,
+        );
+        while let Some(chunk) = response.chunk().await.context("download interrupted")? {
+            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                anyhow::bail!("download cancelled");
+            }
+            out.write_all(&chunk)
+                .with_context(|| format!("couldn't write {}", file.display()))?;
+            progress.add(chunk.len() as u64);
+        }
+        out.flush()
+            .with_context(|| format!("couldn't write {}", file.display()))
     }
 
     /// A subtitle stream as a standalone file mpv can load with `sub-add`;

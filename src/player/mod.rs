@@ -595,7 +595,8 @@ impl Player {
         let dither = match video.quality {
             VideoQuality::Auto => initial("dither"),
             VideoQuality::Fast => "no".into(),
-            _ => "auto".into(),
+            // mpv's own default.
+            _ => "fruit".into(),
         };
         let hwdec = if video.software_decoding {
             "no".into()
@@ -617,13 +618,17 @@ impl Player {
             ),
             ("hwdec", hwdec),
         ];
+        // One bad value mustn't keep the rest from applying.
+        let mut failed = None;
         for (name, value) in values {
             // An empty value is a valid default for some (cscale): set it too.
-            if self.mpv.get_property::<String>(name).ok().as_deref() != Some(value.as_str()) {
-                self.set(name, value.as_str())?;
+            if self.mpv.get_property::<String>(name).ok().as_deref() != Some(value.as_str())
+                && let Err(e) = self.set(name, value.as_str())
+            {
+                failed.get_or_insert(e);
             }
         }
-        Ok(())
+        failed.map_or(Ok(()), Err)
     }
 
     /// Puts `files` in mpv's shader list in place of the ones this app set

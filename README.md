@@ -19,6 +19,7 @@ VapourSynth, so SVP 4 attaches just as it does to a standalone mpv.
 - Favorites split by kind (Movies, Shows, Episodes, Albums, Songs, Artists).
 - Genre and tag tiles with random cover cycling on hover/focus.
 - Music libraries: Albums, Artists, Songs, Latest, Favorites, Folders tabs; album pages list tracks with disc/track numbers.
+- History page with everything you played, newest first, grouped by day.
 
 **Playback:**
 - Direct play or Emby transcode: Original, or a bitrate cap from 40 Mbps down to 420 kbps.
@@ -36,6 +37,13 @@ VapourSynth, so SVP 4 attaches just as it does to a standalone mpv.
 - Per-title SVP toggle with global default; smooth motion without SVP (mpv frame blending).
 - Picture quality presets (Auto, Fast, Balanced, High quality, Custom scalers and debanding), deinterlacing, optional software decoding.
 - Shaders: built-in AMD FSR and Anime4K, plus your own; pick per title from the player, stack groups together.
+- Each title remembers its own volume (boost up to 130%); option to hide the controls while paused.
+- Episode air date and date added on episode rows and details.
+
+**Downloads & offline:**
+- Download movies and episodes (original quality) to a folder you choose; a Downloads page shows progress and lets you delete them.
+- Downloads play offline in the full player (SVP, shaders), the next downloaded episode autoplays, and progress syncs back to Emby when the server is reachable.
+- If the server is unreachable, Home offers your downloads.
 
 **Music:**
 - Compact floating mini player at the bottom right; full-height music panel opens upward with Now Playing and queue.
@@ -76,6 +84,8 @@ VapourSynth, so SVP 4 attaches just as it does to a standalone mpv.
 - Self-updates from GitHub releases (Preferences → Updates).
 - Quit button in Preferences header (handy in Steam Game Mode).
 - Keeps the screen on while a video plays (not for music or paused videos); can be turned off in Preferences.
+- Standalone player (`--player [file|url]`) for local files and links, with SVP, shaders and picture options; drop files or links onto it, or pick from your downloads folder; plays the next video in the folder.
+- Remappable keyboard shortcuts in Preferences → Keyboard.
 
 ## Installation
 
@@ -106,6 +116,10 @@ EMBYCLIENTPLUS_PORTABLE=1 cargo build --release && packaging/package.sh   # rele
 
 Settings are in Home's menu → **Preferences**: SVP, quality, languages, display, artwork,
 mpv.conf, controller remapping, updates and logs.
+
+### Downloads
+
+Choose **Download** in a movie's or episode's menu (X on a controller, right-click with a mouse). Files go to `~/Videos/Emby Client+` unless you pick another folder in Preferences → General → Downloads, sorted as `Series/Season 1/S01E04 - Name.mkv`, with Emby's details and artwork beside each file. **Downloads** in Home's menu lists them; play or delete them there. A downloaded title always plays from disk, even when you open it from the library.
 
 ### Video quality and shaders
 
@@ -143,6 +157,8 @@ New folders show up the next time Preferences opens or a video starts.
 | ↑ / ↓ | Volume ±5 | M | Mute |
 | F / F11 | Fullscreen | Esc | Leave fullscreen (then back) |
 | Double-click | Fullscreen | | |
+
+These are the defaults; change them in Preferences → Keyboard.
 
 ### Controller
 
@@ -195,10 +211,12 @@ in Game Mode (Preferences → Display → Fullscreen).
 ### Command Line
 
 ```sh
-embyclientplus                 # Start the app
-embyclientplus <file-or-url>   # Play a file or stream without Emby (for testing player or SVP)
-embyclientplus --help          # List options
-embyclientplus --version       # Print the version
+embyclientplus                       # Start the app
+embyclientplus --player              # Just the player (no Emby): drop files/links in, or pick from your downloads
+embyclientplus --player <file|url>   # The same, playing that file or link; the next video in the folder plays after it
+embyclientplus <file|url>            # The same
+embyclientplus --help                # List options
+embyclientplus --version             # Print the version
 ```
 
 ## FAQ

@@ -124,6 +124,9 @@ impl Card {
             .orientation(gtk::Orientation::Vertical)
             .width_request(super::scaled(width))
             .halign(gtk::Align::Center)
+            // The subtitle expands (status at the line's end); that must not
+            // reach the rows and grids, or cards spread across a short row.
+            .hexpand(false)
             .build();
         root.append(&frame);
         root.append(&title);
@@ -329,6 +332,17 @@ pub fn show_menu(ui: &Ui, widget: &gtk::Widget, item: &BaseItem) {
     }
     let target = item.clone();
     add("Open", Box::new(move |ui| ui.open(&target)));
+    if super::downloads::can_download(item) {
+        let target = item.clone();
+        if crate::downloads::find(&item.id).is_some() {
+            add(
+                "Delete Download",
+                Box::new(move |ui| ui.delete_download(&target)),
+            );
+        } else if !super::downloads::is_running(&item.id) {
+            add("Download", Box::new(move |ui| ui.download(&target)));
+        }
+    }
     if item.item_type != "Person" && !super::playlists::is_music(item) {
         let played = item.played();
         let target = item.clone();

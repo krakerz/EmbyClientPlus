@@ -24,11 +24,22 @@ pub struct Settings {
     #[serde(default)]
     pub controller: ControllerSettings,
     #[serde(default)]
+    pub keyboard: KeyboardSettings,
+    #[serde(default)]
     pub home: HomeSettings,
     #[serde(default)]
     pub window: WindowSettings,
     #[serde(default)]
     pub updates: UpdateSettings,
+    #[serde(default)]
+    pub downloads: DownloadSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DownloadSettings {
+    /// Where downloads go; unset means `~/Videos/Emby Client+`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,6 +250,13 @@ pub struct ControllerSettings {
     pub bindings: std::collections::BTreeMap<String, Vec<String>>,
 }
 
+/// Player keyboard shortcuts changed from their defaults (see `keys`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KeyboardSettings {
+    #[serde(default)]
+    pub bindings: std::collections::BTreeMap<String, Vec<String>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ServerSettings {
     #[serde(default)]
@@ -292,6 +310,17 @@ pub struct PlaybackSettings {
     /// plays (not music, not while paused).
     #[serde(default = "default_true")]
     pub keep_screen_on: bool,
+    /// Let the player's controls hide while paused too (they stay up
+    /// otherwise).
+    #[serde(default)]
+    pub hide_osd_when_paused: bool,
+    /// Volume for titles without their own (0–130; above 100 boosts).
+    #[serde(default = "default_volume")]
+    pub default_volume: f64,
+}
+
+fn default_volume() -> f64 {
+    100.0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -365,6 +394,8 @@ impl Default for PlaybackSettings {
             trailer_quality: TrailerQuality::default(),
             trailer_captions: true,
             keep_screen_on: true,
+            hide_osd_when_paused: false,
+            default_volume: default_volume(),
         }
     }
 }

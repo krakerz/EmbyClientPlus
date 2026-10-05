@@ -5,8 +5,10 @@
 /// What the command line asks for.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
-    /// Start the app; with a target, play that file/URL without Emby.
-    Run {
+    /// Start the Emby app.
+    Run,
+    /// Just the player (no Emby): play `target`, or wait for one.
+    Player {
         target: Option<String>,
     },
     Version,
@@ -19,18 +21,24 @@ pub enum Command {
 pub fn parse(args: impl IntoIterator<Item = String>) -> Command {
     let mut args = args.into_iter();
     match args.next() {
-        None => Command::Run { target: None },
+        None => Command::Run,
         Some(arg) => match arg.as_str() {
             "-v" | "-V" | "--version" => Command::Version,
             "-h" | "--help" => Command::Help,
-            // `--` ends options: a file whose name starts with a dash.
-            "--" => Command::Run {
+            "--player" => Command::Player {
                 target: args.next(),
+            },
+            // `--` ends options: a file whose name starts with a dash.
+            "--" => match args.next() {
+                Some(target) => Command::Player {
+                    target: Some(target),
+                },
+                None => Command::Run,
             },
             option if option.starts_with('-') && option.len() > 1 => {
                 Command::Unknown(option.to_string())
             }
-            _ => Command::Run { target: Some(arg) },
+            _ => Command::Player { target: Some(arg) },
         },
     }
 }
@@ -46,8 +54,13 @@ pub fn help() -> String {
 
 Usage:
   embyclientplus                start the app
-  embyclientplus <file|url>     play a file or URL directly, without Emby
-                                (handy for testing the player or SVP)
+  embyclientplus --player [<file|url>]
+                                just the player, no Emby: plays the file or
+                                URL, or waits for one (drop it in the window,
+                                or pick from your downloads); SVP, shaders and
+                                picture options included, and the next video
+                                in the folder plays after each one
+  embyclientplus <file|url>     the same
   embyclientplus -- <file>      the same, for a file named like an option
 
 Options:
@@ -69,28 +82,35 @@ mod tests {
 
     #[test]
     fn options_and_targets() {
-        assert_eq!(parse_args(&[]), Command::Run { target: None });
+        assert_eq!(parse_args(&[]), Command::Run);
         assert_eq!(parse_args(&["-v"]), Command::Version);
         assert_eq!(parse_args(&["--version"]), Command::Version);
         assert_eq!(parse_args(&["-h"]), Command::Help);
         assert_eq!(parse_args(&["--help"]), Command::Help);
         assert_eq!(
             parse_args(&["movie.mkv"]),
-            Command::Run {
+            Command::Player {
                 target: Some("movie.mkv".into())
             }
         );
         assert_eq!(
             parse_args(&["--", "-odd.mkv"]),
-            Command::Run {
+            Command::Player {
                 target: Some("-odd.mkv".into())
             }
         );
         assert_eq!(parse_args(&["--nope"]), Command::Unknown("--nope".into()));
+        assert_eq!(
+            parse_args(&["--player", "clip.mp4"]),
+            Command::Player {
+                target: Some("clip.mp4".into())
+            }
+        );
+        assert_eq!(parse_args(&["--player"]), Command::Player { target: None });
         // A lone "-" isn't an option (some tools mean stdin by it).
         assert_eq!(
             parse_args(&["-"]),
-            Command::Run {
+            Command::Player {
                 target: Some("-".into())
             }
         );
@@ -99,7 +119,13 @@ mod tests {
     #[test]
     fn help_names_the_options() {
         let help = help();
-        for needle in ["--help", "--version", "<file|url>", crate::APP_NAME] {
+        for needle in [
+            "--help",
+            "--version",
+            "--player",
+            "<file|url>",
+            crate::APP_NAME,
+        ] {
             assert!(help.contains(needle), "{needle}");
         }
     }
