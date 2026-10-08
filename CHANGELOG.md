@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-10-08
+
+### Added
+- Keyboard: Q skips the intro or credits (remappable in Preferences → Keyboard).
+
+### Changed
+- Keyboard: previous/next episode are now , and . by default (were P and N).
+- Quit moved from the Preferences header to Home's menu, under Log Out.
+
 ## [1.5.0] — 2026-10-05
 
 ### Added

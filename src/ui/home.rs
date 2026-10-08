@@ -69,6 +69,8 @@ pub fn page(ui: &Ui) -> adw::NavigationPage {
     menu.append(Some("Downloads"), Some("home.downloads"));
     menu.append(Some("Preferences"), Some("home.preferences"));
     menu.append(Some("Log Out"), Some("home.logout"));
+    // Easier with a controller than Steam's own menu.
+    menu.append(Some("Quit"), Some("home.quit"));
     header.pack_end(
         &gtk::MenuButton::builder()
             .icon_name(crate::ui::icons::MENU)
@@ -172,6 +174,19 @@ pub fn page(ui: &Ui) -> adw::NavigationPage {
     });
     actions.add_action(&downloads);
     actions.add_action(&logout);
+    let quit = gio::SimpleAction::new("quit", None);
+    quit.connect_activate(glib::clone!(
+        #[weak]
+        content,
+        move |_, _| {
+            // Closing the window runs the usual shutdown (playback reported
+            // stopped, the SVP Manager we started stopped).
+            if let Some(window) = content.root().and_downcast::<gtk::Window>() {
+                super::window::shut_down(&window);
+            }
+        }
+    ));
+    actions.add_action(&quit);
     page.insert_action_group("home", Some(&actions));
 
     // Home always reloads when you come back to it.

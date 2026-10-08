@@ -82,7 +82,7 @@ VapourSynth, so SVP 4 attaches just as it does to a standalone mpv.
 - Log files: newest 10 stored at `~/.config/embyclientplus/logs/`.
 - Poster cache (512 MB) for instant loading across launches.
 - Self-updates from GitHub releases (Preferences → Updates).
-- Quit button in Preferences header (handy in Steam Game Mode).
+- Quit in Home's menu, under Log Out (handy in Steam Game Mode).
 - Keeps the screen on while a video plays (not for music or paused videos); can be turned off in Preferences.
 - Standalone player (`--player [file|url]`) for local files and links, with SVP, shaders and picture options; drop files or links onto it, or pick from your downloads folder; plays the next video in the folder.
 - Remappable keyboard shortcuts in Preferences → Keyboard.
@@ -152,11 +152,12 @@ New folders show up the next time Preferences opens or a video starts.
 
 | Key | Action | Key | Action |
 |---|---|---|---|
-| Space / K | Play/pause | N / P | Next/previous episode |
+| Space / K | Play/pause | . / , | Next/previous episode |
 | ← / → | Seek ±10 s | PgDn / PgUp | Next/previous chapter |
 | ↑ / ↓ | Volume ±5 | M | Mute |
 | F / F11 | Fullscreen | Esc | Leave fullscreen (then back) |
 | Double-click | Fullscreen | | |
+| Q | Skip intro/credits | | |
 
 These are the defaults; change them in Preferences → Keyboard.
 

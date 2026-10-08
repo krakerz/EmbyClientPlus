@@ -1704,6 +1704,11 @@ impl Inner {
             KeyAction::PreviousChapter => self.seek_chapter(false),
             KeyAction::Fullscreen => self.toggle_fullscreen(),
             KeyAction::Leave => self.leave(),
+            KeyAction::Skip => {
+                if self.osd.skip.is_visible() {
+                    self.skip();
+                }
+            }
         }
         self.show_osd();
         glib::Propagation::Stop

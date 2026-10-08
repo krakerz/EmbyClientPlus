@@ -46,7 +46,7 @@ pub fn show_player_only(parent: &impl IsA<gtk::Widget>) {
 fn show_with(parent: &impl IsA<gtk::Widget>, server: bool) {
     let settings = Settings::load().unwrap_or_default();
     // A plain dialog rather than AdwPreferencesDialog, whose header has no
-    // room for the Quit button.
+    // room for the Quit button (standalone player).
     let toasts = adw::ToastOverlay::new();
     let page = adw::PreferencesPage::builder()
         .title("General")
@@ -415,7 +415,10 @@ fn show_with(parent: &impl IsA<gtk::Widget>, server: bool) {
             super::window::shut_down(window);
         }
     });
-    header.pack_end(&quit);
+    // The Emby app has Quit in Home's menu; the standalone player has none.
+    if !server {
+        header.pack_end(&quit);
+    }
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
     toolbar.set_content(Some(&stack));
