@@ -21,10 +21,11 @@ pub enum KeyAction {
     NextChapter,
     Fullscreen,
     Leave,
+    Skip,
 }
 
 impl KeyAction {
-    pub const ALL: [KeyAction; 12] = [
+    pub const ALL: [KeyAction; 13] = [
         KeyAction::PlayPause,
         KeyAction::SeekBack,
         KeyAction::SeekForward,
@@ -37,6 +38,7 @@ impl KeyAction {
         KeyAction::NextChapter,
         KeyAction::Fullscreen,
         KeyAction::Leave,
+        KeyAction::Skip,
     ];
 
     /// Config name.
@@ -54,6 +56,7 @@ impl KeyAction {
             KeyAction::NextChapter => "next_chapter",
             KeyAction::Fullscreen => "fullscreen",
             KeyAction::Leave => "leave",
+            KeyAction::Skip => "skip",
         }
     }
 
@@ -71,6 +74,7 @@ impl KeyAction {
             KeyAction::NextChapter => "Next chapter",
             KeyAction::Fullscreen => "Fullscreen",
             KeyAction::Leave => "Leave fullscreen, then the player",
+            KeyAction::Skip => "Skip intro / credits",
         }
     }
 
@@ -86,12 +90,13 @@ impl KeyAction {
             KeyAction::VolumeUp => &["Up"],
             KeyAction::VolumeDown => &["Down"],
             KeyAction::Mute => &["m"],
-            KeyAction::PreviousEpisode => &["p"],
-            KeyAction::NextEpisode => &["n"],
+            KeyAction::PreviousEpisode => &["comma"],
+            KeyAction::NextEpisode => &["period"],
             KeyAction::PreviousChapter => &["Page_Up"],
             KeyAction::NextChapter => &["Page_Down"],
             KeyAction::Fullscreen => &["f", "F11"],
             KeyAction::Leave => &["Escape"],
+            KeyAction::Skip => &["q"],
         }
     }
 }
@@ -197,6 +202,8 @@ pub fn key_label(name: &str) -> String {
         "Page_Down" => "Page Down".into(),
         "Escape" => "Esc".into(),
         "Return" => "Enter".into(),
+        "comma" => ",".into(),
+        "period" => ".".into(),
         other if other.chars().count() == 1 => other.to_uppercase(),
         other => other.replace('_', " "),
     }
@@ -211,7 +218,9 @@ mod tests {
         let bindings = KeyBindings::default();
         assert_eq!(bindings.action_for("space"), Some(KeyAction::PlayPause));
         assert_eq!(bindings.action_for("F11"), Some(KeyAction::Fullscreen));
-        assert_eq!(bindings.action_for("q"), None);
+        assert_eq!(bindings.action_for("q"), Some(KeyAction::Skip));
+        assert_eq!(bindings.action_for("period"), Some(KeyAction::NextEpisode));
+        assert_eq!(bindings.action_for("z"), None);
     }
 
     #[test]
@@ -239,5 +248,6 @@ mod tests {
         assert_eq!(key_label("space"), "Space");
         assert_eq!(key_label("k"), "K");
         assert_eq!(key_label("Page_Down"), "Page Down");
+        assert_eq!(key_label("comma"), ",");
     }
 }
