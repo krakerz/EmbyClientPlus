@@ -12,8 +12,28 @@
  * Build: cc -shared -O2 -o <name> vsshim.c (see packaging/package-*.sh).
  */
 
+#include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Appends a line to EMBYCLIENTPLUS_VSSHIM_LOG (set by the app, in its
+ * logs folder): this library has no other way to say why it failed. */
+static void note(const char *format, ...)
+{
+    const char *path = getenv("EMBYCLIENTPLUS_VSSHIM_LOG");
+    if (!path || !*path)
+        return;
+    FILE *file = fopen(path, "a");
+    if (!file)
+        return;
+    va_list args;
+    va_start(args, format);
+    vfprintf(file, format, args);
+    va_end(args);
+    fputc('\n', file);
+    fclose(file);
+}
 
 #ifdef _WIN32
 #include <windows.h>
@@ -29,6 +49,14 @@ static void *find_symbol(lib_t lib, const char *name)
 {
     return (void *)GetProcAddress(lib, name);
 }
+static void note_error(const char *what, const char *path)
+{
+    DWORD code = GetLastError();
+    char message[512] = "";
+    FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, code, 0,
+                   message, sizeof message, NULL);
+    note("%s %s failed: error %lu: %s", what, path, (unsigned long)code, message);
+}
 #define SEP '\\'
 #define CORE_NAME "VapourSynth.dll"
 #else
@@ -42,6 +70,10 @@ static lib_t open_lib(const char *path)
 static void *find_symbol(lib_t lib, const char *name)
 {
     return dlsym(lib, name);
+}
+static void note_error(const char *what, const char *path)
+{
+    note("%s %s failed: %s", what, path, dlerror());
 }
 #define SEP '/'
 #ifdef __APPLE__
@@ -58,10 +90,18 @@ typedef const void *(*api_fn)(int);
 static lib_t load(const char *name)
 {
     const char *script = getenv("EMBYCLIENTPLUS_VSSCRIPT");
-    if (!script || !*script)
+    if (!script || !*script) {
+        note("EMBYCLIENTPLUS_VSSCRIPT isn't set: no VapourSynth found");
         return NULL;
-    if (!name)
-        return open_lib(script);
+    }
+    if (!name) {
+        lib_t lib = open_lib(script);
+        if (lib)
+            note("loaded %s", script);
+        else
+            note_error("loading", script);
+        return lib;
+    }
     const char *slash = strrchr(script, SEP);
     size_t dir = slash ? (size_t)(slash - script + 1) : 0;
     size_t len = dir + strlen(name) + 1;
@@ -71,6 +111,10 @@ static lib_t load(const char *name)
     memcpy(path, script, dir);
     strcpy(path + dir, name);
     lib_t lib = open_lib(path);
+    if (lib)
+        note("loaded %s", path);
+    else
+        note_error("loading", path);
     free(path);
     return lib;
 }
@@ -85,17 +129,27 @@ static const void *forward(lib_t *lib, int *tried, const char *name, const char 
     if (!*lib)
         return NULL;
     api_fn fn = (api_fn)find_symbol(*lib, symbol);
-    if (!fn)
+    if (!fn) {
+        note("%s not found in the loaded library", symbol);
         return NULL;
+    }
     /* Versions are (major << 16) | minor. An older VapourSynth (SVP for
      * Windows ships R64) refuses a newer minor than it has; minors only
      * add entries at the end, so the older table serves what mpv uses. */
     int major = version & ~0xffff;
     for (int minor = version & 0xffff; minor >= 0; minor--) {
         const void *api = fn(major | minor);
-        if (api)
+        if (api) {
+            note("%s(%d.%d) succeeded", symbol, major >> 16, minor);
             return api;
+        }
+        note("%s(%d.%d) returned nothing", symbol, major >> 16, minor);
     }
+    /* VSScript's own reason, where it has one (R70+). */
+    typedef const char *(*error_fn)(void);
+    error_fn last_error = (error_fn)find_symbol(*lib, "getVSScriptAPILastError");
+    if (last_error && last_error())
+        note("VapourSynth says: %s", last_error());
     return NULL;
 }
 
