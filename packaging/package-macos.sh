@@ -46,6 +46,12 @@ is_vapoursynth() {
     return 1
 }
 
+# install_name_tool warns about every signature it breaks; all are re-signed
+# at the end.
+install_name_tool() {
+    command install_name_tool "$@" 2> >(grep -v "invalidate the code signature" >&2)
+}
+
 # Copies a binary's Homebrew dylibs into Frameworks, recursively, and
 # points its load commands at them.
 declare -A copied=()

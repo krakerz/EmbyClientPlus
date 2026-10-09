@@ -273,6 +273,9 @@ pub struct ServerSettings {
     /// named computer (Dashboard → Devices). Unset means on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub appear_as_browser: Option<bool>,
+    /// The server's version, seen at sign-in (sent in browser mode).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub version: String,
 }
 
 impl ServerSettings {
@@ -656,7 +659,7 @@ mod tests {
         assert_eq!(parsed.server.url, "http://192.168.1.3:8096");
         assert!(parsed.server.user_id.is_empty());
         assert_eq!(parsed.frame_gen.default_backend, FrameGenBackend::Svp);
-        assert_eq!(parsed.frame_gen.socket(), "/tmp/mpvsocket");
+        assert_eq!(parsed.frame_gen.socket(), DEFAULT_SVP_SOCKET);
         // Untouched sections still get their defaults.
         assert_eq!(parsed.audio.preferred_language, "eng");
         assert_eq!(parsed.playback.mode, PlaybackMode::DirectPlayPreferred);

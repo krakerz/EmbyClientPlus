@@ -439,6 +439,10 @@ mod tests {
                     browser_download_url: "https://x/archive".into(),
                 },
                 AssetJson {
+                    name: format!("embyclientplus-{tag}-windows-x86_64.zip"),
+                    browser_download_url: "https://x/windows".into(),
+                },
+                AssetJson {
                     name: format!("EmbyClientPlus-{tag}-x86_64.AppImage"),
                     browser_download_url: "https://x/appimage".into(),
                 },
@@ -460,7 +464,7 @@ mod tests {
         let appimage = InstallKind::AppImage("/x.AppImage".into());
         let update = pick_update(&release("0.6.0"), &archive, "0.5.0").unwrap();
         assert_eq!(update.version, "0.6.0");
-        assert!(update.asset_name.ends_with("-linux-x86_64.tar.gz"));
+        assert!(update.asset_name.ends_with(ARCHIVE_SUFFIX));
         let update = pick_update(&release("v0.6.0"), &appimage, "0.5.0").unwrap();
         assert!(update.asset_name.ends_with(".AppImage"));
         assert_eq!(update.version, "0.6.0");
@@ -480,7 +484,7 @@ mod tests {
             std::env::temp_dir().join(format!("embyclientplus-update-{}", std::process::id()));
         let bundle = root.join("EmbyClientPlus-0.6.0-x86_64");
         std::fs::create_dir_all(bundle.join("bin")).unwrap();
-        std::fs::write(bundle.join("bin/embyclientplus-bin"), b"").unwrap();
+        std::fs::write(bundle.join(BUNDLE_PROGRAM), b"").unwrap();
         assert_eq!(find_bundle(&root), Some(bundle));
         let _ = std::fs::remove_dir_all(&root);
     }

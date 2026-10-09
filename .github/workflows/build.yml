@@ -119,7 +119,7 @@ jobs:
           # MSYS2's mpv is built with vapoursynth, so no libmpv of our own.
           pacboy: >-
             rust:p pkgconf:p gcc:p gtk4:p libadwaita:p mpv:p
-            gdk-pixbuf2:p librsvg:p ntldd:p
+            gdk-pixbuf2:p librsvg:p ntldd:p adwaita-icon-theme:p hicolor-icon-theme:p
           install: zip
 
       - uses: actions/checkout@v4
@@ -157,7 +157,7 @@ jobs:
       - name: Install dependencies
         # Homebrew's mpv is built with vapoursynth, so no libmpv of our own;
         # bash 5 for the packaging script (macOS ships 3.2).
-        run: brew install rust pkgconf gtk4 libadwaita mpv librsvg bash
+        run: brew install rust pkgconf gtk4 libadwaita adwaita-icon-theme hicolor-icon-theme mpv librsvg bash
 
       - uses: actions/checkout@v4
 

@@ -25,12 +25,28 @@ pub fn set_appear_as_browser(on: bool) {
     APPEAR_AS_BROWSER.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Client and device names for the authorization header.
-fn identity() -> (&'static str, &'static str) {
+/// The server's own version (`/System/Info/Public`), which Emby's web app
+/// reports as its version; learnt at sign-in, saved in config.
+static SERVER_VERSION: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+pub fn set_server_version(version: &str) {
+    if let Ok(mut current) = SERVER_VERSION.lock() {
+        *current = version.to_string();
+    }
+}
+
+/// Client, device and version for the authorization header.
+fn identity() -> (&'static str, &'static str, String) {
     if APPEAR_AS_BROWSER.load(std::sync::atomic::Ordering::Relaxed) {
-        (BROWSER_CLIENT, BROWSER_DEVICE)
+        let version = SERVER_VERSION
+            .lock()
+            .map(|v| v.clone())
+            .ok()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| APP_VERSION.to_string());
+        (BROWSER_CLIENT, BROWSER_DEVICE, version)
     } else {
-        (CLIENT_NAME, device_name())
+        (CLIENT_NAME, device_name(), APP_VERSION.to_string())
     }
 }
 
@@ -100,9 +116,9 @@ impl EmbyClient {
     /// authenticated or not — client/device identification is separate
     /// from the bearer token itself.
     fn emby_authorization_header(&self) -> String {
-        let (client, device) = identity();
+        let (client, device, version) = identity();
         format!(
-            "MediaBrowser Client=\"{client}\", Device=\"{device}\", DeviceId=\"{}\", Version=\"{APP_VERSION}\"",
+            "MediaBrowser Client=\"{client}\", Device=\"{device}\", DeviceId=\"{}\", Version=\"{version}\"",
             self.device_id
         )
     }

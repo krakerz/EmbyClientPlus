@@ -167,6 +167,9 @@ sub-font-size=40
         let staged = stage(&source, &root.join("staged"), true).unwrap();
         let conf = std::fs::read_to_string(staged.join("mpv.conf")).unwrap();
         assert!(conf.contains("# (ignored by EmbyClientPlus) vo=gpu"));
+        // Linked on Unix, copied on Windows.
+        assert!(staged.join("shaders").is_dir());
+        #[cfg(unix)]
         assert!(staged.join("shaders").is_symlink());
         assert!(!staged.join("fonts").exists());
         let _ = std::fs::remove_dir_all(&root);

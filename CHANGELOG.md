@@ -9,7 +9,7 @@
 - Settings, cache and downloads use each system's usual folders; the user's mpv.conf is read from `%APPDATA%\mpv` on Windows and `~/.config/mpv` elsewhere.
 
 ### Changed
-- The app now identifies itself to the server as a web browser by default; Preferences → General → Server → "Appear as a web browser" turns that off, and the server then lists it as Emby Client+ under this computer's name.
+- The app now identifies itself to the server as a web browser (Emby Web, with the server's version) by default; Preferences → General → Server → "Appear as a web browser" turns that off, and the server then lists it as Emby Client+ under this computer's name. Switching offers to sign out, since the server only picks up the new name at sign-in.
 
 ## [1.6.0] — 2026-10-08
 

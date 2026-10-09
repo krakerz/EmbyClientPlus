@@ -53,12 +53,9 @@ fn main() -> glib::ExitCode {
     svp::expose_vapoursynth();
     logging::init();
     update::clean_up_previous();
-    emby::set_appear_as_browser(
-        config::Settings::load()
-            .unwrap_or_default()
-            .server
-            .appear_as_browser(),
-    );
+    let server = config::Settings::load().unwrap_or_default().server;
+    emby::set_appear_as_browser(server.appear_as_browser());
+    emby::set_server_version(&server.version);
 
     let app = adw::Application::builder().application_id(APP_ID).build();
     app.connect_activate(move |app| {
