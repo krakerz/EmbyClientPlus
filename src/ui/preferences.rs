@@ -165,6 +165,8 @@ fn show_with(parent: &impl IsA<gtk::Widget>, server: bool) {
         save(|s| s.playback.keep_screen_on = on);
     });
     playback.add(&keep_screen_on);
+    #[cfg(target_os = "linux")]
+    playback.add(&do_not_disturb_row(&settings));
     let hide_paused = adw::SwitchRow::builder()
         .title("Hide player controls when paused")
         .subtitle("Otherwise they stay on screen while paused")
@@ -1049,6 +1051,50 @@ fn svp_folder_row(parent: &gtk::Widget) -> adw::ActionRow {
 }
 
 /// An in-window prompt for the SVP folder path (no file chooser).
+/// "Do not disturb while watching", with optional commands for desktops
+/// the app can't switch by itself.
+#[cfg(target_os = "linux")]
+fn do_not_disturb_row(settings: &Settings) -> adw::ExpanderRow {
+    let row = adw::ExpanderRow::builder()
+        .title("Do not disturb while watching")
+        .subtitle(
+            "Holds notifications back while a video is open. Works with KDE Plasma, GNOME, \
+             caelestia, swaync, dunst and mako; for anything else, give the commands below",
+        )
+        .show_enable_switch(true)
+        .enable_expansion(settings.playback.do_not_disturb)
+        .build();
+    row.connect_enable_expansion_notify(|row| {
+        let on = row.enables_expansion();
+        save(|s| s.playback.do_not_disturb = on);
+    });
+    for (title, value, setter) in [
+        (
+            "Command to turn it on",
+            settings.playback.dnd_on_command.clone(),
+            (|s: &mut Settings, v: String| s.playback.dnd_on_command = v)
+                as fn(&mut Settings, String),
+        ),
+        (
+            "Command to turn it off",
+            settings.playback.dnd_off_command.clone(),
+            |s: &mut Settings, v: String| s.playback.dnd_off_command = v,
+        ),
+    ] {
+        let entry = adw::EntryRow::builder()
+            .title(title)
+            .text(value)
+            .show_apply_button(true)
+            .build();
+        entry.connect_apply(move |entry| {
+            let text = entry.text().trim().to_string();
+            save(|s| setter(s, text));
+        });
+        row.add_row(&entry);
+    }
+    row
+}
+
 /// The server keeps the app name it saw at sign-in, so a new identity
 /// only shows after signing in again: offer that now.
 fn ask_sign_out(anchor: &adw::SwitchRow, home: &gtk::Widget) {

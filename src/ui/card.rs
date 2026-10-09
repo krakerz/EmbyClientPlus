@@ -332,6 +332,18 @@ pub fn show_menu(ui: &Ui, widget: &gtk::Widget, item: &BaseItem) {
     }
     let target = item.clone();
     add("Open", Box::new(move |ui| ui.open(&target)));
+    if matches!(item.item_type.as_str(), "Series" | "Season") {
+        let target = item.clone();
+        let label = if item.item_type == "Series" {
+            "Download Series"
+        } else {
+            "Download Season"
+        };
+        add(
+            label,
+            Box::new(move |ui| super::downloads::start_episodes_of(ui, &target)),
+        );
+    }
     if super::downloads::can_download(item) {
         let target = item.clone();
         if crate::downloads::find(&item.id).is_some() {

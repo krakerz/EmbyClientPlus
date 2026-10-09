@@ -32,6 +32,11 @@ pub fn media(target: &str) -> LocalMedia {
             next: neighbour(1),
             override_key: format!("local:{}", folder.to_string_lossy()),
             client: None,
+            // `Movie.eng.srt` and the like beside the file.
+            subtitle_files: crate::downloads::subtitles_beside(&path)
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect(),
         };
     }
     LocalMedia {
@@ -46,6 +51,7 @@ pub fn media(target: &str) -> LocalMedia {
         next: None,
         override_key: format!("url:{target}"),
         client: None,
+        subtitle_files: Vec::new(),
     }
 }
 

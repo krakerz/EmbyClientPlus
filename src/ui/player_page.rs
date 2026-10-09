@@ -249,8 +249,14 @@ impl PlayerPage {
                 inner.show_osd();
                 inner.seek_by(SEEK_STEP, repeat);
             }
-            Action::VolumeUp => warn(player.set_volume(player.volume() + VOLUME_STEP)),
-            Action::VolumeDown => warn(player.set_volume(player.volume() - VOLUME_STEP)),
+            // Volume shows only its own indicator (`flash_volume`), not the
+            // whole OSD.
+            Action::VolumeUp => {
+                return warn(player.set_volume(player.volume() + VOLUME_STEP));
+            }
+            Action::VolumeDown => {
+                return warn(player.set_volume(player.volume() - VOLUME_STEP));
+            }
             Action::PreviousEpisode => inner.play_neighbour(false),
             Action::NextEpisode => inner.play_neighbour(true),
             Action::PreviousChapter => inner.seek_chapter(false),
@@ -1048,6 +1054,8 @@ impl Inner {
                 }
                 inner.set_fullscreen(false);
                 inner.keep_screen_on(false);
+                #[cfg(target_os = "linux")]
+                crate::dnd::set(false);
                 inner.page.set_cursor(None::<&gdk::Cursor>);
                 inner.session.replace(None);
                 if let Some(handlers) = inner.handlers() {
@@ -1094,6 +1102,9 @@ impl Inner {
                     session.apply_initial_tracks();
                 }
                 self.keep_screen_on(!self.player.is_paused());
+                // Paused or not: notifications wait until the player closes.
+                #[cfg(target_os = "linux")]
+                crate::dnd::set(self.session().is_some_and(|s| !s.item.is_audio()));
                 self.refresh_duration();
                 self.rebuild_menus();
             }
@@ -1204,11 +1215,24 @@ impl Inner {
             selected(&audio).unwrap_or(0).to_variant(),
         );
 
-        self.osd.subtitles.set_menu_model(Some(&track_menu(
-            "player.subtitle",
-            &subtitles,
-            Some(SUBTITLES_OFF_ID),
-        )));
+        let subtitle_menu = track_menu("player.subtitle", &subtitles, Some(SUBTITLES_OFF_ID));
+        let adjust = gio::Menu::new();
+        for id in [SUB_SIZE_ROW, SUB_TIMING_ROW] {
+            let item = gio::MenuItem::new(None, None);
+            item.set_attribute_value("custom", Some(&id.to_variant()));
+            adjust.append_item(&item);
+        }
+        subtitle_menu.append_section(None, &adjust);
+        self.osd.subtitles.set_menu_model(Some(&subtitle_menu));
+        if let Some(popover) = self
+            .osd
+            .subtitles
+            .popover()
+            .and_downcast::<gtk::PopoverMenu>()
+        {
+            popover.add_child(&subtitle_size_row(self.player), SUB_SIZE_ROW);
+            popover.add_child(&subtitle_timing_row(self.player), SUB_TIMING_ROW);
+        }
         self.osd.subtitles.set_sensitive(!subtitles.is_empty());
         set_state(
             &self.actions,
@@ -1698,9 +1722,19 @@ impl Inner {
                 self.show_osd();
                 self.seek_by(SEEK_STEP, self.key_repeating(key));
             }
-            KeyAction::VolumeUp => warn(player.set_volume(player.volume() + VOLUME_STEP)),
-            KeyAction::VolumeDown => warn(player.set_volume(player.volume() - VOLUME_STEP)),
-            KeyAction::Mute => warn(player.toggle_mute()),
+            // Volume shows only its own indicator (`flash_volume`).
+            KeyAction::VolumeUp => {
+                warn(player.set_volume(player.volume() + VOLUME_STEP));
+                return glib::Propagation::Stop;
+            }
+            KeyAction::VolumeDown => {
+                warn(player.set_volume(player.volume() - VOLUME_STEP));
+                return glib::Propagation::Stop;
+            }
+            KeyAction::Mute => {
+                warn(player.toggle_mute());
+                return glib::Propagation::Stop;
+            }
             KeyAction::NextEpisode => self.play_neighbour(true),
             KeyAction::PreviousEpisode => self.play_neighbour(false),
             KeyAction::NextChapter => self.seek_chapter(true),
@@ -1954,6 +1988,92 @@ pub fn bar_fill_from_name(name: &str) -> BarFill {
         "glow" => BarFill::Glow,
         _ => BarFill::Off,
     }
+}
+
+const SUB_SIZE_ROW: &str = "subtitle-size";
+const SUB_TIMING_ROW: &str = "subtitle-timing";
+
+/// "Label  −  value  +" for the subtitles menu; clicking the value resets
+/// it. `step` changes the value by one step (±1) or resets it (0) and
+/// returns the new text.
+fn adjust_row(title: &str, current: String, step: impl Fn(i32) -> String + 'static) -> gtk::Box {
+    let row = gtk::Box::builder()
+        .spacing(6)
+        .margin_start(12)
+        .margin_end(6)
+        .build();
+    row.append(
+        &gtk::Label::builder()
+            .label(title)
+            .xalign(0.0)
+            .hexpand(true)
+            .build(),
+    );
+    let value = gtk::Button::builder()
+        .label(current)
+        .tooltip_text("Reset")
+        .css_classes(["flat", "numeric"])
+        .width_request(72)
+        .build();
+    let step = std::rc::Rc::new(step);
+    for (icon, tooltip, direction) in [
+        ("list-remove-symbolic", "Less", -1),
+        ("list-add-symbolic", "More", 1),
+    ] {
+        let button = gtk::Button::builder()
+            .icon_name(icon)
+            .tooltip_text(tooltip)
+            .css_classes(["flat", "circular"])
+            .build();
+        let (step, value_button) = (step.clone(), value.clone());
+        button.connect_clicked(move |_| value_button.set_label(&step(direction)));
+        if direction < 0 {
+            row.append(&button);
+            row.append(&value);
+        } else {
+            row.append(&button);
+        }
+    }
+    value.connect_clicked(move |button| button.set_label(&step(0)));
+    row
+}
+
+fn subtitle_size_row(player: Player) -> gtk::Box {
+    let text = |scale: f64| format!("{:.0}%", scale * 100.0);
+    adjust_row("Size", text(player.subtitle_scale()), move |direction| {
+        let scale = match direction {
+            0 => 1.0,
+            d => ((player.subtitle_scale() + 0.1 * f64::from(d)) * 10.0).round() / 10.0,
+        };
+        let scale = scale.clamp(player::SUB_SCALE_RANGE.0, player::SUB_SCALE_RANGE.1);
+        if let Err(e) = player.set_subtitle_scale(scale) {
+            tracing::warn!("{e:#}");
+        }
+        if let Err(e) = crate::config::Settings::update(|s| s.subtitles.scale = scale) {
+            tracing::warn!("couldn't save the subtitle size: {e:#}");
+        }
+        text(scale)
+    })
+}
+
+fn subtitle_timing_row(player: Player) -> gtk::Box {
+    let text = |seconds: f64| {
+        if seconds.abs() < 0.05 {
+            "0.0 s".to_string()
+        } else {
+            format!("{seconds:+.1} s")
+        }
+    };
+    adjust_row("Timing", text(player.subtitle_delay()), move |direction| {
+        let seconds = match direction {
+            0 => 0.0,
+            d => ((player.subtitle_delay() + 0.1 * f64::from(d)) * 10.0).round() / 10.0,
+        };
+        if let Err(e) = player.set_subtitle_delay(seconds) {
+            tracing::warn!("{e:#}");
+        }
+        text(seconds)
+    })
 }
 
 fn track_menu(action: &str, entries: &[TrackEntry], off: Option<i64>) -> gio::Menu {

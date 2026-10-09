@@ -270,11 +270,16 @@ fn load(ui: &Ui, view: &Rc<SeriesView>, series_id: &str) {
         view.hero.show(&ui, &series, None);
         clear(&view.hero.buttons);
         if let Some(episode) = next_to_watch(&all) {
-            view.hero.buttons.append(&play_next_button(&ui, episode));
+            let play = play_next_button(&ui, episode);
+            view.hero.buttons.append(&play);
+            add_subtitle_picker(&ui, &play, &episode.id);
         }
         for toggle in super::hero::item_toggles(&ui, &series) {
             view.hero.buttons.append(&toggle);
         }
+        view.hero
+            .buttons
+            .append(&download_button(&ui, &view, &series));
         super::hero::show_related(&ui, &view.related, &series);
 
         // Keep the user's current season across reloads; otherwise start at
@@ -497,6 +502,68 @@ fn next_to_watch(episodes: &[BaseItem]) -> Option<&BaseItem> {
         .iter()
         .chain(episodes[..after_last_watched].iter())
         .find(|e| !e.played())
+}
+
+/// Download menu: the whole series, or the season being shown.
+fn download_button(ui: &Ui, view: &Rc<SeriesView>, series: &BaseItem) -> gtk::MenuButton {
+    let menu = gtk::gio::Menu::new();
+    menu.append(Some("Download Series"), Some("series-download.series"));
+    menu.append(Some("Download This Season"), Some("series-download.season"));
+    let button = gtk::MenuButton::builder()
+        .icon_name(crate::ui::icons::DOWNLOAD)
+        .tooltip_text("Download")
+        .menu_model(&menu)
+        .valign(gtk::Align::Center)
+        .css_classes(["circular"])
+        .build();
+    let group = gtk::gio::SimpleActionGroup::new();
+    let whole = gtk::gio::SimpleAction::new("series", None);
+    let (weak, target) = (ui.downgrade(), series.clone());
+    whole.connect_activate(move |_, _| {
+        if let Some(ui) = weak.upgrade() {
+            super::downloads::start_episodes_of(&ui, &target);
+        }
+    });
+    let season = gtk::gio::SimpleAction::new("season", None);
+    let (weak, shown, series_id) = (ui.downgrade(), Rc::downgrade(view), series.id.clone());
+    season.connect_activate(move |_, _| {
+        let (Some(ui), Some(view)) = (weak.upgrade(), shown.upgrade()) else {
+            return;
+        };
+        let current = view
+            .season_items
+            .borrow()
+            .get(view.seasons.selected())
+            .cloned();
+        if let Some(mut season) = current {
+            season.series_id.get_or_insert_with(|| series_id.clone());
+            super::downloads::start_episodes_of(&ui, &season);
+        }
+    });
+    group.add_action(&whole);
+    group.add_action(&season);
+    button.insert_action_group("series-download", Some(&group));
+    button
+}
+
+/// Puts the subtitle picker after `play`, once the episode's subtitle
+/// tracks are loaded (the episode list doesn't carry them). The choice is
+/// the series', so the next episode's tracks stand for the whole show.
+fn add_subtitle_picker(ui: &Ui, play: &gtk::Button, episode_id: &str) {
+    let (client, user_id, id) = (ui.client(), ui.user_id(), episode_id.to_string());
+    let play = play.downgrade();
+    glib::spawn_future_local(async move {
+        let episode = spawn_tokio(async move { client.item(&user_id, &id).await }).await;
+        let (Ok(episode), Some(play)) = (episode, play.upgrade()) else {
+            return;
+        };
+        let Some(parent) = play.parent().and_downcast::<gtk::Box>() else {
+            return;
+        };
+        if let Some(picker) = super::subtitle_picker::button(&episode) {
+            parent.insert_child_after(&picker, Some(&play));
+        }
+    });
 }
 
 /// "Resume S1:E3 · 12:34" or "Play S1:E3".

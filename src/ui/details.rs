@@ -168,6 +168,9 @@ fn show(ui: &Ui, view: &DetailsView, item: &BaseItem) {
     } else {
         buttons.append(&play_button(ui, item, "Play", 0, true));
     }
+    if let Some(subtitles) = super::subtitle_picker::button(item) {
+        buttons.append(&subtitles);
+    }
     if let Some(trailer) = trailer_button(ui, item) {
         buttons.append(&trailer);
     }
