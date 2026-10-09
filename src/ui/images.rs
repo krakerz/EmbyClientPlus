@@ -145,6 +145,7 @@ fn requested(picture: &gtk::Picture) -> Option<String> {
 
 /// The on-disk copy of `image` (fetched first if needed), for handing to
 /// other programs: MPRIS cover art.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // used by MPRIS
 pub async fn file(
     client: Arc<EmbyClient>,
     image: ImageRef,

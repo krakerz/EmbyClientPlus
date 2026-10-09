@@ -1,4 +1,5 @@
-//! Using the user's own mpv configuration (`~/.config/mpv`): shaders,
+//! Using the user's own mpv configuration (`~/.config/mpv`, or
+//! `%APPDATA%\mpv` on Windows): shaders,
 //! scalers, subtitle styling and so on. mpv reads it at start-up, so a
 //! filtered copy is staged in a private config dir: options that would
 //! break embedding or override the app's own control are dropped.
@@ -24,11 +25,17 @@ const DROPPED: [&str; 12] = [
 /// Subfolders `~~/...` paths in mpv.conf may refer to.
 const LINKED: [&str; 5] = ["shaders", "script-opts", "scripts", "fonts", "scripts-opts"];
 
-/// The user's mpv config dir, if it has an mpv.conf.
+/// The user's mpv config dir, if it has an mpv.conf. mpv itself uses
+/// `%APPDATA%\mpv` on Windows and `~/.config/mpv` everywhere else (macOS
+/// included), honouring `$XDG_CONFIG_HOME`.
 pub fn source_dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().join(".config")))?;
+    let base = if cfg!(windows) {
+        directories::BaseDirs::new().map(|dirs| dirs.config_dir().to_path_buf())
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().join(".config")))
+    }?;
     let dir = base.join("mpv");
     dir.join("mpv.conf").is_file().then_some(dir)
 }
@@ -45,13 +52,45 @@ pub fn stage(source: &Path, staging: &Path, keep_hwdec: bool) -> std::io::Result
     std::fs::write(staging.join("mpv.conf"), filtered)?;
     for name in LINKED {
         let link = staging.join(name);
-        let _ = std::fs::remove_file(&link);
         let target = source.join(name);
-        if target.exists() {
-            std::os::unix::fs::symlink(&target, &link)?;
-        }
+        link_dir(&target, &link)?;
     }
     Ok(staging.to_path_buf())
+}
+
+/// Makes `link` show `target` (if it exists): a symlink on Unix, a copy on
+/// Windows, where symlinks need developer mode or admin rights.
+#[cfg(unix)]
+fn link_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+    let _ = std::fs::remove_file(link);
+    if target.exists() {
+        std::os::unix::fs::symlink(target, link)?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn link_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+    let _ = std::fs::remove_dir_all(link);
+    if target.is_dir() {
+        copy_dir(target, link)?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let dest = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &dest)?;
+        } else {
+            std::fs::copy(entry.path(), dest)?;
+        }
+    }
+    Ok(())
 }
 
 /// The config text without the app-managed options, plus what was dropped.
@@ -128,6 +167,9 @@ sub-font-size=40
         let staged = stage(&source, &root.join("staged"), true).unwrap();
         let conf = std::fs::read_to_string(staged.join("mpv.conf")).unwrap();
         assert!(conf.contains("# (ignored by EmbyClientPlus) vo=gpu"));
+        // Linked on Unix, copied on Windows.
+        assert!(staged.join("shaders").is_dir());
+        #[cfg(unix)]
         assert!(staged.join("shaders").is_symlink());
         assert!(!staged.join("fonts").exists());
         let _ = std::fs::remove_dir_all(&root);

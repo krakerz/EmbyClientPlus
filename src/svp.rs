@@ -8,11 +8,36 @@ use std::sync::Mutex;
 use crate::config::Settings;
 
 /// Where SVP's installer puts it unless told otherwise.
+#[cfg(target_os = "linux")]
 pub fn default_dir() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|dirs| dirs.home_dir().join("SVP4"))
 }
 
-/// The configured SVP folder (Preferences), else `$SVP_DIR`, else `~/SVP4`.
+#[cfg(windows)]
+pub fn default_dir() -> Option<PathBuf> {
+    let programs =
+        std::env::var_os("ProgramFiles(x86)").unwrap_or_else(|| r"C:\Program Files (x86)".into());
+    Some(PathBuf::from(programs).join("SVP 4"))
+}
+
+#[cfg(target_os = "macos")]
+pub fn default_dir() -> Option<PathBuf> {
+    Some(PathBuf::from("/Applications/SVP 4 Mac.app"))
+}
+
+/// How the default folder reads in Preferences.
+pub fn default_dir_label() -> &'static str {
+    if cfg!(windows) {
+        r"C:\Program Files (x86)\SVP 4"
+    } else if cfg!(target_os = "macos") {
+        "/Applications/SVP 4 Mac.app"
+    } else {
+        "~/SVP4"
+    }
+}
+
+/// The configured SVP folder (Preferences), else `$SVP_DIR`, else the
+/// usual one.
 pub fn install_dir() -> Option<PathBuf> {
     let configured = Settings::load().unwrap_or_default().frame_gen.svp_dir;
     if !configured.trim().is_empty() {
@@ -23,9 +48,20 @@ pub fn install_dir() -> Option<PathBuf> {
         .or_else(default_dir)
 }
 
+/// SVP Manager's executable inside an install folder.
+fn manager_path(dir: &std::path::Path) -> PathBuf {
+    if cfg!(windows) {
+        dir.join("SVPManager.exe")
+    } else if cfg!(target_os = "macos") {
+        dir.join("Contents/Resources/SVPManager")
+    } else {
+        dir.join("SVPManager")
+    }
+}
+
 /// Whether `dir` looks like an SVP install.
 pub fn is_install(dir: &std::path::Path) -> bool {
-    dir.join("SVPManager").exists()
+    manager_path(dir).exists()
 }
 
 pub fn installed() -> bool {
@@ -33,6 +69,7 @@ pub fn installed() -> bool {
 }
 
 /// Scans /proc for the SVPManager process (its `comm` is exactly that).
+#[cfg(target_os = "linux")]
 pub fn manager_running() -> bool {
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return false;
@@ -46,6 +83,91 @@ pub fn manager_running() -> bool {
             && std::fs::read_to_string(entry.path().join("comm"))
                 .is_ok_and(|comm| is_manager(&comm))
     })
+}
+
+/// Looks through the running processes for SVP Manager.
+#[cfg(not(target_os = "linux"))]
+pub fn manager_running() -> bool {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+    let mut system = System::new();
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+    system.processes().values().any(|process| {
+        let name = process.name().to_string_lossy();
+        is_manager(name.strip_suffix(".exe").unwrap_or(&name))
+    })
+}
+
+/// VapourSynth's scripting library as SVP ships it.
+#[cfg(windows)]
+const VSSCRIPT_NAMES: &[&str] = &["VSScript.dll"];
+#[cfg(target_os = "macos")]
+const VSSCRIPT_NAMES: &[&str] = &[
+    "libvapoursynth-script.0.dylib",
+    "libvapoursynth-script.dylib",
+];
+
+/// Tells the bundled VapourSynth stand-in (packaging/vsshim) where SVP's
+/// own VSScript library is, so libmpv's vapoursynth filter uses it. Linux
+/// builds link SVP's copy directly (build.rs, the launcher script).
+///
+/// Must run before libmpv initialises and before any other thread starts.
+pub fn expose_vapoursynth() {
+    #[cfg(not(target_os = "linux"))]
+    {
+        const VAR: &str = "EMBYCLIENTPLUS_VSSCRIPT";
+        if std::env::var_os(VAR).is_some() {
+            return;
+        }
+        if let Some(library) = vsscript_search_dirs()
+            .iter()
+            .find_map(|dir| find_file(dir, VSSCRIPT_NAMES, 4))
+        {
+            // SAFETY: called first thing in main, while single-threaded.
+            unsafe { std::env::set_var(VAR, library) };
+        }
+    }
+}
+
+/// Where SVP's VapourSynth is: its own portable copy on Windows (under
+/// `mpv64`); on macOS SVP uses Homebrew's (or the VapourSynth installer's).
+#[cfg(windows)]
+fn vsscript_search_dirs() -> Vec<PathBuf> {
+    install_dir().into_iter().collect()
+}
+
+#[cfg(target_os = "macos")]
+fn vsscript_search_dirs() -> Vec<PathBuf> {
+    [
+        "/opt/homebrew/opt/vapoursynth/lib",
+        "/usr/local/opt/vapoursynth/lib",
+        "/Library/Frameworks/VapourSynth.framework",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .collect()
+}
+
+/// The first file named one of `names` in `dir`, looking `depth` folders deep.
+#[cfg(not(target_os = "linux"))]
+fn find_file(dir: &std::path::Path, names: &[&str], depth: usize) -> Option<PathBuf> {
+    let entries: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .collect();
+    let named = |path: &&PathBuf| {
+        path.file_name()
+            .is_some_and(|n| names.iter().any(|name| n.eq_ignore_ascii_case(name)))
+    };
+    if let Some(found) = entries.iter().find(|p| p.is_file() && named(p)) {
+        return Some(found.clone());
+    }
+    if depth == 0 {
+        return None;
+    }
+    entries
+        .iter()
+        .filter(|p| p.is_dir())
+        .find_map(|p| find_file(p, names, depth - 1))
 }
 
 /// How long SVP Manager gets to exit on SIGTERM before it's killed.
@@ -66,7 +188,7 @@ pub fn ensure_running() {
     let Some(dir) = install_dir().filter(|dir| is_install(dir)) else {
         return;
     };
-    let manager = dir.join("SVPManager");
+    let manager = manager_path(&dir);
     let in_gamescope = crate::gamescope::detected();
     // A headless gamescope around it (to hide it) cost GPU time while
     // playing, which showed as stutter on handhelds; it runs plainly now.
@@ -113,8 +235,12 @@ pub fn stop_started() {
     };
     if let Some(mut child) = started.take() {
         // Politely first, so it can close cleanly; forcefully if it lingers.
+        // (Windows has no polite signal for a GUI process: straight to kill.)
+        #[cfg(unix)]
         // SAFETY: a plain signal to the child process we started.
-        unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+        unsafe {
+            libc::kill(child.id() as i32, libc::SIGTERM)
+        };
         let deadline = std::time::Instant::now() + STOP_GRACE;
         while std::time::Instant::now() < deadline {
             if matches!(child.try_wait(), Ok(Some(_))) {

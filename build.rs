@@ -32,6 +32,13 @@ fn main() {
     println!("cargo:rerun-if-env-changed=EMBYCLIENTPLUS_PORTABLE");
     println!("cargo:rerun-if-changed=build.rs");
 
+    // Windows and macOS link the package manager's libmpv (MSYS2,
+    // Homebrew), which has vapoursynth; SVP's own copy is reached at run
+    // time through packaging/vsshim instead of the paths set up below.
+    if std::env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os != "linux") {
+        return;
+    }
+
     let third_party =
         PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("third_party");
 

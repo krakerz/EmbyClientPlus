@@ -159,13 +159,15 @@ pub fn preferences_group(toasts: &adw::ToastOverlay) -> adw::PreferencesGroup {
     group.add(&on_start);
 
     if kind == InstallKind::Source {
-        version.set_subtitle("Updates are for installed builds (AppImage or install.sh)");
+        version.set_subtitle("Updates are for release builds, not ones built from source");
         button.set_sensitive(false);
         on_start.set_sensitive(false);
         return group;
     }
     version.set_subtitle(match &kind {
         InstallKind::AppImage(_) => "AppImage",
+        InstallKind::MacApp(_) => "macOS app",
+        _ if cfg!(windows) => "Windows release",
         _ => "Installed with install.sh",
     });
 

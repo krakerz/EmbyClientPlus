@@ -680,6 +680,14 @@ impl Player {
 /// Shuts down every socket in this process whose local address is
 /// `path`: the IPC connections mpv accepted on it. mpv's client thread
 /// then sees EOF and drops the client. Returns how many were shut down.
+/// Linux only (it walks /proc); elsewhere SVP stays attached until the
+/// next file, where it finds no IPC server.
+#[cfg(not(target_os = "linux"))]
+fn disconnect_ipc_clients(_path: &str) -> usize {
+    0
+}
+
+#[cfg(target_os = "linux")]
 fn disconnect_ipc_clients(path: &str) -> usize {
     let Ok(fds) = std::fs::read_dir("/proc/self/fd") else {
         return 0;
@@ -694,6 +702,7 @@ fn disconnect_ipc_clients(path: &str) -> usize {
 }
 
 /// The local path of a Unix socket fd, if it is one.
+#[cfg(target_os = "linux")]
 fn unix_socket_path(fd: libc::c_int) -> Option<String> {
     // SAFETY: zeroed sockaddr_un is valid; getsockname writes at most `len` bytes.
     let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
@@ -816,6 +825,7 @@ mod tests {
     use libmpv2::events::PropertyData;
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn finds_and_disconnects_unix_sockets_by_path() {
         use std::os::unix::net::{UnixListener, UnixStream};
         let path = std::env::temp_dir().join(format!("embyclientplus-ipc-{}", std::process::id()));

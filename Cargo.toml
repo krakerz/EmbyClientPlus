@@ -1,8 +1,8 @@
 [package]
 name = "embyclientplus"
-version = "1.6.0"
+version = "1.7.0"
 edition = "2024"
-description = "Native Linux Emby client with SVP frame interpolation"
+description = "Native Emby client with SVP frame interpolation"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/krakerz/EmbyClientPlus"
 
@@ -31,4 +31,11 @@ toml = "1.1.5"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
+
+# MPRIS media controls are a Linux (D-Bus) thing.
+[target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "5", default-features = false, features = ["tokio"] }
+
+# Finding SVP Manager among the running processes (Linux reads /proc).
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }

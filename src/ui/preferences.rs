@@ -340,6 +340,27 @@ fn show_with(parent: &impl IsA<gtk::Widget>, server: bool) {
     remembered.add(&forget);
     page.add(&remembered);
 
+    if server {
+        let parent = parent.as_ref().clone();
+        let group = adw::PreferencesGroup::builder().title("Server").build();
+        let browser = adw::SwitchRow::builder()
+            .title("Appear as a web browser")
+            .subtitle(
+                "On: the server lists this app as a browser session. Off: as Emby Client+ \
+                 on this computer, under its name.",
+            )
+            .active(settings.server.appear_as_browser())
+            .build();
+        browser.connect_active_notify(move |row| {
+            let on = row.is_active();
+            crate::emby::set_appear_as_browser(on);
+            save(|s| s.server.appear_as_browser = Some(on));
+            ask_sign_out(row, &parent);
+        });
+        group.add(&browser);
+        page.add(&group);
+    }
+
     // Diagnostics.
     let diagnostics = adw::PreferencesGroup::builder()
         .title("Diagnostics")
@@ -965,7 +986,7 @@ fn svp_folder_row(parent: &gtk::Widget) -> adw::ActionRow {
         .build();
     let reset = gtk::Button::builder()
         .icon_name(crate::ui::icons::RESET)
-        .tooltip_text("Back to ~/SVP4")
+        .tooltip_text(format!("Back to {}", crate::svp::default_dir_label()))
         .valign(gtk::Align::Center)
         .css_classes(["flat"])
         .build();
@@ -1028,6 +1049,43 @@ fn svp_folder_row(parent: &gtk::Widget) -> adw::ActionRow {
 }
 
 /// An in-window prompt for the SVP folder path (no file chooser).
+/// The server keeps the app name it saw at sign-in, so a new identity
+/// only shows after signing in again: offer that now.
+fn ask_sign_out(anchor: &adw::SwitchRow, home: &gtk::Widget) {
+    let dialog = adw::AlertDialog::builder()
+        .heading("Sign in again?")
+        .body(
+            "The server shows the new name after you sign in again. Sign out now? Downloads and \
+             settings are kept.",
+        )
+        .default_response("later")
+        .close_response("later")
+        .build();
+    dialog.add_responses(&[("later", "Later"), ("sign-out", "Sign Out")]);
+    dialog.set_response_appearance("sign-out", adw::ResponseAppearance::Suggested);
+    let home = home.downgrade();
+    let anchor_weak = anchor.downgrade();
+    dialog.connect_response(None, move |_, response| {
+        if response != "sign-out" {
+            return;
+        }
+        // Close Preferences, then use Home's own Log Out.
+        if let Some(prefs) = anchor_weak
+            .upgrade()
+            .and_then(|row| row.ancestor(adw::Dialog::static_type()))
+            .and_then(|w| w.downcast::<adw::Dialog>().ok())
+        {
+            prefs.close();
+        }
+        if let Some(home) = home.upgrade()
+            && home.activate_action("home.logout", None).is_err()
+        {
+            tracing::warn!("no Log Out action here; sign out from Home's menu");
+        }
+    });
+    dialog.present(Some(anchor));
+}
+
 fn ask_svp_folder(anchor: &gtk::Button, row: &adw::ActionRow, reset: &gtk::Button) {
     let current = crate::svp::install_dir()
         .map(|dir| dir.display().to_string())
