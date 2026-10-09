@@ -276,7 +276,7 @@ impl EmbyClient {
     /// One item with its cast (`People`).
     pub async fn item(&self, user_id: &str, item_id: &str) -> Result<BaseItem> {
         self.get(&format!(
-            "/emby/Users/{user_id}/Items/{item_id}?Fields={FIELDS},People,RemoteTrailers,LocalTrailerCount"
+            "/emby/Users/{user_id}/Items/{item_id}?Fields={FIELDS},People,RemoteTrailers,LocalTrailerCount,MediaStreams"
         ))
         .await
     }

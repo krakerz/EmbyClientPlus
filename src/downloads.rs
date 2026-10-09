@@ -1,5 +1,7 @@
 //! Titles downloaded for offline playback: the original file, Emby's
-//! metadata beside it (`<file>.emby.json`) and its artwork (`<file>.jpg`).
+//! metadata beside it (`<file>.emby.json`), its artwork (`<file>.jpg`) and
+//! its external subtitles (`<name>.<language>[.forced].<format>`, the
+//! naming mpv reads language and forced from).
 //! The folder is the index: whatever has a `.emby.json` is a download.
 
 use std::path::{Path, PathBuf};
@@ -212,6 +214,7 @@ pub async fn fetch(
         .with_context(|| format!("couldn't finish {}", file.display()))?;
     std::fs::write(meta_path(&file), &raw)
         .with_context(|| format!("couldn't write the metadata for {}", file.display()))?;
+    save_subtitles(&client, &item.id, &source_id, source, &file).await;
     if let Some(image) = item.landscape().or_else(|| item.poster()) {
         let url = client.url(&EmbyClient::image_path(&image, 640));
         let art = Progress::default();
@@ -226,12 +229,136 @@ pub async fn fetch(
     Ok(file)
 }
 
-/// Removes a download: its file, metadata and artwork, and folders left empty.
+/// Subtitle formats saved beside downloads (and picked up for playback).
+const SUBTITLE_EXTENSIONS: [&str; 5] = ["srt", "ass", "ssa", "vtt", "sub"];
+
+/// Saves `source`'s external subtitles beside `file`. Embedded ones are
+/// already inside the file. A subtitle that fails is skipped: the video
+/// still plays.
+async fn save_subtitles(
+    client: &EmbyClient,
+    item_id: &str,
+    source_id: &str,
+    source: &serde_json::Value,
+    file: &Path,
+) {
+    let streams = source["MediaStreams"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let mut used: Vec<PathBuf> = Vec::new();
+    for stream in streams.iter().filter(|s| {
+        s["Type"].as_str() == Some("Subtitle") && s["IsExternal"].as_bool() == Some(true)
+    }) {
+        let Some(index) = stream["Index"].as_i64().and_then(|i| i32::try_from(i).ok()) else {
+            continue;
+        };
+        let format = match stream["Codec"]
+            .as_str()
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("ass") => "ass",
+            Some("ssa") => "ssa",
+            Some("webvtt" | "vtt") => "vtt",
+            _ => "srt",
+        };
+        let language = stream["Language"].as_str().unwrap_or("und");
+        let forced = stream["IsForced"].as_bool() == Some(true);
+        let path = subtitle_path(file, language, forced, format, &used);
+        let url = match client.subtitle_url(item_id, source_id, index, format) {
+            Ok(url) => url,
+            Err(e) => {
+                tracing::warn!("no subtitle url: {e:#}");
+                continue;
+            }
+        };
+        let done = Progress::default();
+        match client
+            .download_to(&url, &path, &done, &AtomicBool::new(false))
+            .await
+        {
+            Ok(()) => used.push(path),
+            Err(e) => {
+                let _ = std::fs::remove_file(&path);
+                tracing::warn!(
+                    "couldn't save subtitle {index} of {}: {e:#}",
+                    file.display()
+                );
+            }
+        }
+    }
+}
+
+/// `<name>.<language>[.forced][.2].<format>` beside `file`, not one of `used`.
+fn subtitle_path(
+    file: &Path,
+    language: &str,
+    forced: bool,
+    format: &str,
+    used: &[PathBuf],
+) -> PathBuf {
+    let stem = file.file_stem().unwrap_or_default().to_string_lossy();
+    let language: String = language
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect::<String>()
+        .to_lowercase();
+    let mut base = format!(
+        "{stem}.{}",
+        if language.is_empty() {
+            "und"
+        } else {
+            &language
+        }
+    );
+    if forced {
+        base.push_str(".forced");
+    }
+    (1..)
+        .map(|n| {
+            let name = if n == 1 {
+                format!("{base}.{format}")
+            } else {
+                format!("{base}.{n}.{format}")
+            };
+            file.with_file_name(name)
+        })
+        .find(|path| !used.contains(path))
+        .expect("an unused name")
+}
+
+/// The subtitle files saved beside `file` (see [`save_subtitles`]).
+pub fn subtitles_beside(file: &Path) -> Vec<PathBuf> {
+    let (Some(dir), Some(stem)) = (file.parent(), file.file_stem()) else {
+        return Vec::new();
+    };
+    let prefix = format!("{}.", stem.to_string_lossy());
+    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|entries| entries.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        .unwrap_or_default();
+    found.retain(|path| {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        name.starts_with(&prefix)
+            && path.extension().is_some_and(|ext| {
+                SUBTITLE_EXTENSIONS.contains(&ext.to_string_lossy().to_lowercase().as_str())
+            })
+    });
+    found.sort();
+    found
+}
+
+/// Removes a download: its file, metadata, artwork and subtitles, and
+/// folders left empty.
 pub fn delete(download: &Download) -> Result<()> {
+    let subtitles = subtitles_beside(&download.file);
     std::fs::remove_file(&download.file)
         .with_context(|| format!("couldn't delete {}", download.file.display()))?;
     let _ = std::fs::remove_file(meta_path(&download.file));
     let _ = std::fs::remove_file(image_path(&download.file));
+    for subtitle in subtitles {
+        let _ = std::fs::remove_file(subtitle);
+    }
     // Season, then series folder, when nothing else is in them.
     let root = folder();
     let mut dir = download.file.parent().map(Path::to_path_buf);
@@ -269,6 +396,41 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(relative_path(&movie), PathBuf::from("Film (2020)"));
+    }
+
+    #[test]
+    fn subtitles_are_named_for_mpv_and_found_again() {
+        let dir = std::env::temp_dir().join(format!("ecp-subs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("S01E01 - Pilot.mkv");
+        let first = subtitle_path(&file, "eng", false, "srt", &[]);
+        assert_eq!(first, dir.join("S01E01 - Pilot.eng.srt"));
+        assert_eq!(
+            subtitle_path(&file, "eng", false, "srt", std::slice::from_ref(&first)),
+            dir.join("S01E01 - Pilot.eng.2.srt")
+        );
+        assert_eq!(
+            subtitle_path(&file, "en-US", true, "ass", &[]),
+            dir.join("S01E01 - Pilot.enus.forced.ass")
+        );
+        for name in [
+            "S01E01 - Pilot.mkv",
+            "S01E01 - Pilot.eng.srt",
+            "S01E01 - Pilot.jpn.forced.ass",
+            "S01E01 - Pilot.mkv.jpg",
+            "S01E01 - Pilot 2.eng.srt",
+        ] {
+            std::fs::write(dir.join(name), "").unwrap();
+        }
+        assert_eq!(
+            subtitles_beside(&file),
+            [
+                dir.join("S01E01 - Pilot.eng.srt"),
+                dir.join("S01E01 - Pilot.jpn.forced.ass")
+            ]
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

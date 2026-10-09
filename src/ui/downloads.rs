@@ -1,7 +1,9 @@
-//! Downloads: starting them (item menus), the Downloads page (running and
-//! finished ones), and playing them from disk.
+//! Downloads: starting them (item menus), the Downloads page (running,
+//! waiting and finished ones), and playing them from disk. One download
+//! runs at a time; the rest wait in a queue (a whole season or series).
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,6 +26,7 @@ struct Running {
 
 thread_local! {
     static RUNNING: RefCell<Vec<Running>> = const { RefCell::new(Vec::new()) };
+    static QUEUE: RefCell<VecDeque<BaseItem>> = const { RefCell::new(VecDeque::new()) };
 }
 
 /// Movies and episodes can be downloaded.
@@ -31,22 +34,89 @@ pub fn can_download(item: &BaseItem) -> bool {
     matches!(item.item_type.as_str(), "Movie" | "Episode" | "Video")
 }
 
+/// Whether `item_id` is downloading or waiting to.
 pub fn is_running(item_id: &str) -> bool {
     RUNNING.with(|r| r.borrow().iter().any(|d| d.item.id == item_id))
+        || QUEUE.with(|q| q.borrow().iter().any(|i| i.id == item_id))
 }
 
-/// Starts downloading `item` (once); a toast says when it's done.
+/// Downloads `item` (once), after whatever is already downloading.
 pub fn start(ui: &Ui, item: &BaseItem) {
-    if is_running(&item.id) {
+    if enqueue(item) {
+        if RUNNING.with(|r| r.borrow().is_empty()) {
+            ui.toast(&format!("Downloading {}", item.episode_label()));
+        } else {
+            ui.toast(&format!("{} will download next", item.episode_label()));
+        }
+        pump(ui);
+    }
+}
+
+/// Queues `item` unless it's downloaded, downloading or queued already.
+fn enqueue(item: &BaseItem) -> bool {
+    if is_running(&item.id) || crate::downloads::find(&item.id).is_some() {
+        return false;
+    }
+    QUEUE.with(|q| q.borrow_mut().push_back(item.clone()));
+    true
+}
+
+/// Downloads every episode of `target` (a series or a season) not yet
+/// downloaded, in order.
+pub fn start_episodes_of(ui: &Ui, target: &BaseItem) {
+    let series_id = match target.item_type.as_str() {
+        "Series" => target.id.clone(),
+        _ => match &target.series_id {
+            Some(id) => id.clone(),
+            None => return,
+        },
+    };
+    let season = (target.item_type == "Season").then(|| target.id.clone());
+    let (client, user_id) = (ui.client(), ui.user_id());
+    let weak = ui.downgrade();
+    let name = target.name.clone();
+    glib::spawn_future_local(async move {
+        let episodes = crate::runtime::spawn_tokio(async move {
+            client.series_episodes(&series_id, &user_id).await
+        })
+        .await;
+        let Some(ui) = weak.upgrade() else { return };
+        let episodes = match episodes {
+            Ok(episodes) => episodes,
+            Err(e) => return ui.report_error(&format!("Couldn't list the episodes of {name}"), &e),
+        };
+        let added = episodes
+            .iter()
+            .filter(|e| season.is_none() || e.season_id == season)
+            .filter(|e| enqueue(e))
+            .count();
+        match added {
+            0 => ui.toast(&format!("Everything in {name} is downloaded already")),
+            1 => ui.toast(&format!("Downloading 1 episode of {name}")),
+            n => ui.toast(&format!("Downloading {n} episodes of {name}")),
+        }
+        pump(&ui);
+        ui.data_changed();
+    });
+}
+
+/// Starts the next queued download if none is running.
+fn pump(ui: &Ui) {
+    if !RUNNING.with(|r| r.borrow().is_empty()) {
         return;
     }
+    if let Some(item) = QUEUE.with(|q| q.borrow_mut().pop_front()) {
+        run(ui, &item);
+    }
+}
+
+fn run(ui: &Ui, item: &BaseItem) {
     let running = Running {
         item: item.clone(),
         progress: Arc::new(Progress::default()),
         cancelled: Arc::new(AtomicBool::new(false)),
     };
     RUNNING.with(|r| r.borrow_mut().push(running.clone()));
-    ui.toast(&format!("Downloading {}", item.episode_label()));
     let (client, user_id) = (ui.client(), ui.user_id());
     let weak = ui.downgrade();
     glib::spawn_future_local(async move {
@@ -67,6 +137,7 @@ pub fn start(ui: &Ui, item: &BaseItem) {
             Err(_) if running.cancelled.load(Ordering::Relaxed) => {}
             Err(e) => ui.report_error(&format!("Couldn't download {name}"), &e),
         }
+        pump(&ui);
         ui.data_changed();
     });
 }
@@ -149,8 +220,18 @@ pub fn page(ui: &Ui) -> adw::NavigationPage {
     page
 }
 
+/// What's downloading and waiting: the page rebuilds when this changes.
 fn running_ids() -> Vec<String> {
-    RUNNING.with(|r| r.borrow().iter().map(|d| d.item.id.clone()).collect())
+    RUNNING
+        .with(|r| {
+            r.borrow()
+                .iter()
+                .map(|d| d.item.id.clone())
+                .collect::<Vec<_>>()
+        })
+        .into_iter()
+        .chain(QUEUE.with(|q| q.borrow().iter().map(|i| i.id.clone()).collect::<Vec<_>>()))
+        .collect()
 }
 
 const PROGRESS_KEY: &str = "embyclientplus-download-progress";
@@ -159,6 +240,7 @@ fn fill(ui: &Ui, content: &gtk::Box) {
     let mark = super::gamepad::mark_cursor(content);
     clear(content);
     let running: Vec<Running> = RUNNING.with(|r| r.borrow().clone());
+    let waiting: Vec<BaseItem> = QUEUE.with(|q| q.borrow().iter().cloned().collect());
     let finished = crate::downloads::list();
     let folder = crate::downloads::folder();
     content.append(
@@ -169,12 +251,15 @@ fn fill(ui: &Ui, content: &gtk::Box) {
             .css_classes(["dim-label", "caption"])
             .build(),
     );
-    if running.is_empty() && finished.is_empty() {
+    if running.is_empty() && waiting.is_empty() && finished.is_empty() {
         content.append(
             &adw::StatusPage::builder()
                 .icon_name(crate::ui::icons::DOWNLOAD)
                 .title("No downloads")
-                .description("Choose Download in a movie's or episode's menu to watch it offline")
+                .description(
+                    "Choose Download in a movie's, episode's, season's or series' menu to watch \
+                     it offline",
+                )
                 .vexpand(true)
                 .build(),
         );
@@ -184,6 +269,12 @@ fn fill(ui: &Ui, content: &gtk::Box) {
         let list = section(content, "Downloading");
         for download in running {
             list.append(&running_row(&download));
+        }
+    }
+    if !waiting.is_empty() {
+        let list = section(content, "Waiting");
+        for item in waiting {
+            list.append(&waiting_row(ui, &item));
         }
     }
     if !finished.is_empty() {
@@ -246,6 +337,27 @@ fn running_row(download: &Running) -> adw::ActionRow {
     unsafe {
         row.set_data(PROGRESS_KEY, (download.progress.clone(), bar));
     }
+    row
+}
+
+fn waiting_row(ui: &Ui, item: &BaseItem) -> adw::ActionRow {
+    let row = adw::ActionRow::builder()
+        .title(glib::markup_escape_text(&title_of(item)))
+        .build();
+    let cancel = gtk::Button::builder()
+        .icon_name(crate::ui::icons::REMOVE)
+        .tooltip_text("Don't download")
+        .valign(gtk::Align::Center)
+        .css_classes(["flat"])
+        .build();
+    let (weak, id) = (ui.downgrade(), item.id.clone());
+    cancel.connect_clicked(move |_| {
+        QUEUE.with(|q| q.borrow_mut().retain(|i| i.id != id));
+        if let Some(ui) = weak.upgrade() {
+            ui.data_changed();
+        }
+    });
+    row.add_suffix(&cancel);
     row
 }
 

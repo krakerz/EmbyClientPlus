@@ -155,6 +155,9 @@ pub struct Track {
     pub external_filename: Option<String>,
 }
 
+/// Smallest and largest subtitle size the menu allows.
+pub const SUB_SCALE_RANGE: (f64, f64) = (0.5, 3.0);
+
 /// Hardware decoders, in order (copy-back: SVP needs frames in RAM).
 /// Windows: D3D11 first, which every GPU there has; elsewhere VA-API
 /// first (see below), macOS falling through to VideoToolbox.
@@ -371,6 +374,27 @@ impl Player {
     }
 
     /// 0–100 (mpv allows up to `volume-max`, 130 by default).
+    /// Subtitle size (1.0 = normal).
+    pub fn subtitle_scale(self) -> f64 {
+        self.mpv.get_property::<f64>("sub-scale").unwrap_or(1.0)
+    }
+
+    pub fn set_subtitle_scale(self, scale: f64) -> Result<()> {
+        self.set(
+            "sub-scale",
+            scale.clamp(SUB_SCALE_RANGE.0, SUB_SCALE_RANGE.1),
+        )
+    }
+
+    /// Subtitle timing offset in seconds (positive: shown later).
+    pub fn subtitle_delay(self) -> f64 {
+        self.mpv.get_property::<f64>("sub-delay").unwrap_or(0.0)
+    }
+
+    pub fn set_subtitle_delay(self, seconds: f64) -> Result<()> {
+        self.set("sub-delay", seconds)
+    }
+
     pub fn volume(self) -> f64 {
         self.mpv.get_property::<f64>("volume").unwrap_or(100.0)
     }

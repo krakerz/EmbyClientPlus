@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [1.10.0] — 2026-10-09
+
+### Added
+- Subtitles button next to Play on movie, episode and series pages: pick a language (or forced only, or off) before playing; it's remembered for the title (the whole series for episodes), and Default goes back to Preferences.
+- Download a whole series or season: from its menu, or the download button on the series page. Downloads now run one at a time; the rest wait on the Downloads page, where each can be cancelled.
+- Downloads save their subtitle files too, and they load when the title plays from disk. The standalone player also loads subtitle files named like the video (`Movie.eng.srt`).
+- Player: the subtitles menu has Size (− / + in 10% steps, kept for every video) and Timing (± 0.1 s, for the current video; plus shows them later); click the value to reset it.
+- Linux: Preferences → Playback → "Do not disturb while watching" holds notifications back while a video is open (KDE Plasma, GNOME, caelestia, swaync, dunst, mako, or your own on/off commands).
+
+### Changed
+- Changing the volume or muting (keyboard or controller) shows just the volume indicator, not the whole player controls.
+
 ## [1.9.0] — 2026-10-09
 
 ### Added

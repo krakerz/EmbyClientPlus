@@ -6,6 +6,8 @@ mod cli;
 mod config;
 mod controller;
 mod db;
+#[cfg(target_os = "linux")]
+mod dnd;
 mod downloads;
 mod emby;
 mod frame_gen;
@@ -26,7 +28,7 @@ mod update;
 use adw::prelude::*;
 use gtk::glib;
 
-const APP_ID: &str = "io.github.krakerz.EmbyClientPlus";
+pub(crate) const APP_ID: &str = "io.github.krakerz.EmbyClientPlus";
 /// The name people see (window titles, Emby's device list, media controls).
 pub const APP_NAME: &str = "Emby Client+";
 

@@ -323,6 +323,15 @@ pub struct PlaybackSettings {
     /// plays (not music, not while paused).
     #[serde(default = "default_true")]
     pub keep_screen_on: bool,
+    /// Hold desktop notifications back while a video is open (Linux).
+    #[serde(default)]
+    pub do_not_disturb: bool,
+    /// Commands that switch do-not-disturb on and off, for desktops the app
+    /// doesn't know; empty means find out automatically (see `dnd`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub dnd_on_command: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub dnd_off_command: String,
     /// Let the player's controls hide while paused too (they stay up
     /// otherwise).
     #[serde(default)]
@@ -407,6 +416,9 @@ impl Default for PlaybackSettings {
             trailer_quality: TrailerQuality::default(),
             trailer_captions: true,
             keep_screen_on: true,
+            do_not_disturb: false,
+            dnd_on_command: String::new(),
+            dnd_off_command: String::new(),
             hide_osd_when_paused: false,
             default_volume: default_volume(),
         }
@@ -454,6 +466,14 @@ pub struct SubtitleSettings {
     pub preferred_language: String,
     #[serde(default = "default_true")]
     pub prefer_text_over_burnin: bool,
+    /// Subtitle size (mpv's `sub-scale`, 1.0 = normal), set from the
+    /// player's subtitles menu.
+    #[serde(default = "default_sub_scale")]
+    pub scale: f64,
+}
+
+fn default_sub_scale() -> f64 {
+    1.0
 }
 
 impl Default for SubtitleSettings {
@@ -461,6 +481,7 @@ impl Default for SubtitleSettings {
         Self {
             preferred_language: default_language(),
             prefer_text_over_burnin: true,
+            scale: default_sub_scale(),
         }
     }
 }

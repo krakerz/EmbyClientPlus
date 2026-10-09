@@ -143,6 +143,8 @@ pub struct LocalMedia {
     /// The server a downloaded title came from: progress and watched state
     /// still go there (when it's reachable). `None` for plain files.
     pub client: Option<Arc<EmbyClient>>,
+    /// Subtitle files to load with it (a download's saved subtitles).
+    pub subtitle_files: Vec<String>,
 }
 
 /// One playing item, from load until it's stopped or replaced.
@@ -250,10 +252,7 @@ impl PlaybackSession {
         let external_subtitles = subtitle_files(&client, &item.id, &source, quality)?;
         let hdr = crate::emby::models::is_hdr(&source.media_streams);
         let (previous, next) = neighbours(&episodes, &item.id);
-        let (override_key, override_type) = match &item.series_id {
-            Some(series_id) => (series_id.clone(), ItemType::Series),
-            None => (item.id.clone(), ItemType::Movie),
-        };
+        let (override_key, override_type) = title_key(&item);
 
         // Nothing to sharpen or upscale in music.
         let shader_groups = if item.is_audio() {
@@ -309,6 +308,7 @@ impl PlaybackSession {
         start_ticks: i64,
     ) -> Result<Rc<Self>> {
         let target = media.target.clone();
+        let subtitle_files = media.subtitle_files.clone();
         let options = crate::remote::Options::from_settings(&Settings::load().unwrap_or_default());
         let stream = spawn_tokio(async move {
             tokio::task::spawn_blocking(move || crate::remote::resolve(&target, &options)).await?
@@ -339,7 +339,12 @@ impl PlaybackSession {
             start_volume: Cell::new(player.volume()),
         });
         session.set_up_player()?;
-        let subtitles: Vec<&str> = stream.subtitle.as_deref().into_iter().collect();
+        let subtitles: Vec<&str> = stream
+            .subtitle
+            .as_deref()
+            .into_iter()
+            .chain(subtitle_files.iter().map(String::as_str))
+            .collect();
         player.load_at(
             &stream.url,
             start_ticks as f64 / TICKS_PER_SECOND as f64,
@@ -392,6 +397,13 @@ impl PlaybackSession {
             self.start_volume.set(volume);
         }
         self.apply_shaders();
+        // Size is a preference; timing belongs to one file and starts at 0.
+        if let Err(e) = player
+            .set_subtitle_scale(settings.subtitles.scale)
+            .and_then(|()| player.set_subtitle_delay(0.0))
+        {
+            tracing::warn!("{e:#}");
+        }
         Ok(())
     }
 
@@ -618,32 +630,11 @@ impl PlaybackSession {
     }
 
     fn remembered(&self) -> Option<TitleOverride> {
-        Db::open_default()
-            .and_then(|db| db.get_override(&self.override_key))
-            .unwrap_or_else(|e| {
-                tracing::warn!("overrides unreadable: {e:#}");
-                None
-            })
+        remembered_for(&self.override_key)
     }
 
     fn remember(&self, change: impl FnOnce(&mut TitleOverride)) {
-        let mut entry = self.remembered().unwrap_or_else(|| TitleOverride {
-            emby_item_id: self.override_key.clone(),
-            item_type: self.override_type,
-            audio_language: None,
-            subtitle_language: None,
-            subtitle_forced_only: None,
-            frame_gen_backend: None,
-            frame_gen_multiplier: None,
-            aspect_mode: None,
-            zoom: None,
-            shaders: None,
-            volume: None,
-        });
-        change(&mut entry);
-        if let Err(e) = Db::open_default().and_then(|db| db.upsert_override(&entry)) {
-            tracing::warn!("could not save the title override: {e:#}");
-        }
+        remember_for(&self.override_key, self.override_type, change);
     }
 
     pub fn position_ticks(&self) -> i64 {
@@ -829,6 +820,46 @@ fn apply_smoothing(player: Player, svp: bool) {
         && let Err(e) = player.set_smooth_motion(wanted)
     {
         tracing::warn!("{e:#}");
+    }
+}
+
+/// What a title's remembered choices are stored under: the series for
+/// episodes (one choice for the whole show), else the item itself.
+pub fn title_key(item: &BaseItem) -> (String, ItemType) {
+    match &item.series_id {
+        Some(series_id) => (series_id.clone(), ItemType::Series),
+        None => (item.id.clone(), ItemType::Movie),
+    }
+}
+
+/// The choices remembered under `key` (see [`title_key`]).
+pub fn remembered_for(key: &str) -> Option<TitleOverride> {
+    Db::open_default()
+        .and_then(|db| db.get_override(key))
+        .unwrap_or_else(|e| {
+            tracing::warn!("overrides unreadable: {e:#}");
+            None
+        })
+}
+
+/// Changes and saves the choices remembered under `key`.
+pub fn remember_for(key: &str, item_type: ItemType, change: impl FnOnce(&mut TitleOverride)) {
+    let mut entry = remembered_for(key).unwrap_or_else(|| TitleOverride {
+        emby_item_id: key.to_string(),
+        item_type,
+        audio_language: None,
+        subtitle_language: None,
+        subtitle_forced_only: None,
+        frame_gen_backend: None,
+        frame_gen_multiplier: None,
+        aspect_mode: None,
+        zoom: None,
+        shaders: None,
+        volume: None,
+    });
+    change(&mut entry);
+    if let Err(e) = Db::open_default().and_then(|db| db.upsert_override(&entry)) {
+        tracing::warn!("could not save the title override: {e:#}");
     }
 }
 

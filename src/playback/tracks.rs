@@ -142,7 +142,7 @@ pub fn track_label(track: &Track, stream: Option<&MediaStream>) -> String {
 }
 
 /// Human name for common codes; the code itself otherwise.
-fn language_name(code: &str) -> String {
+pub fn language_name(code: &str) -> String {
     let name = match normalize_language(code).as_str() {
         "eng" => "English",
         "jpn" => "Japanese",

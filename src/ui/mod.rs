@@ -28,6 +28,7 @@ mod scrub_preview;
 mod search;
 mod series;
 mod standalone;
+mod subtitle_picker;
 pub use standalone::present as present_standalone;
 mod updates;
 pub mod window;
@@ -587,6 +588,10 @@ impl Ui {
             // The same choices as when streaming it.
             override_key: item.series_id.clone().unwrap_or_else(|| item.id.clone()),
             client: Some(self.client()),
+            subtitle_files: crate::downloads::subtitles_beside(&download.file)
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
         };
         let ui = self.clone();
         glib::spawn_future_local(async move {

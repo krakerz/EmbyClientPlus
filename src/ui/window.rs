@@ -216,6 +216,9 @@ thread_local! {
 /// stopped). An open dialog would swallow the close request (libadwaita
 /// closes the dialog instead), so it goes first.
 pub fn shut_down(window: &gtk::Window) {
+    // Notifications come back even if the player never got to close.
+    #[cfg(target_os = "linux")]
+    crate::dnd::set(false);
     if let Some(dialog) = window
         .downcast_ref::<adw::ApplicationWindow>()
         .and_then(|window| window.visible_dialog())

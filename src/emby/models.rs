@@ -212,7 +212,7 @@ pub struct MediaSource {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct MediaStream {
     pub index: i32,
@@ -273,6 +273,8 @@ pub struct ChapterInfo {
 #[serde(rename_all = "PascalCase", default)]
 pub struct BaseItem {
     pub id: String,
+    /// Only on single-item fetches that ask for it (details pages).
+    pub media_streams: Vec<MediaStream>,
     pub name: String,
     #[serde(rename = "Type")]
     pub item_type: String,
