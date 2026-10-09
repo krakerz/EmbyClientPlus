@@ -195,8 +195,7 @@ pub fn custom_dir() -> Option<PathBuf> {
 }
 
 fn builtin_dir() -> Option<PathBuf> {
-    directories::ProjectDirs::from("com", "krakerz", "embyclientplus")
-        .map(|dirs| dirs.cache_dir().join("shaders"))
+    crate::config::cache_dir().map(|dir| dir.join("shaders"))
 }
 
 /// Every group, in menu order: FSR, Anime4K, then custom folders by name.

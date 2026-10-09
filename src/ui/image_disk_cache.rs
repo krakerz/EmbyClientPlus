@@ -7,14 +7,11 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use directories::ProjectDirs;
-
 /// Oldest files are deleted past this total size.
 const MAX_BYTES: u64 = 512 * 1024 * 1024;
 
 fn dir() -> Option<PathBuf> {
-    ProjectDirs::from("com", "krakerz", "embyclientplus")
-        .map(|dirs| dirs.cache_dir().join("images"))
+    crate::config::cache_dir().map(|dir| dir.join("images"))
 }
 
 /// Cache file for an image URL (full URL, so different servers never mix).

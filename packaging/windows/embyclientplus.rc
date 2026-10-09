@@ -1,0 +1,3 @@
+// The icon Explorer and the taskbar show for embyclientplus.exe and the
+// launcher (build.rs, packaging/windows/launcher.c).
+1 ICON "embyclientplus.ico"

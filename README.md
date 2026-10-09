@@ -27,14 +27,14 @@ From [Releases](https://github.com/krakerz/EmbyClientPlus/releases):
 |---|---|---|
 | Linux, SteamOS | `EmbyClientPlus-<version>-x86_64.AppImage` | `chmod +x`, then run it |
 | Linux | `embyclientplus-<version>-linux-x86_64.tar.gz` | extract, run `./install.sh` (`./uninstall.sh` removes it); needs GTK 4.12+, libadwaita 1.6+, FFmpeg, libplacebo |
-| Windows | `embyclientplus-<version>-windows-x86_64.zip` | extract anywhere, run `bin\embyclientplus.exe` |
+| Windows | `embyclientplus-<version>-windows-x86_64.zip` | extract anywhere, run `Emby Client+.exe` |
 | macOS (Apple Silicon) | `embyclientplus-<version>-macos-arm64.zip` | extract, move `Emby Client+.app` to Applications |
 
 The macOS app isn't notarized. The first time it's blocked: open System Settings → Privacy &
 Security → **Open Anyway**, or run `xattr -dr com.apple.quarantine "/Applications/Emby Client+.app"`.
 
 Every build updates itself (Preferences → Updates). SVP 4 is optional and found in its usual
-folder (`~/SVP4`, `C:\Program Files (x86)\SVP 4`, `/Applications/SVP 4 Mac.app`) or one you set.
+folder (`~/SVP4`, `C:\Program Files\SVP 4`, `/Applications/SVP 4 Mac.app`) or one you set.
 
 ## Building from source
 
@@ -128,8 +128,8 @@ embyclientplus --help | --version
 Manager, red SVP Manager not running, grey SVP not found.
 
 **Where are settings and logs?** `config.toml` and `logs/` (newest 10 kept) are in
-`~/.config/embyclientplus/` (Linux), `%APPDATA%\krakerz\embyclientplus\config\` (Windows) or
-`~/Library/Application Support/com.krakerz.embyclientplus/` (macOS).
+`~/.config/embyclientplus/` (Linux), `%APPDATA%\EmbyClient+\` (Windows) or
+`~/Library/Application Support/EmbyClient+/` (macOS).
 
 **Does it bundle SVP?** No, it uses your own SVP install.
 

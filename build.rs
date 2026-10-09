@@ -35,7 +35,14 @@ fn main() {
     // Windows and macOS link the package manager's libmpv (MSYS2,
     // Homebrew), which has vapoursynth; SVP's own copy is reached at run
     // time through packaging/vsshim instead of the paths set up below.
-    if std::env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os != "linux") {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os == "windows" {
+        println!("cargo:rerun-if-changed=packaging/windows");
+        embed_resource::compile("packaging/windows/embyclientplus.rc", embed_resource::NONE)
+            .manifest_optional()
+            .expect("couldn't embed the Windows icon");
+    }
+    if target_os != "linux" {
         return;
     }
 

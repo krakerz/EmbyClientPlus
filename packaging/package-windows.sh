@@ -5,6 +5,7 @@
 #
 # Layout (GTK finds its data relative to its DLLs' folder):
 #   EmbyClientPlus-<ver>-windows-x86_64/
+#     Emby Client+.exe  launcher (packaging/windows/launcher.c) for bin\
 #     bin/    embyclientplus.exe, every DLL it needs, the VapourSynth stand-ins
 #     lib/    gdk-pixbuf loaders
 #     share/  GSettings schemas, Adwaita symbolic icons
@@ -80,6 +81,11 @@ mkdir -p "$icons/Adwaita" "$icons/hicolor"
 cp "$PREFIX/share/icons/Adwaita/index.theme" "$icons/Adwaita/"
 cp -r "$PREFIX/share/icons/Adwaita/symbolic" "$icons/Adwaita/"
 cp "$PREFIX/share/icons/hicolor/index.theme" "$icons/hicolor/"
+
+# The launcher at the top, with the app icon.
+windres packaging/windows/embyclientplus.rc -O coff -o "$DIST/icon.o"
+gcc -O2 -municode -mwindows packaging/windows/launcher.c "$DIST/icon.o" -o "$root/Emby Client+.exe"
+rm -f "$DIST/icon.o"
 
 # Lets the app update itself in place (src/update.rs).
 touch "$root/.embyclientplus-install"
