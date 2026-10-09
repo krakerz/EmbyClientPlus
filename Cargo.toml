@@ -1,6 +1,6 @@
 [package]
 name = "embyclientplus"
-version = "1.8.0"
+version = "1.9.0"
 edition = "2024"
 description = "Native Emby client with SVP frame interpolation"
 license = "GPL-3.0-or-later"
@@ -39,6 +39,14 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 # Finding SVP Manager among the running processes (Linux reads /proc).
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+
+# Disconnecting SVP from mpv's IPC pipe (src/player/mod.rs).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+] }
 
 [build-dependencies]
 # The exe's icon on Windows (packaging/windows/embyclientplus.rc).
