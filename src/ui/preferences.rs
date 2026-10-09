@@ -982,8 +982,8 @@ fn svp_folder_row(parent: &gtk::Widget) -> adw::ActionRow {
     let row = adw::ActionRow::builder()
         .title("SVP folder")
         .tooltip_text(
-            "Where SVP 4 is installed. Used to detect SVP; the VapourSynth \
-             libraries come from the folder given when libmpv was built.",
+            "Where SVP 4 is installed, used to find and start SVP Manager. On a Mac, \
+             the SVP 4 Mac app or the folder it's in (Applications).",
         )
         .build();
     let reset = gtk::Button::builder()

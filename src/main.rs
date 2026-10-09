@@ -72,6 +72,7 @@ fn main() -> glib::ExitCode {
     let app = adw::Application::builder().application_id(APP_ID).build();
     app.connect_activate(move |app| {
         ui::icons::install();
+        ui::app_menu::install(app, player_only.is_none());
         let result = match &player_only {
             Some(target) => player::Player::new(mpv_config_dir().as_deref()).map(|player| {
                 apply_bar_fill(player);
