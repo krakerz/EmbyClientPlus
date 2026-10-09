@@ -42,6 +42,7 @@ impl Queue {
         }
     }
 
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // used by MPRIS
     pub fn is_empty(&self) -> bool {
         self.order.is_empty()
     }

@@ -16,32 +16,59 @@ const GL_DRAW_FRAMEBUFFER_BINDING: u32 = 0x8CA6;
 type GetProcAddressFn = unsafe extern "C" fn(*const c_char) -> *mut c_void;
 type GetIntegervFn = unsafe extern "C" fn(u32, *mut i32);
 
-/// GTK4 creates its GL contexts through EGL on both Wayland and X11, so
-/// eglGetProcAddress resolves every GL entry point mpv needs.
+/// Resolves GL entry points for mpv in whatever GL GTK made current.
+/// Linux: GTK4 creates its contexts through EGL on both Wayland and X11,
+/// so eglGetProcAddress covers everything. Windows: wglGetProcAddress
+/// for extensions and GL > 1.1, opengl32.dll's own exports for the rest.
+/// macOS: the OpenGL framework exports every entry point directly.
 struct GlLoader {
-    _lib: Library,
-    get_proc_address: GetProcAddressFn,
+    lib: Library,
+    get_proc_address: Option<GetProcAddressFn>,
 }
+
+#[cfg(target_os = "linux")]
+const GL_LIBRARY: (&str, Option<&[u8]>) = ("libEGL.so.1", Some(b"eglGetProcAddress\0"));
+#[cfg(windows)]
+const GL_LIBRARY: (&str, Option<&[u8]>) = ("opengl32.dll", Some(b"wglGetProcAddress\0"));
+#[cfg(target_os = "macos")]
+const GL_LIBRARY: (&str, Option<&[u8]>) =
+    ("/System/Library/Frameworks/OpenGL.framework/OpenGL", None);
 
 impl GlLoader {
     fn load() -> Result<Self> {
-        // SAFETY: libEGL has no unsound initializers; GTK already loaded it.
-        let lib = unsafe { Library::new("libEGL.so.1") }.context("failed to load libEGL")?;
-        // SAFETY: eglGetProcAddress has exactly this signature; the copied
-        // pointer stays valid because the library is kept alive alongside it.
-        let get_proc_address = unsafe { *lib.get::<GetProcAddressFn>(b"eglGetProcAddress\0")? };
+        let (name, getter) = GL_LIBRARY;
+        // SAFETY: the system GL library has no unsound initializers; GTK
+        // already loaded it.
+        let lib =
+            unsafe { Library::new(name) }.with_context(|| format!("failed to load {name}"))?;
+        let get_proc_address = match getter {
+            // SAFETY: egl/wglGetProcAddress have exactly this signature; the
+            // copied pointer stays valid as the library is kept alongside it.
+            Some(symbol) => Some(unsafe { *lib.get::<GetProcAddressFn>(symbol)? }),
+            None => None,
+        };
         Ok(Self {
-            _lib: lib,
+            lib,
             get_proc_address,
         })
     }
 
     fn proc_address(&self, name: &str) -> *mut c_void {
-        match CString::new(name) {
+        let Ok(name) = CString::new(name) else {
+            return std::ptr::null_mut();
+        };
+        if let Some(get) = self.get_proc_address {
             // SAFETY: valid NUL-terminated name, called with a GL context current.
-            Ok(name) => unsafe { (self.get_proc_address)(name.as_ptr()) },
-            Err(_) => std::ptr::null_mut(),
+            let address = unsafe { get(name.as_ptr()) };
+            // wglGetProcAddress signals "not here" with 0 but also 1, 2, 3 or -1.
+            if !matches!(address as isize, -1..=3) || cfg!(not(windows)) {
+                return address;
+            }
         }
+        // SAFETY: looking up an exported symbol; only its address is used.
+        unsafe { self.lib.get::<*mut c_void>(name.as_bytes_with_nul()) }
+            .map(|symbol| *symbol)
+            .unwrap_or(std::ptr::null_mut())
     }
 }
 

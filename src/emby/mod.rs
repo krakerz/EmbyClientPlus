@@ -10,7 +10,73 @@ pub mod trickplay;
 use anyhow::{Context, Result};
 use reqwest::header::{HeaderMap, HeaderValue};
 
-const DEVICE_NAME: &str = crate::APP_NAME;
+const CLIENT_NAME: &str = crate::APP_NAME;
+
+/// How a browser session names itself to Emby (Emby's web app sends
+/// "Emby Web" and the browser's name).
+const BROWSER_CLIENT: &str = "Emby Web";
+const BROWSER_DEVICE: &str = "Firefox";
+
+static APPEAR_AS_BROWSER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Whether requests identify as a web browser (Preferences → Server);
+/// read from config at startup, changed live by Preferences.
+pub fn set_appear_as_browser(on: bool) {
+    APPEAR_AS_BROWSER.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The server's own version (`/System/Info/Public`), which Emby's web app
+/// reports as its version; learnt at sign-in, saved in config.
+static SERVER_VERSION: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+pub fn set_server_version(version: &str) {
+    if let Ok(mut current) = SERVER_VERSION.lock() {
+        *current = version.to_string();
+    }
+}
+
+/// Client, device and version for the authorization header.
+fn identity() -> (&'static str, &'static str, String) {
+    if APPEAR_AS_BROWSER.load(std::sync::atomic::Ordering::Relaxed) {
+        let version = SERVER_VERSION
+            .lock()
+            .map(|v| v.clone())
+            .ok()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| APP_VERSION.to_string());
+        (BROWSER_CLIENT, BROWSER_DEVICE, version)
+    } else {
+        (CLIENT_NAME, device_name(), APP_VERSION.to_string())
+    }
+}
+
+/// What the server's Devices page calls this machine: its host name, like
+/// Emby's own apps do, so several computers can be told apart.
+fn device_name() -> &'static str {
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        host_name()
+            .map(|name| name.trim().replace('"', ""))
+            .filter(|name| !name.is_empty() && name.is_ascii())
+            .unwrap_or_else(|| CLIENT_NAME.to_string())
+    })
+}
+
+#[cfg(unix)]
+fn host_name() -> Option<String> {
+    let mut buf = [0u8; 256];
+    // SAFETY: gethostname writes at most `buf.len()` bytes into `buf`.
+    if unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } != 0 {
+        return None;
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    Some(String::from_utf8_lossy(&buf[..end]).into_owned())
+}
+
+#[cfg(windows)]
+fn host_name() -> Option<String> {
+    std::env::var("COMPUTERNAME").ok()
+}
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Clone)]
@@ -50,8 +116,9 @@ impl EmbyClient {
     /// authenticated or not — client/device identification is separate
     /// from the bearer token itself.
     fn emby_authorization_header(&self) -> String {
+        let (client, device, version) = identity();
         format!(
-            "MediaBrowser Client=\"{DEVICE_NAME}\", Device=\"{DEVICE_NAME}\", DeviceId=\"{}\", Version=\"{APP_VERSION}\"",
+            "MediaBrowser Client=\"{client}\", Device=\"{device}\", DeviceId=\"{}\", Version=\"{version}\"",
             self.device_id
         )
     }
@@ -307,7 +374,15 @@ mod tests {
         let client = EmbyClient::new("http://server", "my-device-id");
         let header = client.emby_authorization_header();
         assert!(header.contains("DeviceId=\"my-device-id\""));
-        assert!(header.contains("Client=\"Emby Client+\""));
+        // Both identities in one test: the switch is process-wide.
+        set_appear_as_browser(false);
+        let app = client.emby_authorization_header();
+        set_appear_as_browser(true);
+        let browser = client.emby_authorization_header();
+        assert!(app.contains("Client=\"Emby Client+\""));
+        assert!(!app.contains("Device=\"Firefox\""));
+        assert!(browser.contains("Client=\"Emby Web\", Device=\"Firefox\""));
+        assert!(browser.contains("DeviceId=\"my-device-id\""));
     }
 
     #[test]

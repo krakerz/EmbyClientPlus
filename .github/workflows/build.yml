@@ -94,7 +94,114 @@ jobs:
           } >> release-notes.md
 
       - name: Package
-        run: packaging/package.sh
+        run: |
+          packaging/package.sh
+          cp release-notes.md dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            dist/*-linux-x86_64.tar.gz
+            dist/*.AppImage
+            dist/release-notes.md
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          # MSYS2's mpv is built with vapoursynth, so no libmpv of our own.
+          pacboy: >-
+            rust:p pkgconf:p gcc:p gtk4:p libadwaita:p mpv:p
+            gdk-pixbuf2:p librsvg:p ntldd:p adwaita-icon-theme:p hicolor-icon-theme:p
+          install: zip
+
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            target
+          key: cargo-windows-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-windows-
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package
+        run: packaging/package-windows.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*-windows-x86_64.zip
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - name: Install dependencies
+        # Homebrew's mpv is built with vapoursynth, so no libmpv of our own;
+        # bash 5 for the packaging script (macOS ships 3.2).
+        run: brew install rust pkgconf gtk4 libadwaita adwaita-icon-theme hicolor-icon-theme mpv librsvg bash
+
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            target
+          key: cargo-macos-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-macos-
+
+      - name: Clippy
+        run: LIBRARY_PATH="$(brew --prefix)/lib" cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: LIBRARY_PATH="$(brew --prefix)/lib" cargo test --locked
+
+      - name: Build release binary
+        run: LIBRARY_PATH="$(brew --prefix)/lib" cargo build --release --locked
+
+      - name: Package
+        run: packaging/package-macos.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*-macos-arm64.zip
+
+  release:
+    needs: [build, windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Resolve version
+        id: version
+        run: echo "version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)" >> "$GITHUB_OUTPUT"
 
       - name: Draft release
         uses: softprops/action-gh-release@v2
@@ -102,7 +209,9 @@ jobs:
           draft: true
           tag_name: ${{ steps.version.outputs.version }}
           name: ${{ steps.version.outputs.version }}
-          body_path: release-notes.md
+          body_path: artifacts/release-notes.md
           files: |
-            dist/*-linux-x86_64.tar.gz
-            dist/*.AppImage
+            artifacts/*-linux-x86_64.tar.gz
+            artifacts/*.AppImage
+            artifacts/*-windows-x86_64.zip
+            artifacts/*-macos-arm64.zip

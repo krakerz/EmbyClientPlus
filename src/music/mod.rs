@@ -3,6 +3,7 @@
 //! one mpv with video (starting either stops the other) and never touches
 //! SVP.
 
+#[cfg(target_os = "linux")]
 pub mod mpris;
 pub mod queue;
 
@@ -44,6 +45,7 @@ pub fn dispatch(event: &PlayerEvent) -> bool {
 }
 
 /// The live music player (main thread only).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // used by MPRIS
 fn active() -> Option<MusicPlayer> {
     ACTIVE
         .with(|active| active.borrow().upgrade())
@@ -129,6 +131,7 @@ impl MusicPlayer {
         *current = listeners;
         current.extend(added);
         drop(current);
+        #[cfg(target_os = "linux")]
         mpris::update(self);
     }
 
@@ -174,6 +177,7 @@ impl MusicPlayer {
         self.inner.player.duration()
     }
 
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // used by MPRIS
     pub fn client(&self) -> &Arc<EmbyClient> {
         &self.inner.client
     }

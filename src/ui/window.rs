@@ -242,6 +242,45 @@ async fn futures_select_any<F: std::future::Future + Unpin>(futures: impl Iterat
     .await;
 }
 
+/// Waits for SIGTERM, SIGINT or SIGHUP; false if none can be listened for.
+#[cfg(unix)]
+async fn termination_requested() -> bool {
+    use tokio::signal::unix::{SignalKind, signal};
+    let kinds = [
+        SignalKind::terminate(),
+        SignalKind::interrupt(),
+        SignalKind::hangup(),
+    ];
+    let mut streams: Vec<_> = kinds.into_iter().filter_map(|k| signal(k).ok()).collect();
+    if streams.is_empty() {
+        return false;
+    }
+    futures_select_any(streams.iter_mut().map(|s| Box::pin(s.recv()))).await;
+    true
+}
+
+/// Waits for Ctrl+C, the console closing, a logoff or a shutdown.
+#[cfg(windows)]
+async fn termination_requested() -> bool {
+    use tokio::signal::windows;
+    let (Ok(mut c), Ok(mut close), Ok(mut logoff), Ok(mut shutdown)) = (
+        windows::ctrl_c(),
+        windows::ctrl_close(),
+        windows::ctrl_logoff(),
+        windows::ctrl_shutdown(),
+    ) else {
+        return false;
+    };
+    let waits: [std::pin::Pin<Box<dyn std::future::Future<Output = Option<()>> + Send + '_>>; 4] = [
+        Box::pin(c.recv()),
+        Box::pin(close.recv()),
+        Box::pin(logoff.recv()),
+        Box::pin(shutdown.recv()),
+    ];
+    futures_select_any(waits.into_iter()).await;
+    true
+}
+
 /// Pointer movement (px) below this is noise, not someone using the mouse.
 const POINTER_JITTER: f64 = 4.0;
 
@@ -333,18 +372,9 @@ pub fn build(app: &adw::Application, player: Player) -> adw::ApplicationWindow {
     // were closed (final playback report, SVP Manager stopped).
     SHUTDOWN_WINDOW.with(|slot| slot.replace(window.downgrade()));
     spawn_detached(async {
-        use tokio::signal::unix::{SignalKind, signal};
-        let kinds = [
-            SignalKind::terminate(),
-            SignalKind::interrupt(),
-            SignalKind::hangup(),
-        ];
-        let mut streams: Vec<_> = kinds.into_iter().filter_map(|k| signal(k).ok()).collect();
-        if streams.is_empty() {
+        if !termination_requested().await {
             return;
         }
-        let waits = streams.iter_mut().map(|s| Box::pin(s.recv()));
-        futures_select_any(waits).await;
         tracing::info!("termination signal: shutting down");
         glib::MainContext::default().invoke(|| {
             if let Some(window) = SHUTDOWN_WINDOW.with(|slot| slot.borrow().upgrade()) {
