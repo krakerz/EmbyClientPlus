@@ -118,7 +118,7 @@ fn pick_update(release: &ReleaseJson, kind: &InstallKind, current: &str) -> Opti
     }
     let suffix = match kind {
         InstallKind::Archive(_) => ARCHIVE_SUFFIX,
-        InstallKind::MacApp(_) => "-macos-arm64.tar.gz",
+        InstallKind::MacApp(_) => "-macos-arm64.zip",
         InstallKind::AppImage(_) => "-x86_64.AppImage",
         InstallKind::Source => return None,
     };

@@ -186,7 +186,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: macos
-          path: dist/*-macos-arm64.tar.gz
+          path: dist/*-macos-arm64.zip
 
   release:
     needs: [build, windows, macos]
@@ -214,4 +214,4 @@ jobs:
             artifacts/*-linux-x86_64.tar.gz
             artifacts/*.AppImage
             artifacts/*-windows-x86_64.zip
-            artifacts/*-macos-arm64.tar.gz
+            artifacts/*-macos-arm64.zip

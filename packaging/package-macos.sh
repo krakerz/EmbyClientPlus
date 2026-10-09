@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the macOS app bundle (unsigned, arm64) into dist/ from an already
+# Builds the macOS app bundle (unsigned, arm64), zipped, into dist/ from an already
 # built target/release/embyclientplus. GTK, libadwaita and libmpv come from
 # Homebrew (CI: macos-14).
 #
@@ -111,5 +111,7 @@ touch "$contents/.embyclientplus-install"
 # code, so sign ad hoc (not notarized: first launch needs right-click → Open).
 codesign --force --deep --sign - "$app"
 
-tar -C "$DIST" -czf "$DIST/embyclientplus-$VERSION-macos-arm64.tar.gz" "Emby Client+.app"
+# ditto keeps the bundle's symlinks and signature intact, like Finder's
+# own "Compress".
+ditto -c -k --keepParent "$app" "$DIST/embyclientplus-$VERSION-macos-arm64.zip"
 ls -l "$DIST"
