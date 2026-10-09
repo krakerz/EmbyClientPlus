@@ -551,10 +551,53 @@ fn default_true() -> bool {
 /// Directory holding config.toml, the SQLite override db, and any other
 /// per-install state (not XDG data/cache — kept together deliberately
 /// since this app has no large asset cache to separate out).
+#[cfg(target_os = "linux")]
 pub fn config_dir() -> Result<PathBuf> {
-    ProjectDirs::from("com", "krakerz", "embyclientplus")
+    project_dirs()
         .map(|dirs| dirs.config_dir().to_path_buf())
         .context("could not determine config directory (no valid $HOME?)")
+}
+
+/// Windows: `%APPDATA%\EmbyClient+`; macOS: `~/Library/Application
+/// Support/EmbyClient+` — not `directories`' names, which carry the GitHub
+/// account. The first start moves a folder from that older layout.
+#[cfg(not(target_os = "linux"))]
+pub fn config_dir() -> Result<PathBuf> {
+    static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = directories::BaseDirs::new()?.config_dir().join(APP_FOLDER);
+        if !dir.exists()
+            && let Some(old) = project_dirs().map(|dirs| dirs.config_dir().to_path_buf())
+            && old.is_dir()
+        {
+            let _ = std::fs::rename(&old, &dir);
+        }
+        Some(dir)
+    })
+    .clone()
+    .context("could not determine the config directory")
+}
+
+/// Where caches go: images, built-in shaders, icons, staged mpv config.
+/// Windows: `%LOCALAPPDATA%\EmbyClient+\cache`; macOS:
+/// `~/Library/Caches/EmbyClient+`.
+pub fn cache_dir() -> Option<PathBuf> {
+    if cfg!(windows) {
+        return directories::BaseDirs::new()
+            .map(|dirs| dirs.data_local_dir().join(APP_FOLDER).join("cache"));
+    }
+    if cfg!(target_os = "macos") {
+        return directories::BaseDirs::new().map(|dirs| dirs.cache_dir().join(APP_FOLDER));
+    }
+    project_dirs().map(|dirs| dirs.cache_dir().to_path_buf())
+}
+
+/// The folder name on Windows and macOS.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+const APP_FOLDER: &str = "EmbyClient+";
+
+fn project_dirs() -> Option<ProjectDirs> {
+    ProjectDirs::from("com", "krakerz", "embyclientplus")
 }
 
 fn config_file_path() -> Result<PathBuf> {

@@ -13,11 +13,22 @@ pub fn default_dir() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|dirs| dirs.home_dir().join("SVP4"))
 }
 
+/// The 64-bit installer uses Program Files; older ones used Program
+/// Files (x86).
 #[cfg(windows)]
 pub fn default_dir() -> Option<PathBuf> {
-    let programs =
-        std::env::var_os("ProgramFiles(x86)").unwrap_or_else(|| r"C:\Program Files (x86)".into());
-    Some(PathBuf::from(programs).join("SVP 4"))
+    let candidates = [
+        ("ProgramFiles", r"C:\Program Files"),
+        ("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+    ]
+    .map(|(var, fallback)| {
+        PathBuf::from(std::env::var_os(var).unwrap_or_else(|| fallback.into())).join("SVP 4")
+    });
+    candidates
+        .iter()
+        .find(|dir| is_install(dir))
+        .or(candidates.first())
+        .cloned()
 }
 
 #[cfg(target_os = "macos")]
@@ -28,7 +39,7 @@ pub fn default_dir() -> Option<PathBuf> {
 /// How the default folder reads in Preferences.
 pub fn default_dir_label() -> &'static str {
     if cfg!(windows) {
-        r"C:\Program Files (x86)\SVP 4"
+        r"C:\Program Files\SVP 4"
     } else if cfg!(target_os = "macos") {
         "/Applications/SVP 4 Mac.app"
     } else {
@@ -118,12 +129,44 @@ pub fn expose_vapoursynth() {
         if std::env::var_os(VAR).is_some() {
             return;
         }
-        if let Some(library) = vsscript_search_dirs()
+        let dirs = vsscript_search_dirs();
+        match dirs
             .iter()
             .find_map(|dir| find_file(dir, VSSCRIPT_NAMES, 4))
         {
-            // SAFETY: called first thing in main, while single-threaded.
-            unsafe { std::env::set_var(VAR, library) };
+            Some(library) => {
+                // Logging isn't up yet; this is reported by `log_vapoursynth`.
+                // SAFETY: called first thing in main, while single-threaded.
+                unsafe { std::env::set_var(VAR, library) };
+            }
+            None => {
+                let looked = dirs
+                    .iter()
+                    .map(|d| d.display().to_string())
+                    .collect::<Vec<_>>();
+                // SAFETY: as above.
+                unsafe { std::env::set_var(NOT_FOUND_VAR, looked.join("; ")) };
+            }
+        }
+    }
+}
+
+/// Set instead of `EMBYCLIENTPLUS_VSSCRIPT` when no VSScript library was
+/// found: the folders searched, for the log.
+#[cfg(not(target_os = "linux"))]
+const NOT_FOUND_VAR: &str = "EMBYCLIENTPLUS_VSSCRIPT_SEARCHED";
+
+/// Says in the log which VapourSynth SVP will get (once logging is up).
+pub fn log_vapoursynth() {
+    #[cfg(not(target_os = "linux"))]
+    {
+        if let Some(library) = std::env::var_os("EMBYCLIENTPLUS_VSSCRIPT") {
+            tracing::info!("VapourSynth for SVP: {}", PathBuf::from(library).display());
+        } else if let Some(searched) = std::env::var_os(NOT_FOUND_VAR) {
+            tracing::warn!(
+                "no VapourSynth for SVP (VSScript library not found in {}); SVP can't interpolate",
+                searched.to_string_lossy()
+            );
         }
     }
 }

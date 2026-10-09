@@ -39,3 +39,7 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 # Finding SVP Manager among the running processes (Linux reads /proc).
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+
+[build-dependencies]
+# The exe's icon on Windows (packaging/windows/embyclientplus.rc).
+embed-resource = "3.0.12"

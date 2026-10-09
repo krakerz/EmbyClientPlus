@@ -52,6 +52,7 @@ fn main() -> glib::ExitCode {
     gamescope::prepare_environment();
     svp::expose_vapoursynth();
     logging::init();
+    svp::log_vapoursynth();
     update::clean_up_previous();
     let server = config::Settings::load().unwrap_or_default().server;
     emby::set_appear_as_browser(server.appear_as_browser());
@@ -87,9 +88,7 @@ fn mpv_config_dir() -> Option<std::path::PathBuf> {
         return None;
     }
     let source = player::user_config::source_dir()?;
-    let staging = directories::ProjectDirs::from("com", "krakerz", "embyclientplus")?
-        .cache_dir()
-        .join("mpv-config");
+    let staging = config::cache_dir()?.join("mpv-config");
     let keep_hwdec = settings.frame_gen.default_backend != config::FrameGenBackend::Svp;
     match player::user_config::stage(&source, &staging, keep_hwdec) {
         Ok(dir) => Some(dir),

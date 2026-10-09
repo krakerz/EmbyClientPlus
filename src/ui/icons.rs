@@ -81,9 +81,7 @@ pub fn placeholder(item_type: &str) -> &'static str {
 /// Writes the icons out as a theme and makes it the app's icon theme.
 /// Failures only cost the custom look; Adwaita's icons remain.
 pub fn install() {
-    let Some(root) = directories::ProjectDirs::from("com", "krakerz", "embyclientplus")
-        .map(|dirs| dirs.cache_dir().join("icons"))
-    else {
+    let Some(root) = crate::config::cache_dir().map(|dir| dir.join("icons")) else {
         return;
     };
     if let Err(e) = write_theme(&root) {

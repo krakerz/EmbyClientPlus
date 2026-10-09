@@ -85,7 +85,18 @@ static const void *forward(lib_t *lib, int *tried, const char *name, const char 
     if (!*lib)
         return NULL;
     api_fn fn = (api_fn)find_symbol(*lib, symbol);
-    return fn ? fn(version) : NULL;
+    if (!fn)
+        return NULL;
+    /* Versions are (major << 16) | minor. An older VapourSynth (SVP for
+     * Windows ships R64) refuses a newer minor than it has; minors only
+     * add entries at the end, so the older table serves what mpv uses. */
+    int major = version & ~0xffff;
+    for (int minor = version & 0xffff; minor >= 0; minor--) {
+        const void *api = fn(major | minor);
+        if (api)
+            return api;
+    }
+    return NULL;
 }
 
 static lib_t script_lib, core_lib;

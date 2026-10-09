@@ -156,7 +156,13 @@ pub struct Track {
 }
 
 /// Hardware decoders, in order (copy-back: SVP needs frames in RAM).
-const HWDEC: &str = "vaapi-copy,auto-copy";
+/// Windows: D3D11 first, which every GPU there has; elsewhere VA-API
+/// first (see below), macOS falling through to VideoToolbox.
+const HWDEC: &str = if cfg!(windows) {
+    "d3d11va-copy,auto-copy"
+} else {
+    "vaapi-copy,auto-copy"
+};
 
 /// Options Preferences → Video sets, and their values when mpv started
 /// (mpv's defaults or the user's mpv.conf), for the Auto quality.

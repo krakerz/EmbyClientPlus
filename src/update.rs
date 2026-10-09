@@ -281,6 +281,17 @@ async fn apply_archive(root: &Path, update: &Update, progress: &Progress) -> Res
                     .context("couldn't install the update")?;
             }
         }
+        // The launcher beside bin\ (packaging/windows/launcher.c).
+        let launcher = unpacked.join(WINDOWS_LAUNCHER);
+        if launcher.is_file() {
+            let dest = root.join(WINDOWS_LAUNCHER);
+            if dest.exists() {
+                let aside = set_aside_name(&dest);
+                let _ = std::fs::remove_file(&aside);
+                std::fs::rename(&dest, &aside)?;
+            }
+            std::fs::rename(&launcher, &dest).context("couldn't install the update")?;
+        }
     } else {
         for part in ["bin", "lib"] {
             let old = staging.join(format!("old-{part}"));
@@ -298,6 +309,8 @@ async fn apply_archive(root: &Path, update: &Update, progress: &Progress) -> Res
     let _ = std::fs::remove_dir_all(&staging);
     Ok(())
 }
+
+const WINDOWS_LAUNCHER: &str = "Emby Client+.exe";
 
 /// Suffix of files set aside by [`replace_files`]; removed on next start.
 const SET_ASIDE: &str = "old-embyclientplus";

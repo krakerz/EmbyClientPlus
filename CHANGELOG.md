@@ -5,7 +5,7 @@
 ## [1.7.0] — 2026-10-09
 
 ### Added
-- Windows (x86_64) and macOS (Apple Silicon) builds, with SVP support through SVP's own VapourSynth, and self-update like the Linux builds.
+- Windows (x86_64) and macOS (Apple Silicon) builds, with SVP support through SVP's own VapourSynth, and self-update like the Linux builds. On Windows, start it with `Emby Client+.exe` at the top of the folder.
 - Settings, cache and downloads use each system's usual folders; the user's mpv.conf is read from `%APPDATA%\mpv` on Windows and `~/.config/mpv` elsewhere.
 
 ### Changed
