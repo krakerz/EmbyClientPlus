@@ -219,11 +219,15 @@ pub fn shut_down(window: &gtk::Window) {
     // Notifications come back even if the player never got to close.
     #[cfg(target_os = "linux")]
     crate::dnd::set(false);
-    if let Some(dialog) = window
-        .downcast_ref::<adw::ApplicationWindow>()
-        .and_then(|window| window.visible_dialog())
-    {
-        dialog.force_close();
+    // Every open dialog (About over Preferences, say): one left open keeps
+    // the window from closing.
+    if let Some(app_window) = window.downcast_ref::<adw::ApplicationWindow>() {
+        for _ in 0..16 {
+            let Some(dialog) = app_window.visible_dialog() else {
+                break;
+            };
+            dialog.force_close();
+        }
     }
     window.close();
 }

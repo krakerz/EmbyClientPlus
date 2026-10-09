@@ -2,6 +2,7 @@
 //! stack that Home, Library, Series, Details, Search and the player live in.
 
 mod album;
+pub mod app_menu;
 mod card;
 mod category_tile;
 mod details;

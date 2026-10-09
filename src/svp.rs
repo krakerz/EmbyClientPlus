@@ -64,7 +64,14 @@ fn manager_path(dir: &std::path::Path) -> PathBuf {
     if cfg!(windows) {
         dir.join("SVPManager.exe")
     } else if cfg!(target_os = "macos") {
-        dir.join("Contents/Resources/SVPManager")
+        // The bundle itself, or (since Finder's folder picker can't choose
+        // inside an app) the folder holding it, e.g. /Applications.
+        let bundle = if dir.extension().is_some_and(|ext| ext == "app") {
+            dir.to_path_buf()
+        } else {
+            dir.join("SVP 4 Mac.app")
+        };
+        bundle.join("Contents/MacOS/SVPManager")
     } else {
         dir.join("SVPManager")
     }
@@ -115,6 +122,8 @@ const VSSCRIPT_NAMES: &[&str] = &["VSScript.dll"];
 const VSSCRIPT_NAMES: &[&str] = &[
     "libvapoursynth-script.0.dylib",
     "libvapoursynth-script.dylib",
+    // pip-style VapourSynth (what `vapoursynth get-vsscript` reports).
+    "libvsscript.dylib",
 ];
 
 /// Tells the bundled VapourSynth stand-in (packaging/vsshim) where SVP's
@@ -200,16 +209,38 @@ fn vsscript_search_dirs() -> Vec<PathBuf> {
     install_dir().into_iter().collect()
 }
 
+/// SVP for Mac uses Homebrew's VapourSynth (or MacPorts'), and asks it
+/// where its scripting library is with `vapoursynth get-vsscript`; so do
+/// we, then fall back to the usual library folders. Apps started from
+/// Finder don't get Homebrew's PATH, hence the full paths.
 #[cfg(target_os = "macos")]
 fn vsscript_search_dirs() -> Vec<PathBuf> {
-    [
-        "/opt/homebrew/opt/vapoursynth/lib",
-        "/usr/local/opt/vapoursynth/lib",
-        "/Library/Frameworks/VapourSynth.framework",
+    let reported = [
+        "/opt/homebrew/bin/vapoursynth",
+        "/usr/local/bin/vapoursynth",
+        "/opt/local/bin/vapoursynth",
     ]
     .into_iter()
-    .map(PathBuf::from)
-    .collect()
+    .find_map(|tool| {
+        let output = Command::new(tool).arg("get-vsscript").output().ok()?;
+        let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+        (output.status.success() && path.is_file()).then(|| path.parent().map(PathBuf::from))?
+    });
+    reported
+        .into_iter()
+        .chain(
+            [
+                "/opt/homebrew/opt/vapoursynth/lib",
+                "/opt/homebrew/lib",
+                "/usr/local/opt/vapoursynth/lib",
+                "/usr/local/lib",
+                "/opt/local/lib",
+                "/Library/Frameworks/VapourSynth.framework",
+            ]
+            .into_iter()
+            .map(PathBuf::from),
+        )
+        .collect()
 }
 
 /// The first file named one of `names` in `dir`, looking `depth` folders deep.

@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [1.11.0] — 2026-10-09
+
+### Added
+- macOS: the app menu works: About Emby Client+, Settings… (⌘,) and Quit (⌘Q). Ctrl+, opens Preferences and Ctrl+Q quits on Linux and Windows.
+
+### Fixed
+- Quitting with more than one dialog open (About over Settings, say) left the app running.
+- macOS: SVP wasn't found ("SVPManager not found here"). The app now looks inside `SVP 4 Mac.app` correctly, accepts either the app or the folder it's in (Applications) as the SVP folder, and finds Homebrew's or MacPorts' VapourSynth the way SVP does.
+
+## [1.10.1] — 2026-10-09
+
+### Fixed
+- As a web browser (the default), the server's Devices page showed the app's version ("Emby Web 1.10.0") instead of the server's, like Emby's own web app. The app now asks the server for its version every time it starts.
+
 ## [1.10.0] — 2026-10-09
 
 ### Added

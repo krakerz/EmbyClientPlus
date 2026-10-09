@@ -1007,9 +1007,17 @@ impl Inner {
         keys.connect_key_pressed(glib::clone!(
             #[strong]
             weak,
-            move |_, key, _, _| match weak.upgrade() {
-                Some(inner) => inner.key(key),
-                None => glib::Propagation::Proceed,
+            move |_, key, _, modifiers| {
+                // Ctrl/⌘/Alt combinations are app shortcuts (⌘, Settings,
+                // ⌘Q Quit), not the player's single keys.
+                let held = gdk::ModifierType::CONTROL_MASK
+                    | gdk::ModifierType::META_MASK
+                    | gdk::ModifierType::SUPER_MASK
+                    | gdk::ModifierType::ALT_MASK;
+                match weak.upgrade() {
+                    Some(inner) if !modifiers.intersects(held) => inner.key(key),
+                    _ => glib::Propagation::Proceed,
+                }
             }
         ));
         keys.connect_key_released(glib::clone!(

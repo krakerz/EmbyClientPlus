@@ -378,7 +378,11 @@ mod tests {
         set_appear_as_browser(false);
         let app = client.emby_authorization_header();
         set_appear_as_browser(true);
+        set_server_version("4.10.1.0");
         let browser = client.emby_authorization_header();
+        // The web app's version is the server's; the app's own is ours.
+        assert!(browser.contains("Version=\"4.10.1.0\""));
+        assert!(app.contains(&format!("Version=\"{APP_VERSION}\"")));
         assert!(app.contains("Client=\"Emby Client+\""));
         assert!(!app.contains("Device=\"Firefox\""));
         assert!(browser.contains("Client=\"Emby Web\", Device=\"Firefox\""));
