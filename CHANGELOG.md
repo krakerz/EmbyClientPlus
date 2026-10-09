@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [1.9.0] — 2026-10-09
+
+### Added
+- The player's top bar (title and back button) works as a title bar: drag it to move the window, double-click it to maximize.
+
+### Fixed
+- Windows: turning SVP off and on again during playback broke it ("Couldn't create first pipe instance"); SVP is now disconnected cleanly, as on Linux.
+- Windows: SVP couldn't interpolate ("Could not initialize VapourSynth scripting"): the player couldn't reach SVP's VapourSynth and its Python. VapourSynth now writes its own log, `vapoursynth.log`, next to the app's logs.
+
 ## [1.8.0] — 2026-10-09
 
 ### Added

@@ -686,11 +686,66 @@ impl Player {
 /// Shuts down every socket in this process whose local address is
 /// `path`: the IPC connections mpv accepted on it. mpv's client thread
 /// then sees EOF and drops the client. Returns how many were shut down.
-/// Linux only (it walks /proc); elsewhere SVP stays attached until the
-/// next file, where it finds no IPC server.
-#[cfg(not(target_os = "linux"))]
+/// macOS has no /proc to find them: SVP stays attached until the next file.
+#[cfg(target_os = "macos")]
 fn disconnect_ipc_clients(_path: &str) -> usize {
     0
+}
+
+/// Windows: disconnects every instance of the named pipe `name` (as given
+/// to input-ipc-server, e.g. `mpvpipe`) that this process serves, so SVP
+/// sees the connection close. Without it SVP keeps the old instance open
+/// and mpv can't create the pipe again when SVP is turned back on.
+/// Handles are small multiples of 4; each is checked to be a pipe of that
+/// name before anything is done to it.
+#[cfg(windows)]
+fn disconnect_ipc_clients(name: &str) -> usize {
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_NAME_INFO, FILE_TYPE_PIPE, FileNameInfo, GetFileInformationByHandleEx, GetFileType,
+    };
+    use windows_sys::Win32::System::Pipes::DisconnectNamedPipe;
+
+    // `\\.\pipe\mpvpipe`, `mpvpipe` → the name the pipe file system reports.
+    let wanted = format!("\\{}", name.rsplit(['\\', '/']).next().unwrap_or(name));
+    let mut count = 0;
+    for value in (4..=0x4000usize).step_by(4) {
+        let handle = value as HANDLE;
+        // SAFETY: GetFileType only inspects the handle; values that aren't
+        // open handles just fail.
+        if unsafe { GetFileType(handle) } != FILE_TYPE_PIPE {
+            continue;
+        }
+        // FILE_NAME_INFO plus room for the name (UTF-16).
+        let mut buffer = [0u32; 130];
+        // SAFETY: the buffer is large and aligned enough for FILE_NAME_INFO
+        // with a 512-byte name; the call writes at most `size_of_val` bytes.
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                handle,
+                FileNameInfo,
+                buffer.as_mut_ptr().cast(),
+                std::mem::size_of_val(&buffer) as u32,
+            )
+        };
+        if ok == 0 {
+            continue;
+        }
+        // SAFETY: filled in by the call above.
+        let info = unsafe { &*(buffer.as_ptr() as *const FILE_NAME_INFO) };
+        let len = (info.FileNameLength as usize / 2).min(255);
+        // SAFETY: `len` UTF-16 units follow FileName inside the buffer.
+        let units = unsafe { std::slice::from_raw_parts(info.FileName.as_ptr(), len) };
+        if !String::from_utf16_lossy(units).eq_ignore_ascii_case(&wanted) {
+            continue;
+        }
+        // SAFETY: a server end of our own pipe; mpv's thread still owns
+        // closing it, which this doesn't do.
+        if unsafe { DisconnectNamedPipe(handle) } != 0 {
+            count += 1;
+        }
+    }
+    count
 }
 
 #[cfg(target_os = "linux")]

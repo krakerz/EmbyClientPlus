@@ -4,13 +4,27 @@ on:
   push:
     branches: [main]
     paths-ignore: [README.md, CHANGELOG.md, LICENSE, INSTALL.txt, .gitignore]
+  # Run by hand from the Actions tab: one platform only, and a quick mode
+  # that skips the checks, for testing a build. Such runs make no release;
+  # the package is on the run's page under Artifacts.
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform to build
+        type: choice
+        options: [all, linux, windows, macos]
+        default: all
+      quick:
+        description: Quick build (skip format, clippy and tests)
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
 jobs:
   build:
+    if: github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'linux'
     runs-on: ubuntu-latest
     # Hosted Ubuntu images lack libadwaita >= 1.6 and VapourSynth headers;
     # Arch has current GTK/libadwaita/FFmpeg/libplacebo and matches the
@@ -54,12 +68,15 @@ jobs:
         run: scripts/build-libmpv.sh
 
       - name: Format
+        if: ${{ !inputs.quick }}
         run: cargo fmt -- --check
 
       - name: Clippy
+        if: ${{ !inputs.quick }}
         run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: Test
+        if: ${{ !inputs.quick }}
         run: cargo test --locked
 
       - name: Build release binary
@@ -107,6 +124,7 @@ jobs:
             dist/release-notes.md
 
   windows:
+    if: github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'windows'
     runs-on: windows-latest
     defaults:
       run:
@@ -115,7 +133,9 @@ jobs:
       - uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
-          update: true
+          # No full package update: it cost ~2 min a run, and a fresh
+          # runner's MSYS2 is recent enough.
+          update: false
           # MSYS2's mpv is built with vapoursynth, so no libmpv of our own.
           pacboy: >-
             rust:p pkgconf:p gcc:p gtk4:p libadwaita:p mpv:p
@@ -135,9 +155,11 @@ jobs:
           restore-keys: cargo-windows-
 
       - name: Clippy
+        if: ${{ !inputs.quick }}
         run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: Test
+        if: ${{ !inputs.quick }}
         run: cargo test --locked
 
       - name: Build release binary
@@ -152,6 +174,7 @@ jobs:
           path: dist/*-windows-x86_64.zip
 
   macos:
+    if: github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'macos'
     runs-on: macos-14
     steps:
       - name: Install dependencies
@@ -172,9 +195,11 @@ jobs:
           restore-keys: cargo-macos-
 
       - name: Clippy
+        if: ${{ !inputs.quick }}
         run: LIBRARY_PATH="$(brew --prefix)/lib" cargo clippy --all-targets --locked -- -D warnings
 
       - name: Test
+        if: ${{ !inputs.quick }}
         run: LIBRARY_PATH="$(brew --prefix)/lib" cargo test --locked
 
       - name: Build release binary
@@ -190,6 +215,8 @@ jobs:
 
   release:
     needs: [build, windows, macos]
+    # Only full runs publish (a push, or a manual run of everything, checked).
+    if: github.event_name == 'push' || (inputs.platform == 'all' && !inputs.quick)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

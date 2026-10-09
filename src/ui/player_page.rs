@@ -416,8 +416,11 @@ impl Osd {
             .build();
         top_bar.append(&back);
         top_bar.append(&titles);
+        // The player hides the window's title bar, so this bar stands in for
+        // it: drag to move the window, double-click to maximize.
+        let handle = gtk::WindowHandle::builder().child(&top_bar).build();
         let top = gtk::Revealer::builder()
-            .child(&top_bar)
+            .child(&handle)
             .valign(gtk::Align::Start)
             .transition_type(gtk::RevealerTransitionType::Crossfade)
             .reveal_child(true)
