@@ -10,6 +10,38 @@ struct PublicSystemInfo {
     version: String,
 }
 
+/// Uses (and saves) the server's version for browser mode's identity.
+fn remember_server_version(version: &str) {
+    if version.is_empty() {
+        return;
+    }
+    super::set_server_version(version);
+    tracing::info!("server version {version}");
+    let version = version.to_string();
+    if let Err(e) = crate::config::Settings::update(|s| s.server.version = version) {
+        tracing::warn!("couldn't save the server version: {e:#}");
+    }
+}
+
+/// Asks the server at `base_url` for its version (no sign-in needed), at
+/// startup: the saved one may be missing or out of date after an upgrade.
+pub async fn learn_server_version(base_url: &str) {
+    let url = format!("{}/emby/System/Info/Public", base_url.trim_end_matches('/'));
+    let info = async {
+        reqwest::Client::new()
+            .get(&url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<PublicSystemInfo>()
+            .await
+    };
+    match info.await {
+        Ok(info) => remember_server_version(&info.version),
+        Err(e) => tracing::info!("couldn't ask the server for its version: {e}"),
+    }
+}
+
 impl EmbyClient {
     /// Logs in and keeps the returned token on this client.
     pub async fn authenticate_by_name(
@@ -22,11 +54,8 @@ impl EmbyClient {
         if let Ok(info) = self
             .get::<PublicSystemInfo>("/emby/System/Info/Public")
             .await
-            && !info.version.is_empty()
         {
-            super::set_server_version(&info.version);
-            let version = info.version.clone();
-            let _ = crate::config::Settings::update(|s| s.server.version = version);
+            remember_server_version(&info.version);
         }
         let request = AuthenticateByNameRequest {
             username: username.to_string(),

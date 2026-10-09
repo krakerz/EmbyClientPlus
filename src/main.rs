@@ -59,6 +59,15 @@ fn main() -> glib::ExitCode {
     let server = config::Settings::load().unwrap_or_default().server;
     emby::set_appear_as_browser(server.appear_as_browser());
     emby::set_server_version(&server.version);
+    // Browser mode sends the server's own version, as Emby's web app does;
+    // ask before the first request (briefly: the server may be offline).
+    if server.appear_as_browser() && !server.url.is_empty() {
+        let url = server.url.clone();
+        runtime::block_on_timeout(
+            async move { emby::auth::learn_server_version(&url).await },
+            std::time::Duration::from_secs(2),
+        );
+    }
 
     let app = adw::Application::builder().application_id(APP_ID).build();
     app.connect_activate(move |app| {

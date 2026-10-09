@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.10.1] — 2026-10-09
+
+### Fixed
+- As a web browser (the default), the server's Devices page showed the app's version ("Emby Web 1.10.0") instead of the server's, like Emby's own web app. The app now asks the server for its version every time it starts.
+
 ## [1.10.0] — 2026-10-09
 
 ### Added
