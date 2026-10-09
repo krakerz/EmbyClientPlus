@@ -135,6 +135,20 @@ pub fn expose_vapoursynth() {
             .find_map(|dir| find_file(dir, VSSCRIPT_NAMES, 4))
         {
             Some(library) => {
+                // SVP's VapourSynth (pip style) finds Python by searching
+                // for python.exe on the program's folder, then PATH; SVP's
+                // own mpv sits beside it, we don't. So its folder goes on PATH.
+                #[cfg(windows)]
+                if let Some(dir) = library.parent() {
+                    let mut paths = vec![dir.to_path_buf()];
+                    paths.extend(std::env::split_paths(
+                        &std::env::var_os("PATH").unwrap_or_default(),
+                    ));
+                    if let Ok(path) = std::env::join_paths(paths) {
+                        // SAFETY: called first thing in main, while single-threaded.
+                        unsafe { std::env::set_var("PATH", path) };
+                    }
+                }
                 // Logging isn't up yet; this is reported by `log_vapoursynth`.
                 // SAFETY: called first thing in main, while single-threaded.
                 unsafe { std::env::set_var(VAR, library) };
@@ -156,10 +170,18 @@ pub fn expose_vapoursynth() {
 #[cfg(not(target_os = "linux"))]
 const NOT_FOUND_VAR: &str = "EMBYCLIENTPLUS_VSSCRIPT_SEARCHED";
 
-/// Says in the log which VapourSynth SVP will get (once logging is up).
+/// Says in the log which VapourSynth SVP will get (once logging is up),
+/// and points the VapourSynth stand-in's own log next to ours.
 pub fn log_vapoursynth() {
     #[cfg(not(target_os = "linux"))]
     {
+        if let Some(dir) = crate::logging::log_dir() {
+            let path = dir.join("vapoursynth.log");
+            let _ = std::fs::remove_file(&path);
+            // SAFETY: still at startup, before libmpv or any other thread
+            // reads the environment.
+            unsafe { std::env::set_var("EMBYCLIENTPLUS_VSSHIM_LOG", path) };
+        }
         if let Some(library) = std::env::var_os("EMBYCLIENTPLUS_VSSCRIPT") {
             tracing::info!("VapourSynth for SVP: {}", PathBuf::from(library).display());
         } else if let Some(searched) = std::env::var_os(NOT_FOUND_VAR) {

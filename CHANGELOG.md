@@ -2,10 +2,23 @@
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-10-09
+
+### Added
+- Windows: `Emby Client+.exe` at the top of the folder starts the app; both it and the app's exe have the app icon.
+
+### Changed
+- Windows and macOS keep settings and logs in `%APPDATA%\EmbyClient+` and `~/Library/Application Support/EmbyClient+` (moved over on first start), and caches in `%LOCALAPPDATA%\EmbyClient+\cache` and `~/Library/Caches/EmbyClient+`.
+- Windows: SVP is found in `C:\Program Files\SVP 4` (and the older `Program Files (x86)` location).
+- Windows: hardware decoding uses D3D11 first.
+
+### Fixed
+- Windows: SVP couldn't interpolate ("Could not initialize VapourSynth scripting"): SVP's VapourSynth couldn't find its Python. Its log, `vapoursynth.log`, sits next to the app's logs.
+
 ## [1.7.0] — 2026-10-09
 
 ### Added
-- Windows (x86_64) and macOS (Apple Silicon) builds, with SVP support through SVP's own VapourSynth, and self-update like the Linux builds. On Windows, start it with `Emby Client+.exe` at the top of the folder.
+- Windows (x86_64) and macOS (Apple Silicon) builds, with SVP support through SVP's own VapourSynth, and self-update like the Linux builds.
 - Settings, cache and downloads use each system's usual folders; the user's mpv.conf is read from `%APPDATA%\mpv` on Windows and `~/.config/mpv` elsewhere.
 
 ### Changed
