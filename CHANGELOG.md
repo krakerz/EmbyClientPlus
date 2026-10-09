@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-10-09
+
+### Added
+- Windows (x86_64) and macOS (Apple Silicon) builds, with SVP support through SVP's own VapourSynth, and self-update like the Linux builds.
+- Settings, cache and downloads use each system's usual folders; the user's mpv.conf is read from `%APPDATA%\mpv` on Windows and `~/.config/mpv` elsewhere.
+
+### Changed
+- The app now identifies itself to the server as a web browser by default; Preferences → General → Server → "Appear as a web browser" turns that off, and the server then lists it as Emby Client+ under this computer's name.
+
 ## [1.6.0] — 2026-10-08
 
 ### Added

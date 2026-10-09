@@ -1,6 +1,6 @@
 # Emby Client+
 
-A native Linux Emby client with SVP frame interpolation, built for the desktop and Steam Game Mode.
+A native Emby client for Linux, Windows and macOS with SVP frame interpolation, built for the desktop and Steam Game Mode.
 
 ## Description
 
@@ -96,8 +96,15 @@ From [Releases](https://github.com/krakerz/EmbyClientPlus/releases):
   - `./uninstall.sh` removes it and keeps your settings.
   - It needs GTK 4.12+, libadwaita 1.6+, FFmpeg and libplacebo from your distro.
 
-Both formats update themselves (Preferences → Updates). SVP 4 is optional, found in
-`~/SVP4` or a folder you set; the app plays normally without it.
+- **Windows** `embyclientplus-<version>-windows-x86_64.zip`: extract it anywhere and run
+  `bin\embyclientplus.exe`.
+- **macOS** (Apple Silicon) `embyclientplus-<version>-macos-arm64.tar.gz`: extract it and move
+  `Emby Client+.app` to Applications. It isn't notarized: the first time, right-click it and
+  choose Open.
+
+Every format updates itself (Preferences → Updates). SVP 4 is optional, found in its usual
+folder (`~/SVP4`, `C:\Program Files (x86)\SVP 4`, `/Applications/SVP 4 Mac.app`) or one you
+set; the app plays normally without it.
 
 ## Building from source
 
@@ -108,6 +115,10 @@ and VapourSynth dev files.
 scripts/build-libmpv.sh && cargo build --release && target/release/embyclientplus
 EMBYCLIENTPLUS_PORTABLE=1 cargo build --release && packaging/package.sh   # release packages → dist/
 ```
+
+Windows builds in an MSYS2 UCRT64 shell and macOS with Homebrew, both using their packaged
+`mpv` (see the `windows` and `macos` jobs in `.github/workflows/build.yml`), packaged by
+`packaging/package-windows.sh` and `packaging/package-macos.sh`.
 
 ## Usage
 
@@ -229,8 +240,11 @@ embyclientplus --version             # Print the version
 - red: SVP Manager isn't running;
 - grey: SVP not found.
 
-**Where are settings and logs?** In `~/.config/embyclientplus/`: `config.toml` and `logs/`
-(the newest 10 are kept).
+**Where are settings and logs?** `config.toml` and `logs/` (the newest 10 are kept) are in:
+
+- Linux: `~/.config/embyclientplus/`
+- Windows: `%APPDATA%\krakerz\embyclientplus\config\`
+- macOS: `~/Library/Application Support/com.krakerz.embyclientplus/`
 
 **Does it bundle SVP?** No. It uses your own SVP install.
 

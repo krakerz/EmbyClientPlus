@@ -340,6 +340,25 @@ fn show_with(parent: &impl IsA<gtk::Widget>, server: bool) {
     remembered.add(&forget);
     page.add(&remembered);
 
+    if server {
+        let group = adw::PreferencesGroup::builder().title("Server").build();
+        let browser = adw::SwitchRow::builder()
+            .title("Appear as a web browser")
+            .subtitle(
+                "On: the server lists this app as a browser session. Off: as Emby Client+ \
+                 on this computer, under its name.",
+            )
+            .active(settings.server.appear_as_browser())
+            .build();
+        browser.connect_active_notify(|row| {
+            let on = row.is_active();
+            crate::emby::set_appear_as_browser(on);
+            save(|s| s.server.appear_as_browser = Some(on));
+        });
+        group.add(&browser);
+        page.add(&group);
+    }
+
     // Diagnostics.
     let diagnostics = adw::PreferencesGroup::builder()
         .title("Diagnostics")
@@ -965,7 +984,7 @@ fn svp_folder_row(parent: &gtk::Widget) -> adw::ActionRow {
         .build();
     let reset = gtk::Button::builder()
         .icon_name(crate::ui::icons::RESET)
-        .tooltip_text("Back to ~/SVP4")
+        .tooltip_text(format!("Back to {}", crate::svp::default_dir_label()))
         .valign(gtk::Align::Center)
         .css_classes(["flat"])
         .build();

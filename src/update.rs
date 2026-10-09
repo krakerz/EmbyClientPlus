@@ -17,15 +17,38 @@ const CURRENT: &str = env!("CARGO_PKG_VERSION");
 /// How this copy was installed, which decides what an update replaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallKind {
-    /// `install.sh` from the archive: a folder holding `bin/` and `lib/`.
+    /// The release archive: a folder holding `bin/` and `lib/` (Linux:
+    /// installed by `install.sh`; Windows: unzipped anywhere, plus `share/`).
     Archive(PathBuf),
+    /// A macOS app bundle (the `.app` folder).
+    MacApp(PathBuf),
     /// An AppImage file.
     AppImage(PathBuf),
     /// Running from a build tree; updating doesn't apply.
     Source,
 }
 
+/// The archive's root on Windows and macOS holds this file, since no
+/// launcher script sets `EMBYCLIENTPLUS_INSTALL` there.
+const INSTALL_MARKER: &str = ".embyclientplus-install";
+
 pub fn install_kind() -> InstallKind {
+    let exe = std::env::current_exe().ok();
+    if cfg!(target_os = "macos")
+        && let Some(app) = exe.as_deref().and_then(|exe| {
+            exe.ancestors()
+                .find(|dir| dir.extension().is_some_and(|ext| ext == "app"))
+        })
+        && app.join("Contents").join(INSTALL_MARKER).is_file()
+    {
+        return InstallKind::MacApp(app.to_path_buf());
+    }
+    if cfg!(windows)
+        && let Some(root) = exe.as_deref().and_then(|exe| exe.parent()?.parent())
+        && root.join(INSTALL_MARKER).is_file()
+    {
+        return InstallKind::Archive(root.to_path_buf());
+    }
     if let Some(appimage) = std::env::var_os("APPIMAGE") {
         return InstallKind::AppImage(PathBuf::from(appimage));
     }
@@ -94,7 +117,8 @@ fn pick_update(release: &ReleaseJson, kind: &InstallKind, current: &str) -> Opti
         return None;
     }
     let suffix = match kind {
-        InstallKind::Archive(_) => "-linux-x86_64.tar.gz",
+        InstallKind::Archive(_) => ARCHIVE_SUFFIX,
+        InstallKind::MacApp(_) => "-macos-arm64.tar.gz",
         InstallKind::AppImage(_) => "-x86_64.AppImage",
         InstallKind::Source => return None,
     };
@@ -105,6 +129,20 @@ fn pick_update(release: &ReleaseJson, kind: &InstallKind, current: &str) -> Opti
         asset_url: asset.browser_download_url.clone(),
     })
 }
+
+/// The release archive for this OS.
+const ARCHIVE_SUFFIX: &str = if cfg!(windows) {
+    "-windows-x86_64.zip"
+} else {
+    "-linux-x86_64.tar.gz"
+};
+
+/// The program inside an unpacked archive's root.
+const BUNDLE_PROGRAM: &str = if cfg!(windows) {
+    "bin/embyclientplus.exe"
+} else {
+    "bin/embyclientplus-bin"
+};
 
 /// `1.2.3` / `v1.2.3` → (1, 2, 3); anything else is ignored.
 fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
@@ -125,6 +163,7 @@ fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
 pub async fn apply(kind: &InstallKind, update: &Update, progress: &Progress) -> Result<()> {
     match kind {
         InstallKind::Archive(root) => apply_archive(root, update, progress).await,
+        InstallKind::MacApp(app) => apply_mac_app(app, update, progress).await,
         InstallKind::AppImage(path) => apply_appimage(path, update, progress).await,
         InstallKind::Source => bail!("updates apply to installed builds only"),
     }
@@ -206,44 +245,121 @@ async fn download(url: &str, to: &Path, progress: &Progress) -> Result<()> {
         .with_context(|| format!("couldn't write {}", to.display()))
 }
 
-async fn apply_archive(root: &Path, update: &Update, progress: &Progress) -> Result<()> {
-    // Staged inside the install so the final renames never cross filesystems.
-    let staging = root.join(".update");
-    let _ = std::fs::remove_dir_all(&staging);
-    std::fs::create_dir_all(&staging)?;
-    let archive = staging.join("update.tar.gz");
+/// Downloads `update` into `staging` (made fresh) and unpacks it there.
+async fn fetch_and_unpack(staging: &Path, update: &Update, progress: &Progress) -> Result<()> {
+    let _ = std::fs::remove_dir_all(staging);
+    std::fs::create_dir_all(staging)?;
+    let archive = staging.join(&update.asset_name);
     download(&update.asset_url, &archive, progress).await?;
+    // bsdtar (Windows 10+, macOS) and GNU tar both pick the format themselves.
     let status = Command::new("tar")
-        .arg("-xzf")
+        .arg("-xf")
         .arg(&archive)
         .arg("-C")
-        .arg(&staging)
+        .arg(staging)
         .status()
         .context("couldn't run tar")?;
     if !status.success() {
         bail!("couldn't unpack {}", update.asset_name);
     }
-    let unpacked = find_bundle(&staging).context("the update archive has no bin/embyclientplus")?;
-    for part in ["bin", "lib"] {
-        let old = staging.join(format!("old-{part}"));
-        let current = root.join(part);
-        if current.exists() {
-            std::fs::rename(&current, &old)?;
+    let _ = std::fs::remove_file(&archive);
+    Ok(())
+}
+
+async fn apply_archive(root: &Path, update: &Update, progress: &Progress) -> Result<()> {
+    // Staged inside the install so the final renames never cross filesystems.
+    let staging = root.join(".update");
+    fetch_and_unpack(&staging, update, progress).await?;
+    let unpacked = find_bundle(&staging)
+        .with_context(|| format!("the update archive has no {BUNDLE_PROGRAM}"))?;
+    if cfg!(windows) {
+        // Windows won't move a folder with files in use (the running exe,
+        // its DLLs), but it will rename those files: swap file by file.
+        for part in ["bin", "lib", "share"] {
+            if unpacked.join(part).exists() {
+                replace_files(&unpacked.join(part), &root.join(part))
+                    .context("couldn't install the update")?;
+            }
         }
-        if let Err(e) = std::fs::rename(unpacked.join(part), &current) {
-            // Put the old copy back rather than leave a broken install.
-            let _ = std::fs::rename(&old, &current);
-            return Err(e).context("couldn't install the update");
+    } else {
+        for part in ["bin", "lib"] {
+            let old = staging.join(format!("old-{part}"));
+            let current = root.join(part);
+            if current.exists() {
+                std::fs::rename(&current, &old)?;
+            }
+            if let Err(e) = std::fs::rename(unpacked.join(part), &current) {
+                // Put the old copy back rather than leave a broken install.
+                let _ = std::fs::rename(&old, &current);
+                return Err(e).context("couldn't install the update");
+            }
         }
     }
     let _ = std::fs::remove_dir_all(&staging);
     Ok(())
 }
 
+/// Suffix of files set aside by [`replace_files`]; removed on next start.
+const SET_ASIDE: &str = "old-embyclientplus";
+
+/// Moves every file under `from` to the same place under `to`, renaming
+/// any file already there out of the way first (it may be in use).
+fn replace_files(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let dest = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            replace_files(&entry.path(), &dest)?;
+            continue;
+        }
+        if dest.exists() {
+            let aside = set_aside_name(&dest);
+            let _ = std::fs::remove_file(&aside);
+            std::fs::rename(&dest, &aside)?;
+        }
+        std::fs::rename(entry.path(), &dest)?;
+    }
+    Ok(())
+}
+
+fn set_aside_name(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{SET_ASIDE}"));
+    path.with_file_name(name)
+}
+
+/// Deletes files a previous update set aside (Windows; they were in use).
+pub fn clean_up_previous() {
+    let InstallKind::Archive(root) = install_kind() else {
+        return;
+    };
+    if !cfg!(windows) {
+        return;
+    }
+    let mut stack = vec![root];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().ends_with(SET_ASIDE))
+            {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+}
+
 /// The folder in the unpacked archive holding bin/ and lib/ (the archive
 /// wraps them in a versioned folder).
 fn find_bundle(staging: &Path) -> Option<PathBuf> {
-    let has_bundle = |dir: &Path| dir.join("bin/embyclientplus-bin").is_file();
+    let has_bundle = |dir: &Path| dir.join(BUNDLE_PROGRAM).is_file();
     if has_bundle(staging) {
         return Some(staging.to_path_buf());
     }
@@ -254,18 +370,53 @@ fn find_bundle(staging: &Path) -> Option<PathBuf> {
         .find(|dir| has_bundle(dir))
 }
 
+/// Swaps the whole `.app` bundle: macOS lets a running app's bundle move.
+async fn apply_mac_app(app: &Path, update: &Update, progress: &Progress) -> Result<()> {
+    let parent = app
+        .parent()
+        .context("the app bundle has no parent folder")?;
+    let staging = parent.join(".embyclientplus-update");
+    fetch_and_unpack(&staging, update, progress).await?;
+    let unpacked = std::fs::read_dir(&staging)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|dir| dir.extension().is_some_and(|ext| ext == "app"))
+        .context("the update archive has no .app")?;
+    let old = staging.join("old.app");
+    std::fs::rename(app, &old).context("couldn't move the old app aside")?;
+    if let Err(e) = std::fs::rename(&unpacked, app) {
+        let _ = std::fs::rename(&old, app);
+        return Err(e).context("couldn't install the update");
+    }
+    let _ = std::fs::remove_dir_all(&staging);
+    Ok(())
+}
+
 async fn apply_appimage(path: &Path, update: &Update, progress: &Progress) -> Result<()> {
     let partial = path.with_extension("AppImage.part");
     download(&update.asset_url, &partial, progress).await?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(0o755))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&partial, std::fs::Permissions::from_mode(0o755))?;
+    }
     std::fs::rename(&partial, path).context("couldn't replace the AppImage")
 }
 
 /// Starts the updated copy; the caller then quits.
 pub fn relaunch(kind: &InstallKind) -> Result<()> {
     let program = match kind {
+        InstallKind::Archive(root) if cfg!(windows) => root.join(BUNDLE_PROGRAM),
         InstallKind::Archive(root) => root.join("bin/embyclientplus"),
+        InstallKind::MacApp(app) => {
+            // A fresh instance of the bundle, not a reactivation of this one.
+            Command::new("open")
+                .arg("-n")
+                .arg(app)
+                .spawn()
+                .context("couldn't start the updated app")?;
+            return Ok(());
+        }
         InstallKind::AppImage(path) => path.clone(),
         InstallKind::Source => bail!("nothing to relaunch"),
     };
@@ -331,6 +482,26 @@ mod tests {
         std::fs::create_dir_all(bundle.join("bin")).unwrap();
         std::fs::write(bundle.join("bin/embyclientplus-bin"), b"").unwrap();
         assert_eq!(find_bundle(&root), Some(bundle));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn replacing_files_sets_the_old_ones_aside() {
+        let root = std::env::temp_dir().join(format!("embyclientplus-swap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (new, current) = (root.join("new"), root.join("current"));
+        std::fs::create_dir_all(new.join("sub")).unwrap();
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(new.join("app.exe"), b"new").unwrap();
+        std::fs::write(new.join("sub/data"), b"new").unwrap();
+        std::fs::write(current.join("app.exe"), b"old").unwrap();
+        replace_files(&new, &current).unwrap();
+        assert_eq!(std::fs::read(current.join("app.exe")).unwrap(), b"new");
+        assert_eq!(std::fs::read(current.join("sub/data")).unwrap(), b"new");
+        assert_eq!(
+            std::fs::read(set_aside_name(&current.join("app.exe"))).unwrap(),
+            b"old"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -1,3 +1,6 @@
+// Release builds on Windows are GUI programs: no console window behind them.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod auth;
 mod cli;
 mod config;
@@ -47,7 +50,15 @@ fn main() -> glib::ExitCode {
         }
     };
     gamescope::prepare_environment();
+    svp::expose_vapoursynth();
     logging::init();
+    update::clean_up_previous();
+    emby::set_appear_as_browser(
+        config::Settings::load()
+            .unwrap_or_default()
+            .server
+            .appear_as_browser(),
+    );
 
     let app = adw::Application::builder().application_id(APP_ID).build();
     app.connect_activate(move |app| {

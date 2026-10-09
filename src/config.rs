@@ -269,6 +269,16 @@ pub struct ServerSettings {
     /// Stable per-install id so Emby sees one device across launches.
     #[serde(default)]
     pub device_id: String,
+    /// Identify to the server as a web browser rather than an app on a
+    /// named computer (Dashboard → Devices). Unset means on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub appear_as_browser: Option<bool>,
+}
+
+impl ServerSettings {
+    pub fn appear_as_browser(&self) -> bool {
+        self.appear_as_browser.unwrap_or(true)
+    }
 }
 
 impl ServerSettings {
@@ -459,7 +469,7 @@ impl Default for SubtitleSettings {
 pub struct FrameGenSettings {
     #[serde(default)]
     pub default_backend: FrameGenBackend,
-    /// SVP's install folder; empty means `~/SVP4`.
+    /// SVP's install folder; empty means its usual place (see `svp::default_dir`).
     #[serde(default)]
     pub svp_dir: String,
     /// IPC socket SVP Manager connects to (SVP's own mpv.conf uses this).
@@ -474,6 +484,11 @@ pub struct FrameGenSettings {
     pub smooth_without_svp: bool,
 }
 
+/// What SVP's own mpv setup uses on each OS: a named pipe on Windows
+/// (mpv expands the bare name to `\\.\pipe\mpvpipe`), a Unix socket elsewhere.
+#[cfg(windows)]
+pub const DEFAULT_SVP_SOCKET: &str = "mpvpipe";
+#[cfg(not(windows))]
 pub const DEFAULT_SVP_SOCKET: &str = "/tmp/mpvsocket";
 
 fn default_svp_socket() -> String {
