@@ -519,7 +519,7 @@ dependencies = [
 
 [[package]]
 name = "embyclientplus"
-version = "1.11.0"
+version = "1.11.1"
 dependencies = [
  "anyhow",
  "directories",

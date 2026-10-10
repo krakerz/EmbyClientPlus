@@ -367,8 +367,9 @@ pub fn build(app: &adw::Application, player: Player) -> adw::ApplicationWindow {
         move |pad, repeat| {
             if let (Some(state), Some(window)) = (state.upgrade(), window.upgrade()) {
                 let ui = state.ui.borrow().clone();
-                super::gamepad::handle(&window, ui.as_ref(), pad, repeat);
+                // First, so what the press shows (the OSD) knows it.
                 state.legend.set_in_use(true);
+                super::gamepad::handle(&window, ui.as_ref(), pad, repeat);
                 state.refresh_legend();
             }
         }
