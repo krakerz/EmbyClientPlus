@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.11.1] — 2026-10-10
+
+### Fixed
+- The player buttons' tooltips named the wrong keys ("Previous episode (P)" while the key is ","). They now show the key you've actually mapped in Preferences → Keyboard, and no key at all while you're using a controller.
+- The SVP button always said "~/SVP4 not found" when SVP was missing, whatever the system or the folder set in Preferences. It now names the folder it actually looked in.
+
 ## [1.11.0] — 2026-10-09
 
 ### Added

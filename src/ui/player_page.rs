@@ -137,6 +137,7 @@ struct Osd {
     shaders: gtk::MenuButton,
     svp: gtk::ToggleButton,
     fullscreen: gtk::Button,
+    mute: gtk::Button,
     skip: gtk::Button,
     up_next: gtk::Box,
     up_next_picture: gtk::Picture,
@@ -380,6 +381,29 @@ impl PlayerPage {
 }
 
 impl Osd {
+    /// Tooltips name the key that does the same, as currently mapped
+    /// (Preferences → Keyboard); with the controller in use, just the name.
+    fn refresh_hints(&self) {
+        use crate::keys::KeyAction;
+        let bindings = crate::keys::bindings();
+        let pad = crate::ui::legend::pad_in_use();
+        let buttons: [(&gtk::Button, &str, KeyAction); 5] = [
+            (&self.previous, "Previous episode", KeyAction::PreviousEpisode),
+            (&self.play, "Play/Pause", KeyAction::PlayPause),
+            (&self.next, "Next episode", KeyAction::NextEpisode),
+            (&self.mute, "Mute", KeyAction::Mute),
+            (&self.fullscreen, "Fullscreen", KeyAction::Fullscreen),
+        ];
+        for (button, name, action) in buttons {
+            let key = bindings.keys(action).into_iter().next().filter(|_| !pad);
+            let text = match key {
+                Some(key) => format!("{name} ({})", crate::keys::key_label(&key)),
+                None => name.to_string(),
+            };
+            button.set_tooltip_text(Some(&text));
+        }
+    }
+
     fn build(video: &gtk::GLArea) -> (Osd, gtk::Overlay) {
         let icon_button = |icon: &str, tooltip: &str| {
             gtk::Button::builder()
@@ -452,10 +476,10 @@ impl Osd {
         seek_row.append(&seek);
         seek_row.append(&remaining);
 
-        let previous = icon_button(crate::ui::icons::SKIP_BACK, "Previous episode (P)");
-        let play = icon_button(crate::ui::icons::PAUSE, "Play/Pause (Space)");
+        let previous = icon_button(crate::ui::icons::SKIP_BACK, "Previous episode");
+        let play = icon_button(crate::ui::icons::PAUSE, "Play/Pause");
         play.add_css_class("large-button");
-        let next = icon_button(crate::ui::icons::SKIP_FORWARD, "Next episode (N)");
+        let next = icon_button(crate::ui::icons::SKIP_FORWARD, "Next episode");
         let volume = gtk::Scale::builder()
             .orientation(gtk::Orientation::Horizontal)
             .width_request(180)
@@ -465,7 +489,7 @@ impl Osd {
         volume.add_mark(100.0, gtk::PositionType::Bottom, None);
         let mute = gtk::Button::builder()
             .icon_name(crate::ui::icons::MUTED)
-            .tooltip_text("Mute (M)")
+            .tooltip_text("Mute")
             .action_name("player.mute")
             .css_classes(["flat"])
             .build();
@@ -493,7 +517,7 @@ impl Osd {
             .css_classes(["flat", "svp-toggle", "osd-button"])
             .valign(gtk::Align::Center)
             .build();
-        let fullscreen = icon_button(crate::ui::icons::FULLSCREEN, "Fullscreen (F)");
+        let fullscreen = icon_button(crate::ui::icons::FULLSCREEN, "Fullscreen");
 
         let buttons = gtk::CenterBox::new();
         let start = gtk::Box::builder().spacing(6).build();
@@ -652,6 +676,7 @@ impl Osd {
             shaders,
             svp,
             fullscreen,
+            mute,
             skip,
             up_next,
             up_next_picture,
@@ -1014,6 +1039,7 @@ impl Inner {
                     | gdk::ModifierType::META_MASK
                     | gdk::ModifierType::SUPER_MASK
                     | gdk::ModifierType::ALT_MASK;
+                crate::ui::legend::keyboard_used();
                 match weak.upgrade() {
                     Some(inner) if !modifiers.intersects(held) => inner.key(key),
                     _ => glib::Propagation::Proceed,
@@ -1500,7 +1526,12 @@ impl Inner {
         }
         if !crate::svp::installed() {
             button.set_sensitive(false);
-            button.set_tooltip_text(Some("SVP isn't installed (~/SVP4 not found)"));
+            let looked_in = crate::svp::install_dir()
+                .map(|dir| dir.display().to_string())
+                .unwrap_or_else(|| crate::svp::default_dir_label().to_string());
+            button.set_tooltip_text(Some(&format!(
+                "SVP isn't installed ({looked_in} not found; set its folder in Preferences → General)"
+            )));
             return;
         }
         button.set_sensitive(true);
@@ -1762,6 +1793,7 @@ impl Inner {
     /// Reveals the OSD and cursor, then hides both after a quiet spell
     /// (unless a menu is open, or paused without "hide when paused").
     fn show_osd(self: &Rc<Self>) {
+        self.osd.refresh_hints();
         self.osd.top.set_reveal_child(true);
         self.osd.bottom.set_reveal_child(true);
         self.page.set_cursor(None::<&gdk::Cursor>);

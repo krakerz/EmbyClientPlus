@@ -16,6 +16,21 @@ const MARGIN: i32 = 12;
 /// The legend's own padding and border, left and right together.
 const CHROME: i32 = 30;
 
+thread_local! {
+    static PAD_IN_USE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The controller was used last (not the mouse or touch screen): keyboard
+/// hints don't apply.
+pub fn pad_in_use() -> bool {
+    PAD_IN_USE.get()
+}
+
+/// A key was pressed in the player: its hints apply again.
+pub fn keyboard_used() {
+    PAD_IN_USE.set(false);
+}
+
 pub struct Legend {
     root: gtk::Box,
     scroller: gtk::ScrolledWindow,
@@ -62,6 +77,7 @@ impl Legend {
     /// Controller pressed: the hints apply. Mouse or touch: they don't.
     pub fn set_in_use(&self, in_use: bool) {
         self.in_use.set(in_use);
+        PAD_IN_USE.set(in_use);
     }
 
     pub fn widget(&self) -> &gtk::Box {
