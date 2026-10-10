@@ -388,7 +388,11 @@ impl Osd {
         let bindings = crate::keys::bindings();
         let pad = crate::ui::legend::pad_in_use();
         let buttons: [(&gtk::Button, &str, KeyAction); 5] = [
-            (&self.previous, "Previous episode", KeyAction::PreviousEpisode),
+            (
+                &self.previous,
+                "Previous episode",
+                KeyAction::PreviousEpisode,
+            ),
             (&self.play, "Play/Pause", KeyAction::PlayPause),
             (&self.next, "Next episode", KeyAction::NextEpisode),
             (&self.mute, "Mute", KeyAction::Mute),
