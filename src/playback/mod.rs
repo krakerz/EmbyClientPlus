@@ -730,6 +730,11 @@ impl PlaybackSession {
         if let Err(e) = self.player.stop() {
             tracing::warn!("{e:#}");
         }
+        // Lets SVP Manager go rather than wait on an idle player; the next
+        // playback opens the socket again (`set_up_player`).
+        if let Err(e) = self.player.set_svp(&svp_socket(), false) {
+            tracing::warn!("{e:#}");
+        }
         let request = StoppedRequest {
             item_id: self.item.id.clone(),
             media_source_id: self.source.id.clone(),

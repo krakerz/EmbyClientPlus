@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [1.12.3] — 2026-10-11
+
+### Fixed
+- Leaving the player (back to the library) now disconnects SVP Manager too, not just closing the app. It stayed attached to the idle player before, waiting for a video that wasn't coming, which could leave the next playback's SVP stuck yellow.
+- macOS: turning SVP off in the player (and now leaving the player or closing the app) didn't disconnect SVP Manager, which stayed attached until the next video. It's disconnected straight away there too, as on Linux and Windows.
+- Windows and macOS: "Keep the screen on" didn't work, so the display could dim or sleep mid-video. Both now ask the system directly while a video plays, as Linux already did through the desktop.
+- macOS: hardware decoding asked for VA-API (Linux only) before falling back to VideoToolbox; it now asks for VideoToolbox directly.
+
 ## [1.12.2] — 2026-10-11
 
 ### Fixed

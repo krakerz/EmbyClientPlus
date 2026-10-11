@@ -1851,6 +1851,8 @@ impl Inner {
                 .unwrap_or_default()
                 .playback
                 .keep_screen_on;
+        #[cfg(any(windows, target_os = "macos"))]
+        crate::awake::set(wanted);
         let mut held = self.screen_inhibit.borrow_mut();
         if wanted == held.is_some() {
             return;

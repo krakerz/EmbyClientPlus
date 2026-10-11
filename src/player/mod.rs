@@ -159,10 +159,12 @@ pub struct Track {
 pub const SUB_SCALE_RANGE: (f64, f64) = (0.5, 3.0);
 
 /// Hardware decoders, in order (copy-back: SVP needs frames in RAM).
-/// Windows: D3D11 first, which every GPU there has; elsewhere VA-API
-/// first (see below), macOS falling through to VideoToolbox.
+/// Windows: D3D11, which every GPU there has; macOS: VideoToolbox; Linux:
+/// VA-API (see below).
 const HWDEC: &str = if cfg!(windows) {
     "d3d11va-copy,auto-copy"
+} else if cfg!(target_os = "macos") {
+    "videotoolbox-copy,auto-copy"
 } else {
     "vaapi-copy,auto-copy"
 };
@@ -712,15 +714,6 @@ impl Player {
     }
 }
 
-/// Shuts down every socket in this process whose local address is
-/// `path`: the IPC connections mpv accepted on it. mpv's client thread
-/// then sees EOF and drops the client. Returns how many were shut down.
-/// macOS has no /proc to find them: SVP stays attached until the next file.
-#[cfg(target_os = "macos")]
-fn disconnect_ipc_clients(_path: &str) -> usize {
-    0
-}
-
 /// Windows: disconnects every instance of the named pipe `name` (as given
 /// to input-ipc-server, e.g. `mpvpipe`) that this process serves, so SVP
 /// sees the connection close. Without it SVP keeps the old instance open
@@ -777,9 +770,13 @@ fn disconnect_ipc_clients(name: &str) -> usize {
     count
 }
 
-#[cfg(target_os = "linux")]
+/// Shuts down every socket in this process whose local address is
+/// `path`: the IPC connections mpv accepted on it. mpv's client thread
+/// then sees EOF and drops the client. Returns how many were shut down.
+/// `/dev/fd` lists this process's descriptors on Linux and macOS alike.
+#[cfg(unix)]
 fn disconnect_ipc_clients(path: &str) -> usize {
-    let Ok(fds) = std::fs::read_dir("/proc/self/fd") else {
+    let Ok(fds) = std::fs::read_dir("/dev/fd") else {
         return 0;
     };
     fds.filter_map(Result::ok)
@@ -792,7 +789,7 @@ fn disconnect_ipc_clients(path: &str) -> usize {
 }
 
 /// The local path of a Unix socket fd, if it is one.
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn unix_socket_path(fd: libc::c_int) -> Option<String> {
     // SAFETY: zeroed sockaddr_un is valid; getsockname writes at most `len` bytes.
     let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
@@ -915,7 +912,7 @@ mod tests {
     use libmpv2::events::PropertyData;
 
     #[test]
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     fn finds_and_disconnects_unix_sockets_by_path() {
         use std::os::unix::net::{UnixListener, UnixStream};
         let path = std::env::temp_dir().join(format!("embyclientplus-ipc-{}", std::process::id()));

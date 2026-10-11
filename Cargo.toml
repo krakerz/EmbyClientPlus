@@ -1,6 +1,6 @@
 [package]
 name = "embyclientplus"
-version = "1.12.2"
+version = "1.12.3"
 edition = "2024"
 description = "Native Emby client with SVP frame interpolation"
 license = "GPL-3.0-or-later"
@@ -46,6 +46,7 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
     "Win32_System_Pipes",
+    "Win32_System_Power",
 ] }
 
 [build-dependencies]

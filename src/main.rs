@@ -2,6 +2,8 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod auth;
+#[cfg(any(windows, target_os = "macos"))]
+mod awake;
 mod cli;
 mod config;
 mod controller;
