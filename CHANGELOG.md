@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [1.13.1] — 2026-10-11
+
+### Fixed
+- The Trailers library's tile on Home showed a cinema photo instead of the "Trailers" art Emby's own apps show. Library tiles now use the same picture as Emby.
+- Home ignored your Emby display settings for libraries: it showed libraries you've hidden from My Media (Playlists, say), in the server's default order, with "Latest" rows for libraries you've excluded from them. It now follows those settings, as Emby's own apps do.
+- Round pictures (artists in Favorites and the music library, people in Cast & Crew and search) could be stretched into ovals: with a UI scale and a high-DPI display, wide images (logos, band photos) were given more room than portrait ones. Every picture is now exactly its card's size, so circles stay circles, and posters and other cards no longer vary in width with their image.
+
 ## [1.13.0] — 2026-10-11
 
 ### Added

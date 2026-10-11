@@ -270,12 +270,69 @@ pub struct ChapterInfo {
     pub image_tag: Option<String>,
 }
 
+/// A user's library display settings (Emby's per-user configuration,
+/// which Emby web's settings page edits).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "PascalCase", default)]
+pub struct ViewSettings {
+    /// Library order, by id or guid.
+    pub ordered_views: Vec<String>,
+    /// Libraries hidden from the libraries row ("My Media").
+    pub my_media_excludes: Vec<String>,
+    /// Libraries without a "Latest" row.
+    pub latest_items_excludes: Vec<String>,
+}
+
+impl ViewSettings {
+    fn names(list: &[String], view: &BaseItem) -> bool {
+        list.iter()
+            .any(|id| *id == view.id || view.guid.as_deref() == Some(id.as_str()))
+    }
+
+    /// `views` in the user's order, for the libraries row: without hidden
+    /// ones, nor Live TV (which the app doesn't do).
+    pub fn libraries_row(&self, views: &[BaseItem]) -> Vec<BaseItem> {
+        let mut shown: Vec<BaseItem> = views
+            .iter()
+            .filter(|v| !Self::names(&self.my_media_excludes, v))
+            .filter(|v| v.collection_type.as_deref() != Some("livetv"))
+            .cloned()
+            .collect();
+        self.sort(&mut shown);
+        shown
+    }
+
+    /// Whether `view` gets a "Latest" row.
+    pub fn shows_latest(&self, view: &BaseItem) -> bool {
+        !Self::names(&self.latest_items_excludes, view)
+    }
+
+    /// Orders `views` as the user ordered them; unlisted ones keep the
+    /// server's order after them.
+    pub fn sort(&self, views: &mut [BaseItem]) {
+        views.sort_by_key(|view| {
+            self.ordered_views
+                .iter()
+                .position(|id| *id == view.id || view.guid.as_deref() == Some(id.as_str()))
+                .unwrap_or(usize::MAX)
+        });
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "PascalCase", default)]
+pub struct UserWithSettings {
+    pub configuration: ViewSettings,
+}
+
 /// The generic item shape every browse endpoint returns (Emby's
 /// `BaseItemDto`), trimmed to what the UI shows.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
 pub struct BaseItem {
     pub id: String,
+    /// The long id user settings refer to libraries by (`OrderedViews`).
+    pub guid: Option<String>,
     /// Only on single-item fetches that ask for it (details pages).
     pub media_streams: Vec<MediaStream>,
     /// Single-item fetches: the versions there are (usually one).
@@ -619,5 +676,37 @@ mod tests {
         assert!(source.supports_direct_play);
         assert_eq!(source.media_streams.len(), 1);
         assert_eq!(source.media_streams[0].stream_type, "Audio");
+    }
+
+    #[test]
+    fn libraries_row_follows_the_users_settings() {
+        let view = |id: &str, guid: &str, kind: Option<&str>| BaseItem {
+            id: id.to_string(),
+            guid: Some(guid.to_string()),
+            name: id.to_string(),
+            collection_type: kind.map(str::to_string),
+            ..Default::default()
+        };
+        let views = [
+            view("anime", "g1", Some("tvshows")),
+            view("playlists", "g2", Some("playlists")),
+            view("tv", "g3", Some("tvshows")),
+            view("live", "g4", Some("livetv")),
+            view("music", "g5", Some("music")),
+        ];
+        let settings: ViewSettings = serde_json::from_value(serde_json::json!({
+            "OrderedViews": ["g3", "anime"],
+            "MyMediaExcludes": ["g2"],
+            "LatestItemsExcludes": ["music"]
+        }))
+        .unwrap();
+        let names: Vec<String> = settings
+            .libraries_row(&views)
+            .into_iter()
+            .map(|v| v.id)
+            .collect();
+        assert_eq!(names, ["tv", "anime", "music"]);
+        assert!(!settings.shows_latest(&views[4]));
+        assert!(settings.shows_latest(&views[0]));
     }
 }

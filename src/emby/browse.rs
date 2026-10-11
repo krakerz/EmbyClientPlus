@@ -132,6 +132,13 @@ impl EmbyClient {
         Ok(result.items)
     }
 
+    /// The user's library order and hidden libraries.
+    pub async fn view_settings(&self, user_id: &str) -> Result<crate::emby::models::ViewSettings> {
+        let user: crate::emby::models::UserWithSettings =
+            self.get(&format!("/emby/Users/{user_id}")).await?;
+        Ok(user.configuration)
+    }
+
     /// Partially watched videos, most recent first, optionally within one
     /// library.
     pub async fn resume(
@@ -446,12 +453,16 @@ impl BaseItem {
         self.landscape()
     }
 
-    /// 16:9 card art. Episodes use their own still (their Primary image);
-    /// everything else prefers a Thumb, then falls back to a backdrop.
+    /// 16:9 card art. Episodes use their own still (their Primary image),
+    /// and libraries their tile art (Primary, as Emby's apps show it: a
+    /// Trailers channel's Thumb is a different picture); everything else
+    /// prefers a Thumb, then falls back to a backdrop.
     pub fn landscape(&self) -> Option<ImageRef> {
-        if self.item_type == "Episode"
-            && let Some(tag) = self.image_tags.get("Primary")
-        {
+        let primary_first = matches!(
+            self.item_type.as_str(),
+            "Episode" | "CollectionFolder" | "UserView" | "Channel"
+        );
+        if primary_first && let Some(tag) = self.image_tags.get("Primary") {
             return Some(image(&self.id, ImageKind::Primary, tag));
         }
         if let Some(tag) = self.image_tags.get("Thumb") {
