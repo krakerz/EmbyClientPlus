@@ -300,6 +300,11 @@ impl Player {
         subtitle_files: &[&str],
         audio_file: Option<&str>,
     ) -> Result<()> {
+        // Filters outlive the file: SVP's would start the new one with the
+        // previous file's script, until SVP Manager swaps in its own a few
+        // seconds later (interpolation visibly starting twice). Not an
+        // error when SVP never attached.
+        let _ = self.command("vf", &["remove", SVP_FILTER_LABEL]);
         // mpv ≥ 0.38 takes the playlist index before the per-file options.
         self.command(
             "loadfile",
