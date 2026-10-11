@@ -30,6 +30,7 @@ mod search;
 mod series;
 mod standalone;
 mod subtitle_picker;
+mod version_picker;
 pub use standalone::present as present_standalone;
 mod updates;
 pub mod window;

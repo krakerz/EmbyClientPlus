@@ -169,15 +169,14 @@ fn tabbed(ui: &Ui, folder: &BaseItem, kind: Kind) -> adw::NavigationPage {
         crate::ui::icons::SUGGESTIONS,
         Box::new(move |ui| suggestions(ui, &suggestions_folder, kind)),
     ));
-    if kind == Kind::Movies {
-        let collections = in_library(Some("BoxSet"), true);
-        tabs.push((
-            "collections",
-            "Collections",
-            crate::ui::icons::COLLECTIONS,
-            Box::new(move |ui| sortable_grid(ui, collections).upcast()),
-        ));
-    }
+    // Shown only once the library turns out to have any (see `tab_page`).
+    let collections = in_library(Some("BoxSet"), true);
+    tabs.push((
+        COLLECTIONS_TAB,
+        "Collections",
+        crate::ui::icons::COLLECTIONS,
+        Box::new(move |ui| sortable_grid(ui, collections).upcast()),
+    ));
     for (name, title, icon, chips_kind) in [
         ("genres", "Genres", crate::ui::icons::GENRES, Chips::Genres),
         ("tags", "Tags", crate::ui::icons::TAGS, Chips::Tags),
@@ -215,6 +214,29 @@ fn tabbed(ui: &Ui, folder: &BaseItem, kind: Kind) -> adw::NavigationPage {
     tab_page(ui, folder, tabs)
 }
 
+const COLLECTIONS_TAB: &str = "collections";
+
+/// Hides the Collections tab until Emby says the library has some.
+fn hide_unless_collections(ui: &Ui, tab: &adw::ViewStackPage, library_id: &str) {
+    tab.set_visible(false);
+    let query = ItemQuery {
+        parent_id: Some(library_id.to_string()),
+        include_types: Some("BoxSet"),
+        recursive: true,
+        limit: 1,
+        ..Default::default()
+    };
+    let client = ui.client();
+    let user_id = ui.user_id();
+    let tab = tab.downgrade();
+    glib::spawn_future_local(async move {
+        let found = spawn_tokio(async move { client.items(&user_id, &query).await }).await;
+        if let (Ok(result), Some(tab)) = (found, tab.upgrade()) {
+            tab.set_visible(!result.items.is_empty());
+        }
+    });
+}
+
 /// A library page with these tabs in its header.
 fn tab_page(ui: &Ui, folder: &BaseItem, tabs: Vec<Tab>) -> adw::NavigationPage {
     // Tabs are built the first time they're shown, so opening a library
@@ -241,6 +263,9 @@ fn tab_page(ui: &Ui, folder: &BaseItem, tabs: Vec<Tab>) -> adw::NavigationPage {
     };
     build_visible(&stack);
     stack.connect_visible_child_name_notify(build_visible);
+    if let Some(tab) = stack.child_by_name(COLLECTIONS_TAB) {
+        hide_unless_collections(ui, &stack.page(&tab), &folder.id);
+    }
 
     let header = adw::HeaderBar::builder()
         .title_widget(

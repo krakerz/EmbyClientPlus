@@ -3,6 +3,8 @@
 //! one mpv with video (starting either stops the other) and never touches
 //! SVP.
 
+#[cfg(any(windows, target_os = "macos"))]
+mod media_controls;
 #[cfg(target_os = "linux")]
 pub mod mpris;
 pub mod queue;
@@ -133,6 +135,8 @@ impl MusicPlayer {
         drop(current);
         #[cfg(target_os = "linux")]
         mpris::update(self);
+        #[cfg(any(windows, target_os = "macos"))]
+        media_controls::update(self);
     }
 
     pub fn downgrade(&self) -> WeakMusicPlayer {

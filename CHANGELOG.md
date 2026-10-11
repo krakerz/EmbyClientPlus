@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [1.13.0] — 2026-10-11
+
+### Added
+- TV libraries get a Collections tab too, shown only when the library has collections (an Anime library with some does, a TV Series library without any doesn't). Movie libraries now hide theirs when empty, the same way.
+- A "Version" button on movie and episode pages for titles with more than one version (a 4K and a 1080p file, say), next to Subtitles. "Default" leaves the choice to Emby; a chosen version applies until the app is closed.
+- Windows and macOS: media keys and the system's "now playing" controls work with the music player (play/pause, next, previous, seeking, with the track's title, artist and cover), as they already did on Linux.
+- Movie and series pages show "Included In": the collections the title belongs to, between Cast & Crew and More Like This, like Emby's own apps.
+
+### Fixed
+- Albums without a cover of their own showed a music note, where Emby's apps show the cover embedded in their tracks. The app now uses the same borrowed cover.
+
 ## [1.12.3] — 2026-10-11
 
 ### Fixed

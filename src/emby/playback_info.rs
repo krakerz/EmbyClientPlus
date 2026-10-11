@@ -13,6 +13,8 @@ pub struct StreamRequest {
     pub max_height: Option<u32>,
     /// Emby `MediaStream.Index` of the audio to transcode with.
     pub audio_stream_index: Option<i32>,
+    /// Which version to play, when there are several.
+    pub media_source_id: Option<String>,
 }
 
 impl StreamRequest {
@@ -29,7 +31,7 @@ impl StreamRequest {
             // A transcode that starts mid-file has a timeline starting at 0,
             // which breaks positions; start it at 0 and let mpv seek instead.
             start_time_ticks: if transcode { 0 } else { self.start_ticks },
-            media_source_id: None,
+            media_source_id: self.media_source_id.clone(),
             auto_open_live_stream: true,
             enable_direct_play: !transcode,
             enable_direct_stream: !transcode,
@@ -75,6 +77,7 @@ mod tests {
             max_bitrate: Some(6_000_000),
             max_height: None,
             audio_stream_index: Some(1),
+            media_source_id: None,
         }
         .to_request("u");
         assert!(!request.enable_direct_play && !request.enable_direct_stream);

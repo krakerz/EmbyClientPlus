@@ -10,6 +10,7 @@ use gtk::glib;
 use super::card::Shape;
 use super::rows::{Click, More, row};
 use super::{Ui, banner, fixed_picture, format_runtime, images};
+use crate::emby::browse::ItemQuery;
 use crate::emby::models::BaseItem;
 use crate::runtime::spawn_tokio;
 
@@ -208,12 +209,38 @@ pub fn show_related(ui: &Ui, related: &gtk::Box, item: &BaseItem) {
     let weak = ui.downgrade();
     let related = related.downgrade();
     glib::spawn_future_local(async move {
-        let similar =
-            spawn_tokio(async move { client.similar(&user_id, &item_id, SIMILAR_LIMIT).await })
-                .await;
+        // "Included In": the collections holding it, as Emby web shows.
+        let collections = ItemQuery {
+            list_item_id: Some(item_id.clone()),
+            include_types: Some("BoxSet"),
+            recursive: true,
+            limit: SIMILAR_LIMIT,
+            ..Default::default()
+        };
+        let (included, similar) = spawn_tokio(async move {
+            tokio::join!(
+                client.items(&user_id, &collections),
+                client.similar(&user_id, &item_id, SIMILAR_LIMIT)
+            )
+        })
+        .await;
         let (Some(ui), Some(related)) = (weak.upgrade(), related.upgrade()) else {
             return;
         };
+        match included {
+            Ok(result) if !result.items.is_empty() => {
+                related.append(&row(
+                    &ui,
+                    "Included In",
+                    &result.items,
+                    Shape::Poster,
+                    Click::Open,
+                    More::None,
+                ));
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("collections holding the item failed: {e:#}"),
+        }
         match similar {
             Ok(items) if !items.is_empty() => {
                 related.append(&row(
