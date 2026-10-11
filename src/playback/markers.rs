@@ -4,10 +4,6 @@ use crate::emby::models::{BaseItem, ChapterInfo};
 
 use super::TICKS_PER_SECOND;
 
-/// How long before the end the Up Next card appears when Emby has no
-/// credits marker.
-const UP_NEXT_FALLBACK_SECONDS: f64 = 20.0;
-
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Markers {
     /// Regular chapter starts, for seek-bar marks.
@@ -48,13 +44,6 @@ impl Markers {
 
     pub fn in_credits(&self, position: f64) -> bool {
         self.credits.is_some_and(|start| position >= start)
-    }
-
-    /// When the Up Next card should show for a file of `duration`.
-    pub fn up_next_at(&self, duration: f64) -> f64 {
-        self.credits
-            .unwrap_or(duration - UP_NEXT_FALLBACK_SECONDS)
-            .max(0.0)
     }
 
     /// The chapter start after/before `position`, for chapter keys.
@@ -113,15 +102,6 @@ mod tests {
         assert!(!markers.in_intro(119.5));
         assert!(!markers.in_intro(10.0));
         assert!(markers.in_credits(1301.0));
-        assert_eq!(markers.up_next_at(1420.0), 1300.0);
-    }
-
-    #[test]
-    fn up_next_falls_back_to_the_last_seconds() {
-        let markers = Markers::from_chapters(&[chapter(0, "Chapter")]);
-        assert_eq!(markers.intro, None);
-        assert_eq!(markers.up_next_at(1420.0), 1400.0);
-        assert_eq!(markers.up_next_at(5.0), 0.0);
     }
 
     #[test]

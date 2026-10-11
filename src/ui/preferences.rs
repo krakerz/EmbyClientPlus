@@ -188,6 +188,26 @@ fn show_with(parent: &impl IsA<gtk::Widget>, server: bool) {
         save(|s| s.playback.default_volume = value);
     });
     playback.add(&volume);
+    let up_next_seconds = adw::SpinRow::with_range(3.0, 60.0, 1.0);
+    up_next_seconds.set_title("Up Next countdown");
+    up_next_seconds.set_subtitle(
+        "Seconds before an episode's very end that the next one is shown; it plays when this one ends",
+    );
+    up_next_seconds.set_value(f64::from(settings.playback.up_next_seconds));
+    up_next_seconds.connect_value_notify(|row| {
+        let value = row.value() as u32;
+        save(|s| s.playback.up_next_seconds = value);
+    });
+    playback.add(&up_next_seconds);
+    let up_next_opacity = adw::SpinRow::with_range(20.0, 100.0, 5.0);
+    up_next_opacity.set_title("Up Next opacity");
+    up_next_opacity.set_subtitle("In percent; lower lets more of the video show through");
+    up_next_opacity.set_value((settings.playback.up_next_opacity * 100.0).round());
+    up_next_opacity.connect_value_notify(|row| {
+        let value = row.value() / 100.0;
+        save(|s| s.playback.up_next_opacity = value);
+    });
+    playback.add(&up_next_opacity);
     page.add(&playback);
     page.add(&downloads_group(parent.upcast_ref()));
 
