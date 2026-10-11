@@ -51,6 +51,8 @@ pub struct ItemQuery {
     /// Only items that have these images, e.g. "Primary".
     pub image_types: Option<&'static str>,
     pub artist_id: Option<String>,
+    /// Only lists (collections, playlists) holding this item.
+    pub list_item_id: Option<String>,
     /// More `Fields` on top of [`FIELDS`].
     pub extra_fields: Option<&'static str>,
     pub start: usize,
@@ -107,6 +109,9 @@ impl ItemQuery {
         }
         if let Some(artist_id) = &self.artist_id {
             params.push(("ArtistIds", artist_id.clone()));
+        }
+        if let Some(list_item_id) = &self.list_item_id {
+            params.push(("ListItemIds", list_item_id.clone()));
         }
         if let Some(image_types) = self.image_types {
             params.push(("ImageTypes", image_types.to_string()));
@@ -402,7 +407,12 @@ impl BaseItem {
             (Some(album_id), Some(tag)) => Some(image(album_id, ImageKind::Primary, tag)),
             _ => None,
         };
-        own.or(series).or(album)
+        // What Emby itself falls back to (Emby web shows the same).
+        let borrowed = match (&self.primary_image_item_id, &self.primary_image_tag) {
+            (Some(item_id), Some(tag)) => Some(image(item_id, ImageKind::Primary, tag)),
+            _ => None,
+        };
+        own.or(series).or(album).or(borrowed)
     }
 
     /// Wide fan art: the item's own, else its parent's (episodes/seasons).

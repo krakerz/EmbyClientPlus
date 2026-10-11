@@ -194,10 +194,13 @@ pub struct PlaybackInfoResponse {
 // the rest (direct-play/transcode flags, subtitle delivery info) are for
 // M9 (subtitle rendering) and smarter media-source selection later.
 #[allow(dead_code)]
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct MediaSource {
     pub id: String,
+    /// The version's name ("Movie (BD 1080p)"), for choosing between them.
+    #[serde(default)]
+    pub name: Option<String>,
     pub path: Option<String>,
     pub container: Option<String>,
     pub supports_direct_play: bool,
@@ -275,6 +278,8 @@ pub struct BaseItem {
     pub id: String,
     /// Only on single-item fetches that ask for it (details pages).
     pub media_streams: Vec<MediaStream>,
+    /// Single-item fetches: the versions there are (usually one).
+    pub media_sources: Vec<MediaSource>,
     pub name: String,
     #[serde(rename = "Type")]
     pub item_type: String,
@@ -309,6 +314,10 @@ pub struct BaseItem {
     pub album_id: Option<String>,
     pub album_artist: Option<String>,
     pub album_primary_image_tag: Option<String>,
+    /// Where Emby borrowed a cover from when the item has none of its own
+    /// (an album showing its first track's embedded art).
+    pub primary_image_item_id: Option<String>,
+    pub primary_image_tag: Option<String>,
     pub artist_items: Vec<NameId>,
     pub album_artists: Vec<NameId>,
     pub child_count: Option<i32>,

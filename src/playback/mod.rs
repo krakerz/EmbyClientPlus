@@ -194,7 +194,9 @@ impl PlaybackSession {
             max_bitrate: quality.max_bitrate(),
             max_height: quality.max_height(),
             audio_stream_index,
+            media_source_id: chosen_version(&item_id),
         };
+        let wanted_source = request.media_source_id.clone();
         let (item, episodes, info) = spawn_tokio({
             let client = client.clone();
             async move {
@@ -219,10 +221,7 @@ impl PlaybackSession {
         })
         .await?;
 
-        let source = info
-            .media_sources
-            .into_iter()
-            .next()
+        let source = pick_source(info.media_sources, wanted_source.as_deref())
             .context("Emby returned no playable media source for this item")?;
         let mut external_audio = None;
         let mut web_captions = None;
@@ -828,6 +827,39 @@ fn apply_smoothing(player: Player, svp: bool) {
     }
 }
 
+thread_local! {
+    /// Versions chosen on details pages (item id → media source id), for
+    /// this run of the app.
+    static VERSIONS: RefCell<std::collections::HashMap<String, String>> = RefCell::default();
+}
+
+/// The version chosen for `item_id`, if one was.
+pub fn chosen_version(item_id: &str) -> Option<String> {
+    VERSIONS.with(|versions| versions.borrow().get(item_id).cloned())
+}
+
+/// Plays `source_id` for `item_id` from now on (`None`: Emby's default).
+pub fn choose_version(item_id: &str, source_id: Option<String>) {
+    VERSIONS.with(|versions| {
+        let mut versions = versions.borrow_mut();
+        match source_id {
+            Some(id) => versions.insert(item_id.to_string(), id),
+            None => versions.remove(item_id),
+        };
+    });
+}
+
+/// The wanted version if Emby offered it, else Emby's first.
+fn pick_source(
+    sources: Vec<crate::emby::models::MediaSource>,
+    wanted: Option<&str>,
+) -> Option<crate::emby::models::MediaSource> {
+    let position = wanted
+        .and_then(|id| sources.iter().position(|s| s.id == id))
+        .unwrap_or(0);
+    sources.into_iter().nth(position)
+}
+
 /// What a title's remembered choices are stored under: the series for
 /// episodes (one choice for the whole show), else the item itself.
 pub fn title_key(item: &BaseItem) -> (String, ItemType) {
@@ -882,6 +914,23 @@ fn seconds_to_ticks(seconds: f64) -> i64 {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn picks_the_chosen_version_or_the_first() {
+        use crate::emby::models::MediaSource;
+        let sources = || {
+            ["a", "b"]
+                .map(|id| MediaSource {
+                    id: id.to_string(),
+                    ..Default::default()
+                })
+                .to_vec()
+        };
+        assert_eq!(super::pick_source(sources(), Some("b")).unwrap().id, "b");
+        assert_eq!(super::pick_source(sources(), Some("gone")).unwrap().id, "a");
+        assert_eq!(super::pick_source(sources(), None).unwrap().id, "a");
+        assert!(super::pick_source(Vec::new(), None).is_none());
+    }
     use super::*;
 
     fn source() -> MediaSource {

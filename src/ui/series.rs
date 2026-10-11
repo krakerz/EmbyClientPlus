@@ -563,6 +563,9 @@ fn add_subtitle_picker(ui: &Ui, play: &gtk::Button, episode_id: &str) {
         if let Some(picker) = super::subtitle_picker::button(&episode) {
             parent.insert_child_after(&picker, Some(&play));
         }
+        if let Some(versions) = super::version_picker::button(&episode) {
+            parent.insert_child_after(&versions, Some(&play));
+        }
     });
 }
 
