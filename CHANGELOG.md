@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.12.2] — 2026-10-11
+
+### Fixed
+- Closing the app now disconnects SVP Manager straight away. Before, its connection lingered until the app's process had fully exited, which could leave SVP stuck "waiting for the video info" (yellow) when the app was opened again.
+
 ## [1.12.1] — 2026-10-11
 
 ### Fixed
