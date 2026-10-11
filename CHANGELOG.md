@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.12.1] — 2026-10-11
+
+### Fixed
+- SVP started twice on each new episode: the previous episode's interpolation carried over into the next one until SVP Manager replaced it a few seconds later. A new video now starts clean, and SVP attaches once.
+
 ## [1.12.0] — 2026-10-11
 
 ### Added
