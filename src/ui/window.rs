@@ -448,6 +448,12 @@ pub fn build(app: &adw::Application, player: Player) -> adw::ApplicationWindow {
             if let Some(ui) = state.ui.borrow().as_ref() {
                 ui.stop_playback_and_wait();
             }
+            // SVP Manager learns right away that we're gone (closing the
+            // socket and dropping its connection), rather than whenever the
+            // process finally exits.
+            if let Err(e) = player.set_svp(&crate::playback::svp_socket(), false) {
+                tracing::warn!("{e:#}");
+            }
             if let Err(e) = player.quit() {
                 tracing::warn!("{e:#}");
             }
