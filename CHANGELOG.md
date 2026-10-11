@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [1.12.0] — 2026-10-11
+
+### Added
+- Preferences → General → Playback: "Up Next countdown" (3–60 seconds, 10 by default) and "Up Next opacity" (20–100%), so the card covers less of the picture.
+
+### Changed
+- Up Next now counts down to the episode's very end instead of starting at the credits, so scenes after the credits aren't cut off. With a 10-second countdown the card appears 11 seconds before the end and the next episode starts when this one finishes. The count follows the video, so pausing holds it.
+
 ## [1.11.1] — 2026-10-10
 
 ### Fixed

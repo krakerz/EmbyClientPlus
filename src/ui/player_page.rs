@@ -22,7 +22,6 @@ use crate::player::{
 const OSD_TIMEOUT: Duration = Duration::from_secs(3);
 /// Position/markers/Up Next refresh rate while the page is shown.
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
-const UP_NEXT_COUNTDOWN: Duration = Duration::from_secs(10);
 const SEEK_STEP: i32 = 10;
 /// One zoom step, in mpv's log2 units (about 7%).
 const ZOOM_STEP: f64 = 0.1;
@@ -64,7 +63,7 @@ pub struct Handlers {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum UpNext {
     Hidden,
-    Counting(Instant),
+    Counting,
     /// The user dismissed it; don't autoplay this item's successor.
     Cancelled,
 }
@@ -86,6 +85,8 @@ struct Inner {
     handlers: RefCell<Option<Rc<Handlers>>>,
     quality: Cell<Quality>,
     up_next: Cell<UpNext>,
+    /// Preferences' Up Next countdown, read when playback starts.
+    up_next_seconds: Cell<f64>,
     /// When the user last moved the seek bar; position updates pause briefly.
     seeked_at: Cell<Option<Instant>>,
     last_motion: Cell<Option<(f64, f64)>>,
@@ -175,6 +176,7 @@ impl PlayerPage {
             handlers: RefCell::new(None),
             quality: Cell::new(Quality::Original),
             up_next: Cell::new(UpNext::Hidden),
+            up_next_seconds: Cell::new(10.0),
             seeked_at: Cell::new(None),
             last_motion: Cell::new(None),
             hide_timer: RefCell::new(None),
@@ -321,6 +323,14 @@ impl PlayerPage {
         inner.handlers.replace(Some(Rc::new(handlers)));
         inner.quality.set(quality);
         inner.up_next.set(UpNext::Hidden);
+        let playback = crate::config::Settings::load().unwrap_or_default().playback;
+        inner
+            .up_next_seconds
+            .set(f64::from(playback.up_next_seconds.clamp(3, 60)));
+        inner
+            .osd
+            .up_next
+            .set_opacity(playback.up_next_opacity.clamp(0.2, 1.0));
         inner.svp_warned.set(false);
         inner.svp_checked_at.set(None);
         inner.page.set_title(&item.episode_label());
@@ -1481,9 +1491,14 @@ impl Inner {
         }
         let markers = &session.markers;
         // Music just moves on to the next track; the countdown is for episodes.
+        // It runs to the file's very end (scenes often follow the credits),
+        // where `finished` moves on; appearing a second early lets the full
+        // count show.
+        let left_in_file = duration - position;
         let up_next_due = session.next.is_some()
             && !session.item.is_audio()
-            && position >= markers.up_next_at(duration);
+            && duration > 0.0
+            && left_in_file <= self.up_next_seconds.get() + 1.0;
         let skip_label = if markers.in_intro(position) {
             Some("Skip Intro")
         } else if markers.in_credits(position) && !up_next_due {
@@ -1498,24 +1513,20 @@ impl Inner {
 
         match (self.up_next.get(), up_next_due) {
             (UpNext::Hidden, true) => {
-                self.up_next
-                    .set(UpNext::Counting(Instant::now() + UP_NEXT_COUNTDOWN));
+                self.up_next.set(UpNext::Counting);
                 self.osd.up_next.set_visible(true);
             }
-            (UpNext::Counting(_), false) => {
+            (UpNext::Counting, false) => {
                 // Seeked back out of the window.
                 self.up_next.set(UpNext::Hidden);
                 self.osd.up_next.set_visible(false);
             }
-            (UpNext::Counting(deadline), true) => {
-                let left = deadline.saturating_duration_since(Instant::now());
-                if left.is_zero() {
-                    self.play_neighbour(true);
-                } else {
-                    self.osd
-                        .up_next_countdown
-                        .set_label(&format!("Playing in {} s", left.as_secs() + 1));
-                }
+            (UpNext::Counting, true) => {
+                // Follows the video, so pausing holds the count too.
+                let left = left_in_file.min(self.up_next_seconds.get()).ceil().max(0.0);
+                self.osd
+                    .up_next_countdown
+                    .set_label(&format!("Playing in {left} s"));
             }
             _ => {}
         }

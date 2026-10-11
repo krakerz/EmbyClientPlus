@@ -339,10 +339,24 @@ pub struct PlaybackSettings {
     /// Volume for titles without their own (0–130; above 100 boosts).
     #[serde(default = "default_volume")]
     pub default_volume: f64,
+    /// Up Next: seconds of countdown, ending as the episode does.
+    #[serde(default = "default_up_next_seconds")]
+    pub up_next_seconds: u32,
+    /// Up Next card's opacity, 0.2–1.0.
+    #[serde(default = "default_up_next_opacity")]
+    pub up_next_opacity: f64,
 }
 
 fn default_volume() -> f64 {
     100.0
+}
+
+fn default_up_next_seconds() -> u32 {
+    10
+}
+
+fn default_up_next_opacity() -> f64 {
+    1.0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -421,6 +435,8 @@ impl Default for PlaybackSettings {
             dnd_off_command: String::new(),
             hide_osd_when_paused: false,
             default_volume: default_volume(),
+            up_next_seconds: default_up_next_seconds(),
+            up_next_opacity: default_up_next_opacity(),
         }
     }
 }
