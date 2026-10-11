@@ -976,6 +976,10 @@ fn fixed_picture(picture: &gtk::Picture, width: i32, height: i32) -> adw::Clamp 
     let clamp = |orientation, size, child: &gtk::Widget| {
         adw::Clamp::builder()
             .orientation(orientation)
+            // Pixels, like the size request: Clamp's default unit grows
+            // with the font DPI, so a wide image (an artist's logo) got
+            // more room than a portrait one, and circles became ovals.
+            .unit(adw::LengthUnit::Px)
             .maximum_size(size)
             .tightening_threshold(size)
             .child(child)

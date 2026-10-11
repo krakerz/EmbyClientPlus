@@ -212,14 +212,25 @@ fn load(ui: &Ui, content: &gtk::Box) {
     let content = content.clone();
     glib::spawn_future_local(async move {
         let result = spawn_tokio(async move {
-            let (views, resume, next_up) = tokio::join!(
+            let (views, settings, resume, next_up) = tokio::join!(
                 client.views(&user_id),
+                client.view_settings(&user_id),
                 client.resume(&user_id, None, ROW_LIMIT),
                 client.next_up(&user_id, None, ROW_LIMIT),
             );
-            let views = views?;
+            let mut views = views?;
+            // Without them, everything shows in the server's order.
+            let settings = settings.unwrap_or_else(|e| {
+                tracing::warn!("library display settings failed: {e:#}");
+                Default::default()
+            });
+            settings.sort(&mut views);
             let mut latest_tasks = tokio::task::JoinSet::new();
-            for (index, view) in views.iter().filter(|v| has_latest_row(v)).enumerate() {
+            for (index, view) in views
+                .iter()
+                .filter(|v| has_latest_row(v) && settings.shows_latest(v))
+                .enumerate()
+            {
                 let client = client.clone();
                 let user_id = user_id.clone();
                 let view = view.clone();
@@ -239,7 +250,7 @@ fn load(ui: &Ui, content: &gtk::Box) {
             }
             latest.sort_by_key(|(index, _, _)| *index);
             Ok::<_, anyhow::Error>(HomeData {
-                views,
+                views: settings.libraries_row(&views),
                 // A failed secondary row shouldn't blank the whole page.
                 resume: resume.unwrap_or_else(|e| {
                     tracing::warn!("resume row failed: {e:#}");
