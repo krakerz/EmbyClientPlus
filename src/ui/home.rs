@@ -70,7 +70,6 @@ pub fn page(ui: &Ui) -> adw::NavigationPage {
     menu.append(Some("Refresh"), Some("home.refresh"));
     menu.append(Some("History"), Some("home.history"));
     menu.append(Some("Downloads"), Some("home.downloads"));
-    menu.append(Some("Profile"), Some("home.profile"));
     menu.append(Some("Preferences"), Some("home.preferences"));
     menu.append(Some("Log Out"), Some("home.logout"));
     // Easier with a controller than Steam's own menu.
@@ -158,16 +157,6 @@ pub fn page(ui: &Ui) -> adw::NavigationPage {
         move |_, _| super::preferences::show(&content)
     ));
     actions.add_action(&preferences);
-    let profile = gio::SimpleAction::new("profile", None);
-    profile.connect_activate({
-        let (weak, content) = (ui.downgrade(), content.clone());
-        move |_, _| {
-            if let Some(ui) = weak.upgrade() {
-                super::profile::show(&ui, &content);
-            }
-        }
-    });
-    actions.add_action(&profile);
     let history = gio::SimpleAction::new("history", None);
     history.connect_activate({
         let weak = ui.downgrade();
@@ -437,8 +426,13 @@ fn more_libraries(ui: &Ui, hidden: Vec<BaseItem>) -> gtk::Button {
 
 fn show(ui: &Ui, content: &gtk::Box, data: HomeData) {
     clear(content);
-    if !data.views.is_empty() || !data.hidden.is_empty() {
-        let more = (!data.hidden.is_empty()).then(|| more_libraries(ui, data.hidden.clone()));
+    let show_more = crate::config::Settings::load()
+        .unwrap_or_default()
+        .home
+        .show_more_libraries;
+    let more =
+        (show_more && !data.hidden.is_empty()).then(|| more_libraries(ui, data.hidden.clone()));
+    if !data.views.is_empty() || more.is_some() {
         content.append(&super::rows::row_ending(
             ui,
             "Libraries",

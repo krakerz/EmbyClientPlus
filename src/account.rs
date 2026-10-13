@@ -92,6 +92,18 @@ pub fn playback() -> PlaybackPrefs {
     }
 }
 
+/// Whether suggestions leave out watched titles (Emby's
+/// `HidePlayedInSuggestions`); without an account, they do.
+pub fn hide_played_in_suggestions() -> bool {
+    user()
+        .and_then(|user| {
+            user.get("Configuration")?
+                .get("HidePlayedInSuggestions")?
+                .as_bool()
+        })
+        .unwrap_or(true)
+}
+
 /// The account's user object, if signed in.
 pub fn user() -> Option<Value> {
     ACCOUNT

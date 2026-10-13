@@ -601,7 +601,7 @@ dependencies = [
 
 [[package]]
 name = "embyclientplus"
-version = "1.14.0"
+version = "1.14.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
