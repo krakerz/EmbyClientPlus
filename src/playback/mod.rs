@@ -147,10 +147,24 @@ pub struct LocalMedia {
     pub subtitle_files: Vec<String>,
 }
 
+/// Where a session's video comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// Streamed from the Emby server.
+    Server,
+    /// A downloaded copy of an Emby title (progress still reported).
+    Download,
+    /// A file opened in the standalone player.
+    File,
+    /// A web link (a trailer, a video page).
+    Link,
+}
+
 /// One playing item, from load until it's stopped or replaced.
 pub struct PlaybackSession {
     /// `None` for local files and links: nothing is reported anywhere.
     client: Option<Arc<EmbyClient>>,
+    pub origin: Origin,
     player: Player,
     /// The item with its chapters.
     pub item: BaseItem,
@@ -262,6 +276,7 @@ impl PlaybackSession {
         };
         let session = Rc::new(PlaybackSession {
             client: Some(client),
+            origin: Origin::Server,
             player,
             markers: Markers::from_chapters(&item.chapters),
             item,
@@ -319,8 +334,16 @@ impl PlaybackSession {
             id: media.item.id.clone(),
             ..Default::default()
         };
+        let origin = if media.client.is_some() {
+            Origin::Download
+        } else if media.target.contains("://") {
+            Origin::Link
+        } else {
+            Origin::File
+        };
         let session = Rc::new(PlaybackSession {
             client: media.client,
+            origin,
             player,
             markers: Markers::from_chapters(&media.item.chapters),
             item: media.item,
@@ -408,9 +431,10 @@ impl PlaybackSession {
         Ok(())
     }
 
-    /// Whether this plays from an Emby server (else a local file or link).
+    /// Whether this streams from an Emby server (else a download, a local
+    /// file or a link), so a lower quality can be asked for.
     pub fn is_from_server(&self) -> bool {
-        self.client.is_some()
+        self.origin == Origin::Server
     }
 
     /// Picks the starting audio/subtitle tracks once mpv has loaded the

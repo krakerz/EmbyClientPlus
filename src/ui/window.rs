@@ -18,10 +18,22 @@ use crate::runtime::spawn_detached;
 
 const CSS: &str = "
 .card-button { padding: 0; }
+/* Grid cells: the card plus half the rows' 12px gap on each side. */
+gridview.poster-grid > child {
+    padding: 6px 6px 12px 6px;
+}
 .player-bar {
     margin: 12px;
     padding: 4px 14px;
     border-radius: 14px;
+}
+/* The player's Downloaded / Local file tag, top right. */
+.origin-badge {
+    background: alpha(@success_color, 0.18);
+    color: @success_color;
+    border-radius: 999px;
+    padding: 4px 12px;
+    font-weight: bold;
 }
 /* Every player button is the same true circle (hover and focus ring
    included), text ones like SVP too. */

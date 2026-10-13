@@ -109,6 +109,86 @@ fn image_path(file: &Path) -> PathBuf {
     file.with_file_name(name)
 }
 
+/// A download still to do, saved so it survives the app closing (even
+/// abruptly): queued ones carry on at the next start, paused ones wait.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Pending {
+    pub user_id: String,
+    pub id: String,
+    pub name: String,
+    pub item_type: String,
+    pub series_id: Option<String>,
+    pub series_name: Option<String>,
+    pub season: Option<i32>,
+    pub episode: Option<i32>,
+    pub paused: bool,
+}
+
+impl Pending {
+    pub fn new(user_id: &str, item: &BaseItem, paused: bool) -> Self {
+        Pending {
+            user_id: user_id.to_string(),
+            id: item.id.clone(),
+            name: item.name.clone(),
+            item_type: item.item_type.clone(),
+            series_id: item.series_id.clone(),
+            series_name: item.series_name.clone(),
+            season: item.parent_index_number,
+            episode: item.index_number,
+            paused,
+        }
+    }
+
+    /// Enough of the item to queue and label it.
+    pub fn item(&self) -> BaseItem {
+        BaseItem {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            item_type: self.item_type.clone(),
+            series_id: self.series_id.clone(),
+            series_name: self.series_name.clone(),
+            parent_index_number: self.season,
+            index_number: self.episode,
+            ..Default::default()
+        }
+    }
+}
+
+fn pending_path() -> Result<PathBuf> {
+    Ok(crate::config::config_dir()?.join("download-queue.json"))
+}
+
+fn load_all_pending() -> Vec<Pending> {
+    pending_path()
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// `user_id`'s saved downloads, in order.
+pub fn load_pending(user_id: &str) -> Vec<Pending> {
+    load_all_pending()
+        .into_iter()
+        .filter(|p| p.user_id == user_id)
+        .collect()
+}
+
+/// Replaces `user_id`'s saved downloads with `pending`.
+pub fn save_pending(user_id: &str, pending: &[Pending]) {
+    let mut all = load_all_pending();
+    all.retain(|p| p.user_id != user_id);
+    all.extend(pending.iter().cloned());
+    let result = (|| -> Result<()> {
+        let path = pending_path()?;
+        std::fs::write(&path, serde_json::to_string_pretty(&all)?)
+            .with_context(|| format!("writing {}", path.display()))
+    })();
+    if let Err(e) = result {
+        tracing::warn!("couldn't save the download queue: {e:#}");
+    }
+}
+
 /// The downloaded items' ids, rescanned at most every few seconds (and
 /// after each download or delete), so lists can badge every card cheaply.
 static IDS: Mutex<Option<(Instant, Arc<HashSet<String>>)>> = Mutex::new(None);
@@ -191,14 +271,102 @@ fn relative_path(item: &BaseItem) -> PathBuf {
     }
 }
 
+/// Not enough room on the disk for a download (it never started).
+#[derive(Debug)]
+pub struct NotEnoughSpace {
+    pub needed: u64,
+    pub free: u64,
+}
+
+impl std::fmt::Display for NotEnoughSpace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "not enough disk space: needs {:.1} GB, {:.1} GB free",
+            self.needed as f64 / 1e9,
+            self.free as f64 / 1e9
+        )
+    }
+}
+
+impl std::error::Error for NotEnoughSpace {}
+
+/// Kept free beside downloads, so the disk never fills up completely.
+const SPACE_RESERVE: u64 = 1_000_000_000;
+
+/// Free bytes on the disk holding `path` (or its nearest existing parent).
+pub fn free_space(path: &Path) -> Option<u64> {
+    let existing = path.ancestors().find(|p| p.exists())?;
+    free_space_at(existing)
+}
+
+#[cfg(unix)]
+fn free_space_at(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: a valid C string and a zeroed struct for the call to fill.
+    if unsafe { libc::statvfs(c_path.as_ptr(), &mut stats) } != 0 {
+        return None;
+    }
+    #[allow(clippy::unnecessary_cast)]
+    Some(stats.f_bavail as u64 * stats.f_frsize as u64)
+}
+
+#[cfg(windows)]
+fn free_space_at(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut free: u64 = 0;
+    // SAFETY: a NUL-terminated path; the other outputs may be null.
+    let ok = unsafe {
+        windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut free,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    (ok != 0).then_some(free)
+}
+
+/// A half-finished download's file: `<file>.<item id>.part`, so it can be
+/// found again (to resume or discard) from the item alone.
+fn partial_path(file: &Path, item_id: &str) -> PathBuf {
+    let mut name = file.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{item_id}.part"));
+    file.with_file_name(name)
+}
+
+/// Deletes `item_id`'s half-finished download, if any (a cancelled one).
+pub fn discard_partial(item_id: &str) {
+    let suffix = format!(".{item_id}.part");
+    fn walk(dir: &Path, suffix: &str, depth: usize) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for path in entries.filter_map(|e| e.ok().map(|e| e.path())) {
+            if path.is_dir() && depth < 4 {
+                walk(&path, suffix, depth + 1);
+            } else if path.to_string_lossy().ends_with(suffix) {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+    walk(&folder(), &suffix, 0);
+}
+
 /// Downloads `item_id`'s original file with its metadata and artwork;
-/// returns where it went. `progress` and `cancelled` are shared with the UI.
+/// returns where it went. `progress` and `cancelled` are shared with the
+/// UI. A cancelled or interrupted download keeps its partial file, which
+/// the next attempt continues; `discard` (a cancel, not a pause) deletes it.
 pub async fn fetch(
     client: Arc<EmbyClient>,
     user_id: String,
     item_id: String,
     progress: Arc<Progress>,
     cancelled: Arc<AtomicBool>,
+    discard: Arc<AtomicBool>,
 ) -> Result<PathBuf> {
     let raw = client.item_json(&user_id, &item_id).await?;
     let value: serde_json::Value =
@@ -229,13 +397,22 @@ pub async fn fetch(
     }
     // Written as .part and renamed at the end, so a half download is never
     // mistaken for a finished one.
-    let partial = file.with_extension(format!("{extension}.part"));
+    let partial = partial_path(&file, &item.id);
+    let have = std::fs::metadata(&partial).map_or(0, |m| m.len());
+    if let (Some(size), Some(free)) = (source["Size"].as_u64(), free_space(&file)) {
+        let needed = size.saturating_sub(have);
+        if needed + SPACE_RESERVE > free {
+            return Err(NotEnoughSpace { needed, free }.into());
+        }
+    }
     let url = client.direct_stream_url(&item.id, &source_id)?;
     if let Err(e) = client
-        .download_to(&url, &partial, &progress, &cancelled)
+        .download_to(&url, &partial, &progress, &cancelled, true)
         .await
     {
-        let _ = std::fs::remove_file(&partial);
+        if discard.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = std::fs::remove_file(&partial);
+        }
         return Err(e);
     }
     std::fs::rename(&partial, &file)
@@ -249,7 +426,13 @@ pub async fn fetch(
         let art = Progress::default();
         // Artwork is a nicety: a download without it still plays.
         if let Err(e) = client
-            .download_to(&url, &image_path(&file), &art, &AtomicBool::new(false))
+            .download_to(
+                &url,
+                &image_path(&file),
+                &art,
+                &AtomicBool::new(false),
+                false,
+            )
             .await
         {
             tracing::warn!("couldn't save the artwork for {}: {e:#}", file.display());
@@ -304,7 +487,7 @@ async fn save_subtitles(
         };
         let done = Progress::default();
         match client
-            .download_to(&url, &path, &done, &AtomicBool::new(false))
+            .download_to(&url, &path, &done, &AtomicBool::new(false), false)
             .await
         {
             Ok(()) => used.push(path),
@@ -461,6 +644,36 @@ mod tests {
             ]
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn partial_files_carry_the_item_id() {
+        let file = PathBuf::from("/x/Show/Season 1/S01E01 - Pilot.mkv");
+        assert_eq!(
+            partial_path(&file, "42"),
+            PathBuf::from("/x/Show/Season 1/S01E01 - Pilot.mkv.42.part")
+        );
+        assert!(free_space(Path::new("/definitely/not/here")).is_some_and(|f| f > 0));
+    }
+
+    #[test]
+    fn pending_downloads_keep_enough_to_queue_them() {
+        let item = BaseItem {
+            id: "7".into(),
+            name: "Pilot".into(),
+            item_type: "Episode".into(),
+            series_name: Some("Show".into()),
+            parent_index_number: Some(1),
+            index_number: Some(2),
+            ..Default::default()
+        };
+        let pending = Pending::new("u", &item, true);
+        let back: Pending =
+            serde_json::from_str(&serde_json::to_string(&pending).unwrap()).unwrap();
+        let again = back.item();
+        assert!(back.paused);
+        assert_eq!((again.id.as_str(), again.index_number), ("7", Some(2)));
+        assert_eq!(again.series_name.as_deref(), Some("Show"));
     }
 
     #[test]

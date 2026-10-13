@@ -263,28 +263,44 @@ impl EmbyClient {
     }
 
     /// Streams `url` into `file`, counting bytes into `progress`; stops
-    /// early (with an error) once `cancelled` turns true.
+    /// early (with an error) once `cancelled` turns true. With `resume`, a
+    /// `file` already partly there is continued where it stopped (when the
+    /// server allows ranges; else it starts over).
     pub async fn download_to(
         &self,
         url: &str,
         file: &std::path::Path,
         progress: &crate::update::Progress,
         cancelled: &std::sync::atomic::AtomicBool,
+        resume: bool,
     ) -> Result<()> {
         use std::io::Write;
-        let mut response = self
-            .http
-            .get(url)
-            .headers(self.headers()?)
+        let have = if resume {
+            std::fs::metadata(file).map_or(0, |m| m.len())
+        } else {
+            0
+        };
+        let mut request = self.http.get(url).headers(self.headers()?);
+        if have > 0 {
+            request = request.header(reqwest::header::RANGE, format!("bytes={have}-"));
+        }
+        let mut response = request
             .send()
             .await
             .context("download failed")?
             .error_for_status()
             .context("download failed")?;
-        progress.start(response.content_length().unwrap_or(0));
-        let mut out = std::io::BufWriter::new(
+        let continuing = have > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+        let already = if continuing { have } else { 0 };
+        progress.start(response.content_length().map_or(0, |rest| rest + already));
+        progress.add(already);
+        let opened = if continuing {
+            std::fs::OpenOptions::new().append(true).open(file)
+        } else {
             std::fs::File::create(file)
-                .with_context(|| format!("couldn't write {}", file.display()))?,
+        };
+        let mut out = std::io::BufWriter::new(
+            opened.with_context(|| format!("couldn't write {}", file.display()))?,
         );
         while let Some(chunk) = response.chunk().await.context("download interrupted")? {
             if cancelled.load(std::sync::atomic::Ordering::Relaxed) {

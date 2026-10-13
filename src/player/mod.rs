@@ -304,9 +304,8 @@ impl Player {
     ) -> Result<()> {
         // Filters outlive the file: SVP's would start the new one with the
         // previous file's script, until SVP Manager swaps in its own a few
-        // seconds later (interpolation visibly starting twice). Not an
-        // error when SVP never attached.
-        let _ = self.command("vf", &["remove", SVP_FILTER_LABEL]);
+        // seconds later (interpolation visibly starting twice).
+        self.remove_svp_filter();
         // mpv ≥ 0.38 takes the playlist index before the per-file options.
         self.command(
             "loadfile",
@@ -485,8 +484,7 @@ impl Player {
             if dropped > 0 {
                 tracing::info!("disconnected {dropped} SVP client(s)");
             }
-            // Not an error when SVP never attached.
-            let _ = self.command("vf", &["remove", SVP_FILTER_LABEL]);
+            self.remove_svp_filter();
             Ok(())
         }
     }
@@ -688,6 +686,18 @@ impl Player {
             APPLIED_SHADERS.with(|applied| applied.borrow_mut().push(file.clone()));
         }
         Ok(())
+    }
+
+    /// Drops SVP's filter, only when it's there: mpv warns about removing
+    /// a label it doesn't have.
+    fn remove_svp_filter(self) {
+        let present = self
+            .mpv
+            .get_property::<String>("vf")
+            .is_ok_and(|vf| vf.contains(SVP_FILTER_LABEL));
+        if present && let Err(e) = self.command("vf", &["remove", SVP_FILTER_LABEL]) {
+            tracing::warn!("{e:#}");
+        }
     }
 
     /// Whether SVP Manager has added its filter to this playback.
