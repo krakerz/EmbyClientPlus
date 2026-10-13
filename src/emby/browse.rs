@@ -55,6 +55,8 @@ pub struct ItemQuery {
     pub list_item_id: Option<String>,
     /// More `Fields` on top of [`FIELDS`].
     pub extra_fields: Option<&'static str>,
+    /// Only these items (comma-separated ids).
+    pub ids: Option<String>,
     pub start: usize,
     pub limit: usize,
 }
@@ -116,6 +118,9 @@ impl ItemQuery {
         if let Some(image_types) = self.image_types {
             params.push(("ImageTypes", image_types.to_string()));
         }
+        if let Some(ids) = &self.ids {
+            params.push(("Ids", ids.clone()));
+        }
         params
             .iter()
             .map(|(key, value)| format!("{key}={}", encode(value)))
@@ -125,6 +130,56 @@ impl ItemQuery {
 }
 
 impl EmbyClient {
+    /// The series under `parent_id` you've started and not finished: an
+    /// episode watched or part-watched, some left. Emby has no filter for that on series themselves
+    /// (they're never "resumable"), so it's worked out from the episodes.
+    pub async fn started_series_ids(
+        &self,
+        user_id: &str,
+        parent_id: Option<&str>,
+    ) -> Result<Vec<String>> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "PascalCase")]
+        struct Episode {
+            series_id: Option<String>,
+        }
+        let parent = parent_id.map_or(String::new(), |id| format!("&ParentId={id}"));
+        let mut ids: Vec<String> = Vec::new();
+        for filter in ["IsPlayed", "IsResumable"] {
+            let page: QueryResult<Episode> = self
+                .get(&format!(
+                    "/emby/Users/{user_id}/Items?Recursive=true&IncludeItemTypes=Episode\
+                     &Filters={filter}&Fields=SeriesId&EnableImages=false\
+                     &EnableUserData=false{parent}"
+                ))
+                .await?;
+            for id in page.items.into_iter().filter_map(|e| e.series_id) {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+        // Only the unfinished ones, asked in batches: a long watch history
+        // would make one address too long for the server.
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "PascalCase")]
+        struct Series {
+            id: String,
+        }
+        let mut unfinished = Vec::new();
+        for batch in ids.chunks(100) {
+            let page: QueryResult<Series> = self
+                .get(&format!(
+                    "/emby/Users/{user_id}/Items?IncludeItemTypes=Series&Filters=IsUnplayed\
+                     &EnableImages=false&EnableUserData=false&Ids={}",
+                    batch.join(",")
+                ))
+                .await?;
+            unfinished.extend(page.items.into_iter().map(|s| s.id));
+        }
+        Ok(unfinished)
+    }
+
     /// The user's top-level libraries.
     pub async fn views(&self, user_id: &str) -> Result<Vec<BaseItem>> {
         let result: QueryResult<BaseItem> =

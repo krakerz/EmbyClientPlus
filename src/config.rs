@@ -247,6 +247,10 @@ pub struct HomeSettings {
     /// libraries hidden from Home (Profile).
     #[serde(default)]
     pub show_more_libraries: bool,
+    /// TV libraries' "In Progress" filter, worked out from the episodes
+    /// (Emby has none for series); off leaves it out of their filters.
+    #[serde(default)]
+    pub series_in_progress: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

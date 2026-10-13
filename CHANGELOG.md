@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [1.16.1] — 2026-10-13
+
+### Added
+- Preferences → Home → "In Progress" filter for TV (off by default): turn it on to get "In Progress" in TV libraries' filters; it's off by default because finding the started series can take a moment with a long watch history.
+
+### Fixed
+- With a controller, Up from the top row of a library grid didn't reach the bar above it (filter, sort), so the filter couldn't be changed: since the bar became a centred group, it wasn't straight above most cards. Up from the top row now always goes to the bar.
+- With a controller, the grid's filter and sort lists opened but their choices ignored A, so nothing could be picked. A on the filter or sort now steps to its next choice (wrapping), as it already did on Preferences' choice rows; a mouse still opens the list.
+- With a controller, A on a row of the Downloads page now does what its button does: pauses a running download, resumes a paused one (the buttons at the row's end still work too).
+- Steam Game Mode: Profile no longer offers "Change Picture…", whose file chooser can't be used with a controller there (the same as Preferences' folder picker).
+- The "In Progress" filter never showed anything in TV libraries: Emby doesn't mark a series itself as in progress, only its episodes. It now lists the series you've started (an episode watched or part-watched) and haven't finished.
+
 ## [1.16.0] — 2026-10-13
 
 ### Added
