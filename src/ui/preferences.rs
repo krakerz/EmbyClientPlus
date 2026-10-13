@@ -299,6 +299,16 @@ fn show_with(parent: &impl IsA<gtk::Widget>, server: bool) {
         save(|s| s.home.episode_art = art);
     });
     home.add(&art);
+    let more_libraries = adw::SwitchRow::builder()
+        .title("Show \"More Libraries\"")
+        .subtitle("A card at the end of the Libraries row for libraries hidden from Home")
+        .active(settings.home.show_more_libraries)
+        .build();
+    more_libraries.connect_active_notify(|row| {
+        let show = row.is_active();
+        save(|s| s.home.show_more_libraries = show);
+    });
+    home.add(&more_libraries);
     if server {
         page.add(&home);
     }
@@ -458,6 +468,18 @@ fn show_with(parent: &impl IsA<gtk::Widget>, server: bool) {
         .content_height(820)
         .child(&toasts)
         .build();
+    // Home rebuilds if its card was switched on or off.
+    let parent_widget = parent.as_ref().clone();
+    let shown = settings.home.show_more_libraries;
+    dialog.connect_closed(move |_| {
+        let now = Settings::load()
+            .unwrap_or_default()
+            .home
+            .show_more_libraries;
+        if now != shown {
+            let _ = parent_widget.activate_action("home.refresh", None);
+        }
+    });
     dialog.present(Some(parent));
 }
 

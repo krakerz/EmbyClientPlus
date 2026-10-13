@@ -64,7 +64,8 @@ pub fn show(ui: &Ui, parent: &impl IsA<gtk::Widget>) {
         .title("Profile")
         .icon_name(super::icons::PERSON)
         .build();
-    page.add(&account_group(ui, &user, &dialog));
+    page.add(&picture_group(ui, &user));
+    page.add(&security_group(ui, &user));
     page.add(&playback_group(ui, &config));
     page.add(&display_group(ui, &config));
     page.add(&libraries_group(ui, &config));
@@ -137,7 +138,9 @@ fn switch_row(
 
 // Account: picture, name, password, PIN, sign out.
 
-fn account_group(ui: &Ui, user: &Value, dialog: &adw::PreferencesDialog) -> adw::PreferencesGroup {
+/// The picture and name. Its own group: a group puts plain widgets after
+/// its rows, so sharing one with rows would push it below them.
+fn picture_group(ui: &Ui, user: &Value) -> adw::PreferencesGroup {
     let name = user
         .get("Name")
         .and_then(Value::as_str)
@@ -209,23 +212,14 @@ fn account_group(ui: &Ui, user: &Value, dialog: &adw::PreferencesDialog) -> adw:
         }
     });
 
+    group
+}
+
+/// Password and PIN, above the settings. Signing out is in Home's menu.
+fn security_group(ui: &Ui, user: &Value) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::new();
     group.add(&password_row(ui));
     group.add(&pin_row(ui, user));
-
-    let sign_out = adw::ButtonRow::builder()
-        .title("Sign Out")
-        .css_classes(["destructive-action"])
-        .build();
-    sign_out.connect_activated({
-        let (ui, dialog) = (ui.downgrade(), dialog.clone());
-        move |_| {
-            dialog.close();
-            if let Some(ui) = ui.upgrade() {
-                ui.logout();
-            }
-        }
-    });
-    group.add(&sign_out);
     group
 }
 
@@ -586,7 +580,6 @@ fn playback_group(ui: &Ui, config: &Map<String, Value>) -> adw::PreferencesGroup
 fn display_group(ui: &Ui, config: &Map<String, Value>) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder().title("Display").build();
     for (key, title) in [
-        ("DisplayMissingEpisodes", "Show missing episodes"),
         ("HidePlayedInLatest", "Hide watched items in Latest"),
         (
             "HidePlayedInMoreLikeThis",

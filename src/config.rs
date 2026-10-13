@@ -230,6 +230,10 @@ pub struct HomeSettings {
     /// Art on Continue Watching / Next Up cards.
     #[serde(default)]
     pub episode_art: EpisodeArt,
+    /// A "More Libraries" card at the end of the Libraries row, for the
+    /// libraries hidden from Home (Profile).
+    #[serde(default)]
+    pub show_more_libraries: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

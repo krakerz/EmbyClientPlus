@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [1.14.1] — 2026-10-13
+
+### Added
+- A "Show More Libraries" switch in Preferences, under Home, off by default. Home's "More Libraries" card (for libraries hidden from Home) now appears only when it's on.
+
+### Fixed
+- Profile: your picture and name now sit at the top, followed by Change Password and Profile PIN, then the settings; before, the picture appeared below the password rows. Sign Out is gone from Profile (it's "Log Out" in Home's menu), and so is the menu's Profile item, which duplicated the avatar button.
+- Profile's "Hide watched items in Suggestions" had no effect on TV libraries: their Suggestions tab always hid watched series. It now follows the switch, as movie libraries already did.
+
+### Removed
+- Profile's "Show missing episodes" switch, which had no effect in this app.
+
 ## [1.14.0] — 2026-10-13
 
 ### Added

@@ -736,13 +736,16 @@ const SEED_SERIES: usize = 3;
 const SUGGESTION_GENRES: usize = 2;
 
 /// TV has no server-side recommendations, so build them from what you
-/// watched: titles similar to your recent series, and unwatched series
-/// from the genres you watch most. Rows never repeat a title.
+/// watched: titles similar to your recent series, and series from the
+/// genres you watch most. Rows never repeat a title. Watched ones are left
+/// out when the account says so (Emby's "hide watched in Suggestions",
+/// which the server applies only to its own movie recommendations).
 async fn tv_suggestions(
     client: &crate::emby::EmbyClient,
     user_id: &str,
     library_id: &str,
 ) -> anyhow::Result<Vec<Recommendation>> {
+    let hide_played = crate::account::hide_played_in_suggestions();
     // Recently played episodes give the series you've been watching.
     let recent = client
         .items(
@@ -774,7 +777,7 @@ async fn tv_suggestions(
     let mut rows = Vec::new();
     for (id, name) in series_ids.iter().take(SEED_SERIES) {
         let similar = client.similar(user_id, id, 16).await.unwrap_or_default();
-        let items = fresh(similar, &mut seen);
+        let items = fresh(similar, hide_played, &mut seen);
         if !items.is_empty() {
             rows.push(Recommendation {
                 recommendation_type: "SimilarToRecentlyPlayed".into(),
@@ -800,14 +803,22 @@ async fn tv_suggestions(
                     include_types: Some("Series"),
                     recursive: true,
                     genre_id: Some(genre_id),
-                    filters: vec!["IsUnplayed"],
+                    filters: if hide_played {
+                        vec!["IsUnplayed"]
+                    } else {
+                        Vec::new()
+                    },
                     sort_by: Some("Random"),
                     limit: 16,
                     ..Default::default()
                 },
             )
             .await;
-        let items = fresh(page.map(|p| p.items).unwrap_or_default(), &mut seen);
+        let items = fresh(
+            page.map(|p| p.items).unwrap_or_default(),
+            hide_played,
+            &mut seen,
+        );
         if !items.is_empty() {
             rows.push(Recommendation {
                 recommendation_type: "Genre".into(),
@@ -819,11 +830,16 @@ async fn tv_suggestions(
     Ok(rows)
 }
 
-/// Unwatched items not shown in an earlier row (marking them shown).
-fn fresh(items: Vec<BaseItem>, seen: &mut std::collections::HashSet<String>) -> Vec<BaseItem> {
+/// Items not shown in an earlier row (marking them shown), watched ones
+/// dropped if `hide_played`.
+fn fresh(
+    items: Vec<BaseItem>,
+    hide_played: bool,
+    seen: &mut std::collections::HashSet<String>,
+) -> Vec<BaseItem> {
     items
         .into_iter()
-        .filter(|item| !item.played() && seen.insert(item.id.clone()))
+        .filter(|item| !(hide_played && item.played()) && seen.insert(item.id.clone()))
         .take(12)
         .collect()
 }
@@ -1027,8 +1043,15 @@ mod tests {
             played: true,
             ..Default::default()
         });
-        let row = fresh(vec![series("a", &[]), watched, series("x", &[])], &mut seen);
-        assert_eq!(row.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), ["x"]);
-        assert!(fresh(vec![series("x", &[])], &mut seen).is_empty());
+        let ids = |row: Vec<BaseItem>| row.into_iter().map(|i| i.id).collect::<Vec<_>>();
+        let row = fresh(
+            vec![series("a", &[]), watched.clone(), series("x", &[])],
+            true,
+            &mut seen,
+        );
+        assert_eq!(ids(row), ["x"]);
+        assert!(fresh(vec![series("x", &[])], true, &mut seen).is_empty());
+        // Watched titles stay when the account doesn't hide them.
+        assert_eq!(ids(fresh(vec![watched], false, &mut seen)), ["w"]);
     }
 }
