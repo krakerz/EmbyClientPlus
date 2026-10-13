@@ -64,6 +64,8 @@ pub struct Card {
     unplayed: gtk::Label,
     /// Watched: a check in a circle, in place of the count.
     watched: gtk::Image,
+    /// On the picture's corner: the title is downloaded.
+    downloaded: gtk::Image,
 }
 
 impl Card {
@@ -91,6 +93,9 @@ impl Card {
         frame.add_overlay(&progress);
         let placeholder = super::placeholder_for(&picture, crate::ui::icons::IMAGE);
         frame.add_overlay(&placeholder);
+        let downloaded = super::download_badge();
+        downloaded.set_visible(false);
+        frame.add_overlay(&downloaded);
 
         let title = gtk::Label::builder()
             .xalign(0.0)
@@ -141,6 +146,7 @@ impl Card {
             subtitle,
             unplayed,
             watched,
+            downloaded,
         }
     }
 
@@ -150,6 +156,7 @@ impl Card {
         let picture = super::fixed_picture_child(&sized).expect("card picture is pinned");
         let progress: gtk::ProgressBar = child(sized.next_sibling());
         let placeholder: gtk::Image = child(progress.next_sibling());
+        let downloaded: gtk::Image = child(placeholder.next_sibling());
         let title: gtk::Label = child(frame.next_sibling());
         let details: gtk::Box = child(title.next_sibling());
         let subtitle: gtk::Label = child(details.first_child());
@@ -165,6 +172,7 @@ impl Card {
             subtitle,
             unplayed,
             watched,
+            downloaded,
         }
     }
 
@@ -182,6 +190,9 @@ impl Card {
         let played = item.played();
         let unplayed = item.unplayed_count();
         self.watched.set_visible(played);
+        self.downloaded.set_visible(
+            super::downloads::can_download(item) && crate::downloads::is_downloaded(&item.id),
+        );
         self.unplayed.set_label(&if unplayed >= 1000 {
             "1k+".to_string()
         } else {
@@ -342,6 +353,13 @@ pub fn show_menu(ui: &Ui, widget: &gtk::Widget, item: &BaseItem) {
         add(
             label,
             Box::new(move |ui| super::downloads::start_episodes_of(ui, &target)),
+        );
+    }
+    if item.item_type == "Series" {
+        let target = item.clone();
+        add(
+            "Auto-download…",
+            Box::new(move |ui| ui.auto_download(&target, ui.widget())),
         );
     }
     if super::downloads::can_download(item) {

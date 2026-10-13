@@ -4,9 +4,11 @@
 //! naming mpv reads language and forced from).
 //! The folder is the index: whatever has a `.emby.json` is a download.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
@@ -105,6 +107,32 @@ fn image_path(file: &Path) -> PathBuf {
     let mut name = file.file_name().unwrap_or_default().to_os_string();
     name.push(".jpg");
     file.with_file_name(name)
+}
+
+/// The downloaded items' ids, rescanned at most every few seconds (and
+/// after each download or delete), so lists can badge every card cheaply.
+static IDS: Mutex<Option<(Instant, Arc<HashSet<String>>)>> = Mutex::new(None);
+const IDS_FRESH_FOR: Duration = Duration::from_secs(5);
+
+/// Whether the Emby item `item_id` is downloaded.
+pub fn is_downloaded(item_id: &str) -> bool {
+    let ids = {
+        let mut cached = IDS.lock().unwrap_or_else(|e| e.into_inner());
+        match cached.as_ref() {
+            Some((at, ids)) if at.elapsed() < IDS_FRESH_FOR => ids.clone(),
+            _ => {
+                let ids: Arc<HashSet<String>> =
+                    Arc::new(list().into_iter().map(|d| d.item.id).collect());
+                *cached = Some((Instant::now(), ids.clone()));
+                ids
+            }
+        }
+    };
+    ids.contains(item_id)
+}
+
+fn forget_ids() {
+    IDS.lock().unwrap_or_else(|e| e.into_inner()).take();
 }
 
 /// The download of the Emby item `item_id`, if there is one.
@@ -214,6 +242,7 @@ pub async fn fetch(
         .with_context(|| format!("couldn't finish {}", file.display()))?;
     std::fs::write(meta_path(&file), &raw)
         .with_context(|| format!("couldn't write the metadata for {}", file.display()))?;
+    forget_ids();
     save_subtitles(&client, &item.id, &source_id, source, &file).await;
     if let Some(image) = item.landscape().or_else(|| item.poster()) {
         let url = client.url(&EmbyClient::image_path(&image, 640));
@@ -355,6 +384,7 @@ pub fn delete(download: &Download) -> Result<()> {
     std::fs::remove_file(&download.file)
         .with_context(|| format!("couldn't delete {}", download.file.display()))?;
     let _ = std::fs::remove_file(meta_path(&download.file));
+    forget_ids();
     let _ = std::fs::remove_file(image_path(&download.file));
     for subtitle in subtitles {
         let _ = std::fs::remove_file(subtitle);

@@ -9,15 +9,15 @@ SVP 4 attaches just as it does to a standalone mpv.
 
 ## Features
 
-- **Browsing:** Home rows (Continue Watching, Next Up, Latest, suggestions), library grids with tabs and remembered sort/filter, series and season pages, search across everything, cast & crew, More Like This, favourites, History page.
-- **Playback:** direct play or transcode (Original down to 420 kbps); resume and watched state synced with Emby; audio, subtitle and quality choices remembered per title; chapters with seek-bar previews; Skip Intro/Credits; Up Next countdown; aspect and zoom; black-bar blur/glow; per-title volume.
-- **Picture:** quality presets (Fast to High quality, or custom scalers and debanding), deinterlacing, software decoding; built-in FSR and Anime4K shaders plus your own, picked per title in the player.
-- **SVP:** attaches automatically when SVP 4 is installed; per-title toggle; a status light on the SVP button; mpv frame blending as an alternative.
-- **Downloads:** save movies and episodes in original quality and play them offline with the full player; progress syncs back when the server is reachable.
-- **Music:** mini player and queue panel, shuffle/repeat, gapless, Emby playlists, Instant Mix, media keys (Linux).
-- **Controller & Steam Deck:** everything works with a gamepad; on-screen button hints; every action remappable; fullscreen in Game Mode.
-- **Standalone player:** `--player` plays local files and links with SVP and shaders, without Emby.
-- **Other:** UI size 50–200%, light/dark theme, optional own `mpv.conf`, in-app YouTube trailers (with `yt-dlp`), remappable keyboard, keeps the screen awake during videos, self-updates.
+- **Browsing:** Home follows your Emby library order and visibility; library grids with remembered sort/filter, Suggestions and Collections tabs; series, seasons, cast, More Like This, Included In, favourites, History, search.
+- **Playback:** direct play or transcode (Original down to 420 kbps), version picker, resume and watched state synced, chapters with seek-bar previews, Skip Intro/Credits, Up Next, aspect/zoom, black-bar blur/glow.
+- **Picture:** quality presets or custom scalers/debanding, deinterlacing, FSR and Anime4K shaders plus your own, per title.
+- **SVP:** attaches when SVP 4 is installed; per-title toggle with a status light; mpv frame blending as an alternative.
+- **Profile:** your Emby account's own settings (languages, subtitle mode, autoplay, intro skipping, hidden watched items, library order), picture, password and PIN; shared with Emby's apps.
+- **Downloads:** original files for offline play with the full player; auto-download keeps a series' next unwatched episodes and can delete watched ones; downloaded titles are badged.
+- **Music:** mini player, queue, shuffle/repeat, gapless, playlists, Instant Mix, media keys and now-playing on every OS.
+- **Controller & Steam Deck:** everything works with a gamepad, with on-screen hints and remappable buttons; Steam library artwork included.
+- **Also:** standalone player for local files and links (`--player`), UI size 50–200%, light/dark theme, own `mpv.conf`, YouTube trailers (`yt-dlp`), self-updates.
 
 ## Installation
 
@@ -26,12 +26,12 @@ From [Releases](https://github.com/krakerz/EmbyClientPlus/releases):
 | System | File | Install |
 |---|---|---|
 | Linux, SteamOS | `EmbyClientPlus-<version>-x86_64.AppImage` | `chmod +x`, then run it |
-| Linux | `embyclientplus-<version>-linux-x86_64.tar.gz` | extract, run `./install.sh` (`./uninstall.sh` removes it); needs GTK 4.12+, libadwaita 1.6+, FFmpeg, libplacebo |
+| Linux | `embyclientplus-<version>-linux-x86_64.tar.gz` | extract, `./install.sh` (`./uninstall.sh` removes it); needs GTK 4.12+, libadwaita 1.6+, FFmpeg, libplacebo |
 | Windows | `embyclientplus-<version>-windows-x86_64.zip` | extract anywhere, run `Emby Client+.exe` |
 | macOS (Apple Silicon) | `embyclientplus-<version>-macos-arm64.zip` | extract, move `Emby Client+.app` to Applications |
 
-The macOS app isn't notarized. The first time it's blocked: open System Settings → Privacy &
-Security → **Open Anyway**, or run `xattr -dr com.apple.quarantine "/Applications/Emby Client+.app"`.
+macOS: the app isn't notarized; allow it once in System Settings → Privacy & Security → **Open
+Anyway** (or `xattr -dr com.apple.quarantine "/Applications/Emby Client+.app"`).
 
 Every build updates itself (Preferences → Updates). SVP 4 is optional and found in its usual
 folder (`~/SVP4`, `C:\Program Files\SVP 4`, `/Applications/SVP 4 Mac.app`) or one you set.
@@ -51,67 +51,39 @@ Windows (MSYS2 UCRT64) and macOS (Homebrew) use their packaged `mpv`; see the `w
 
 ## Usage
 
-Start the app and sign in to your Emby server (remembered). Pick a title and press **Play** or
-**Resume**. Settings are in Home's menu → **Preferences**.
+Sign in to your Emby server (remembered), pick a title, press **Play**. App settings are in Home's
+menu → **Preferences**; your account's settings are on **Profile** (the avatar, top right).
 
-**Downloads:** choose **Download** in a movie's or episode's menu (X on a controller,
-right-click with a mouse). Files go to `Videos/Emby Client+` (Preferences → Downloads to change
-it), and **Downloads** in Home's menu lists them. Downloaded titles always play from disk.
+- **Downloads:** the download button on a movie or episode page, or **Download** in any item's
+  menu (X on a controller, right-click). A series' Download menu also has **Auto-download…**.
+  Files go to `Videos/Emby Client+` (Preferences → Downloads); Home's menu → **Downloads** lists
+  them.
+- **Video:** Preferences → Video picks a preset (**Auto**, **Fast** for Steam Deck, **Balanced**,
+  **High quality**, **Custom**). The player's **Shaders** button picks one preset per group (FSR,
+  Anime4K, yours), remembered per title. Your own shaders go in the `shaders` folder next to
+  `config.toml`: a folder per group, a `.glsl` file (or a subfolder of them) per preset.
+- **Server identity:** the server lists the app as Emby Web by default; turn off Preferences →
+  Server → "Appear as a web browser" to list it as Emby Client+ (sign in again).
+- **Steam Game Mode:** add the AppImage (or `~/.local/bin/embyclientplus`) as a non-Steam game with
+  the **Gamepad** layout. Artwork is in `EmbyClientPlus-<version>-steam-library.zip` on the
+  release page (and the archive's `steam-library/`); set it from the shortcut's library page.
 
-**Server identity:** by default the server lists the app as a web browser (Emby Web). Turn off
-Preferences → Server → "Appear as a web browser" to list it as Emby Client+ under your computer's
-name; sign in again for the server to pick it up.
+### Keyboard and controller
 
-### Video quality and shaders
+Both are remappable (Preferences → Keyboard, Controller); the legend at the bottom left shows the
+current screen's buttons.
 
-Preferences → Video sets the picture preset: **Auto** (mpv defaults or your mpv.conf), **Fast**
-(Steam Deck), **Balanced**, **High quality**, or **Custom**. Heavier settings cost more GPU, more
-again with SVP.
-
-Shaders come in groups: **FSR** (Sharp, Balanced, Soft), **Anime4K** (modes A–C+A, Fast and HQ),
-and your own. The player's **Shaders** button picks one preset per group, remembered per title
-(per series for episodes); groups stack in the order Anime4K, yours, FSR. Upscalers only help when
-the video is smaller than the screen.
-
-Your own shaders go in the `shaders` folder next to `config.toml` (Preferences → Video → Open
-Folder): each folder is a group, each `.glsl` file a preset, and each subfolder a preset of
-several `.glsl` files applied in name order.
-
-### Keyboard
-
-| Key | Action | Key | Action |
-|---|---|---|---|
-| Space / K | Play/pause | , / . | Previous/next episode |
-| ← / → | Seek ±10 s | PgUp / PgDn | Previous/next chapter |
-| ↑ / ↓ | Volume ±5 | M | Mute |
-| F / F11 / double-click | Fullscreen | Esc | Leave fullscreen, then the player |
-| Q | Skip intro/credits | | |
-
-Change them in Preferences → Keyboard.
-
-### Controller
-
-The on-screen legend (bottom left) always shows the current screen's buttons. Defaults, all
-remappable per context in Preferences → Controller:
-
-| Button | Browsing | Player | Music panel |
-|---|---|---|---|
-| A | Select | Play/pause | Select |
-| B | Back | Leave player | Back |
-| X | Item menu | Audio menu | Pick up queue item to move |
-| Y | Home | Subtitle menu | Play/pause |
-| LB / RB | Previous/next tab or season | Previous/next episode | Previous/next track |
-| LT / RT | Open music panel | Previous/next chapter | Close panel |
-| D-pad / stick | Move | Seek (←/→), volume (↑/↓) | Move (a picked-up item) |
-| Select | Search | Skip intro/credits | |
-| Start | Preferences | On-screen controls | |
-
-On settings rows, Left/Right change the value and A cycles options.
-
-### Steam Game Mode
-
-Add the AppImage (or `~/.local/bin/embyclientplus` from the archive) as a non-Steam game with the
-**Gamepad** controller layout. It runs fullscreen there (Preferences → Display → Fullscreen).
+| Key | Action | Button | Browsing | Player |
+|---|---|---|---|---|
+| Space / K | Play/pause | A | Select | Play/pause |
+| ← / → | Seek ±10 s | B | Back | Leave player |
+| ↑ / ↓ | Volume ±5 | X | Item menu | Audio menu |
+| M | Mute | Y | Home | Subtitle menu |
+| , / . | Previous/next episode | LB / RB | Previous/next tab or season | Previous/next episode |
+| PgUp / PgDn | Previous/next chapter | LT / RT | Music panel | Previous/next chapter |
+| F / F11 | Fullscreen | Select | Search | Skip intro/credits |
+| Q | Skip intro/credits | Start | Preferences | On-screen controls |
+| Esc | Leave fullscreen, then the player | D-pad | Move | Seek (←/→), volume (↑/↓) |
 
 ### Command line
 
@@ -127,14 +99,14 @@ embyclientplus --help | --version
 **SVP doesn't kick in?** The SVP button shows why: green interpolating, amber waiting for SVP
 Manager, red SVP Manager not running, grey SVP not found.
 
-**Where are settings and logs?** `config.toml` and `logs/` (newest 10 kept) are in
-`~/.config/embyclientplus/` (Linux), `%APPDATA%\EmbyClient+\` (Windows) or
-`~/Library/Application Support/EmbyClient+/` (macOS).
+**Where are settings and logs?** `config.toml` and `logs/` are in `~/.config/embyclientplus/`
+(Linux), `%APPDATA%\EmbyClient+\` (Windows) or `~/Library/Application Support/EmbyClient+/` (macOS).
 
-**Does it bundle SVP?** No, it uses your own SVP install.
+**Does auto-download convert files on the server?** No, it downloads the original files, like any
+download, so the server does no transcoding.
 
-**Is HDR supported?** No. HDR videos play converted to SDR colours, untested for lack of HDR
-content or a display. SVP starts off for HDR titles unless you turn it on for that title.
+**Is HDR supported?** Not really: HDR plays converted to SDR, untested. SVP starts off for HDR
+titles unless you turn it on for that title.
 
 ---
 

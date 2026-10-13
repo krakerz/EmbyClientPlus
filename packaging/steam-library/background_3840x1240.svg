@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="3840" height="1240" viewBox="0 0 3840 1240"><defs>
+  <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#3ddc84"/><stop offset="1" stop-color="#1a7f4b"/>
+  </linearGradient>
+  <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+    <stop offset="0" stop-color="#3ddc84" stop-opacity="0.35"/>
+    <stop offset="1" stop-color="#3ddc84" stop-opacity="0"/>
+  </radialGradient>
+  <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#10201a"/><stop offset="1" stop-color="#070c0a"/>
+  </linearGradient>
+</defs><rect width="3840" height="1240" fill="url(#bg)"/>
+<circle cx="2900" cy="620" r="1100" fill="url(#glow)"/>
+<line x1="2112" y1="156" x2="3840" y2="156" stroke="#3ddc84" stroke-width="13" stroke-linecap="round" opacity="0.06"/>
+<line x1="422" y1="227" x2="2918" y2="227" stroke="#3ddc84" stroke-width="13" stroke-linecap="round" opacity="0.08"/>
+<line x1="269" y1="299" x2="3533" y2="299" stroke="#3ddc84" stroke-width="13" stroke-linecap="round" opacity="0.10"/>
+<line x1="691" y1="370" x2="2611" y2="370" stroke="#3ddc84" stroke-width="13" stroke-linecap="round" opacity="0.11"/>
+<line x1="538" y1="441" x2="3226" y2="441" stroke="#3ddc84" stroke-width="13" stroke-linecap="round" opacity="0.13"/>
+<line x1="384" y1="513" x2="3840" y2="513" stroke="#3ddc84" stroke-width="13" stroke-linecap="round" opacity="0.14"/>
+<line x1="806" y1="584" x2="2918" y2="584" stroke="#3ddc84" stroke-width="13" stroke-linecap="round" opacity="0.16"/>
+<line x1="653" y1="656" x2="3533" y2="656" stroke="#3ddc84" stroke-width="13" stroke-linecap="round" opacity="0.06"/>
+<line x1="-1037" y1="727" x2="2611" y2="727" stroke="#3ddc84" stroke-width="13" stroke-linecap="round" opacity="0.08"/>
+<line x1="922" y1="799" x2="3226" y2="799" stroke="#3ddc84" stroke-width="13" stroke-linecap="round" opacity="0.10"/>
+<line x1="768" y1="870" x2="3840" y2="870" stroke="#3ddc84" stroke-width="13" stroke-linecap="round" opacity="0.11"/>
+<line x1="1190" y1="941" x2="2918" y2="941" stroke="#3ddc84" stroke-width="13" stroke-linecap="round" opacity="0.13"/>
+<line x1="1037" y1="1013" x2="3533" y2="1013" stroke="#3ddc84" stroke-width="13" stroke-linecap="round" opacity="0.14"/>
+<line x1="-653" y1="1084" x2="2611" y2="1084" stroke="#3ddc84" stroke-width="13" stroke-linecap="round" opacity="0.16"/>
+<g transform="translate(2380 200) scale(6.5625)">
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#tile)"/>
+  <path d="M50 38 L92 64 L50 90 Z" fill="#ffffff"/>
+  <path d="M28 52 h10 M24 64 h14 M28 76 h10" stroke="#ffffff" stroke-width="5" stroke-linecap="round" opacity="0.7"/>
+</g></svg>

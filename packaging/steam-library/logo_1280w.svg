@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="610" viewBox="0 0 1200 610"><defs>
+  <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#3ddc84"/><stop offset="1" stop-color="#1a7f4b"/>
+  </linearGradient>
+  <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+    <stop offset="0" stop-color="#3ddc84" stop-opacity="0.35"/>
+    <stop offset="1" stop-color="#3ddc84" stop-opacity="0"/>
+  </radialGradient>
+  <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#10201a"/><stop offset="1" stop-color="#070c0a"/>
+  </linearGradient>
+</defs>
+<g transform="translate(40 155) scale(2.3438)">
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#tile)"/>
+  <path d="M50 38 L92 64 L50 90 Z" fill="#ffffff"/>
+  <path d="M28 52 h10 M24 64 h14 M28 76 h10" stroke="#ffffff" stroke-width="5" stroke-linecap="round" opacity="0.7"/>
+</g>
+<text x="370" y="330" font-family="Noto Sans" font-weight="800" font-size="112" fill="#ffffff" text-anchor="start" letter-spacing="-2.2">Emby Client<tspan fill="#3ddc84">+</tspan></text>
+<text x="376" y="402" font-family="Noto Sans" font-weight="600" font-size="44" fill="#9fb8ab" text-anchor="start">Smooth Emby playback</text></svg>

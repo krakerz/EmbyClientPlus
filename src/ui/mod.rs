@@ -623,6 +623,24 @@ impl Ui {
         downloads::remove(self, item);
     }
 
+    /// Runs the auto-download jobs now and every half hour.
+    pub fn start_auto_downloads(&self) {
+        downloads::start_auto(self);
+    }
+
+    pub fn auto_download(&self, item: &BaseItem, parent: &impl IsA<gtk::Widget>) {
+        downloads::auto_dialog(self, item, parent);
+    }
+
+    /// The Emby item playing in the video player, if any.
+    pub fn playing_item_id(&self) -> Option<String> {
+        self.inner
+            .playback
+            .borrow()
+            .as_ref()
+            .map(|session| session.item.id.clone())
+    }
+
     /// Plays a web link (a movie's YouTube trailer) without an Emby session.
     pub fn play_link(&self, title: &str, url: &str) {
         self.inner.music.stop();
@@ -702,6 +720,7 @@ impl Ui {
             session.stop();
             let generation = &self.inner.data_generation;
             generation.set(generation.get() + 1);
+            downloads::sync_auto_soon(self);
         }
     }
 }
@@ -971,6 +990,55 @@ pub fn apply_ui_scale(scale: f64) {
 /// Pins `picture` to exactly `width`×`height`. A `gtk::Picture` reports
 /// its image's own size as its natural size, so without a cap the layout
 /// grows it to whatever resolution the server sent.
+/// The "downloaded" badge for a picture's top-right corner.
+fn download_badge() -> gtk::Image {
+    gtk::Image::builder()
+        .icon_name(icons::DOWNLOAD)
+        .halign(gtk::Align::End)
+        .valign(gtk::Align::Start)
+        .margin_top(6)
+        .margin_end(6)
+        .tooltip_text("Downloaded")
+        .css_classes(["download-badge"])
+        .build()
+}
+
+/// A dialog in the app's own style, like Preferences and Profile: a
+/// header bar titled `title` with the close button (which cancels), over
+/// `groups`. Libadwaita's alert dialogs look different, so none are used.
+fn form_dialog(title: &str, groups: &[&adw::PreferencesGroup]) -> adw::Dialog {
+    let page = adw::PreferencesPage::new();
+    for group in groups {
+        page.add(*group);
+    }
+    let toolbar = adw::ToolbarView::new();
+    toolbar.add_top_bar(&adw::HeaderBar::new());
+    toolbar.set_content(Some(&page));
+    adw::Dialog::builder()
+        .title(title)
+        .content_width(520)
+        .child(&toolbar)
+        .build()
+}
+
+/// A dialog's action, as a button row: `suggested-action` or
+/// `destructive-action`.
+fn action_row(title: &str, style: &str) -> adw::ButtonRow {
+    adw::ButtonRow::builder()
+        .title(title)
+        .css_classes([style])
+        .build()
+}
+
+/// A group holding just `rows` (a dialog's actions).
+fn actions_group(rows: &[&adw::ButtonRow]) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::new();
+    for row in rows {
+        group.add(*row);
+    }
+    group
+}
+
 fn fixed_picture(picture: &gtk::Picture, width: i32, height: i32) -> adw::Clamp {
     let (width, height) = (scaled(width), scaled(height));
     picture.set_size_request(width, height);

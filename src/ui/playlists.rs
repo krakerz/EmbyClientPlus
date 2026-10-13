@@ -330,28 +330,16 @@ fn edit_playlist(ui: &Ui, view: &Rc<PlaylistView>, playlist: &BaseItem, entry: &
 
 /// Asks which playlist (or a new one) gets `item`'s tracks.
 pub fn add_dialog(ui: &Ui, item: &BaseItem) {
-    let dialog = adw::AlertDialog::builder()
-        .heading("Add to Playlist")
-        .body(glib::markup_escape_text(&item.name))
-        .build();
-    dialog.add_response("cancel", "Cancel");
-    dialog.set_close_response("cancel");
-    let list = gtk::ListBox::builder()
-        .selection_mode(gtk::SelectionMode::None)
-        .css_classes(["boxed-list"])
+    let list = adw::PreferencesGroup::builder()
+        .title(glib::markup_escape_text(&item.name))
         .build();
     let name = adw::EntryRow::builder()
         .title("New playlist")
         .show_apply_button(true)
         .build();
-    list.append(&name);
-    let scrolled = gtk::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .propagate_natural_height(true)
-        .max_content_height(360)
-        .child(&list)
-        .build();
-    dialog.set_extra_child(Some(&scrolled));
+    list.add(&name);
+    let dialog = super::form_dialog("Add to Playlist", &[&list]);
+    dialog.set_content_height(560);
 
     let add_to = {
         let (weak, item, dialog) = (ui.downgrade(), item.clone(), dialog.downgrade());
@@ -395,7 +383,7 @@ pub fn add_dialog(ui: &Ui, item: &BaseItem) {
                     row.connect_activated(move |_| {
                         add_to(Target::Existing(id.clone(), name.clone()))
                     });
-                    list.append(&row);
+                    list.add(&row);
                 }
             }
             Err(e) => ui.report_error("Could not load playlists", &e),

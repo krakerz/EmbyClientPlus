@@ -180,6 +180,9 @@ fn show(ui: &Ui, view: &DetailsView, item: &BaseItem) {
     for toggle in super::hero::item_toggles(ui, item) {
         buttons.append(&toggle);
     }
+    if let Some(download) = super::downloads::button(ui, item) {
+        buttons.append(&download);
+    }
 }
 
 /// Previous/next links and "More in Season N" for an episode.
