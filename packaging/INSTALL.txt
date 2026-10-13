@@ -32,5 +32,10 @@ SVP (frame interpolation, optional)
 Steam Game Mode
 - Add the AppImage as a non-Steam game and choose the "Gamepad" controller
   layout. Controller buttons can be remapped in Preferences > Controller.
+- Library artwork is in steam-library/ (also a separate download on the
+  release page): in Steam, open the shortcut's Properties to set the icon,
+  and right-click its library page to set the cover (cover_600x900),
+  wide cover (wide_cover_920x430), background (background_3840x1240)
+  and logo (logo_1280w).
 
 Project page: https://github.com/krakerz/EmbyClientPlus

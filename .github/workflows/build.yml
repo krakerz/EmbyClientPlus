@@ -121,6 +121,7 @@ jobs:
           path: |
             dist/*-linux-x86_64.tar.gz
             dist/*.AppImage
+            dist/*-steam-library.zip
             dist/release-notes.md
 
   windows:
@@ -240,5 +241,6 @@ jobs:
           files: |
             artifacts/*-linux-x86_64.tar.gz
             artifacts/*.AppImage
+            artifacts/*-steam-library.zip
             artifacts/*-windows-x86_64.zip
             artifacts/*-macos-arm64.zip

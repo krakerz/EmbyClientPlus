@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.14.2] — 2026-10-13
+
+### Added
+- Steam library artwork (cover, wide cover, background and logo) for adding the app as a non-Steam game: in the Linux archive's `steam-library` folder, and as its own download on the release page.
+
 ## [1.14.1] — 2026-10-13
 
 ### Added

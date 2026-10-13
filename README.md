@@ -113,6 +113,10 @@ On settings rows, Left/Right change the value and A cycles options.
 Add the AppImage (or `~/.local/bin/embyclientplus` from the archive) as a non-Steam game with the
 **Gamepad** controller layout. It runs fullscreen there (Preferences → Display → Fullscreen).
 
+Library artwork (cover, wide cover, background and logo) comes in the archive's `steam-library/`
+folder and as `EmbyClientPlus-<version>-steam-library.zip` on the release page. In Steam's library,
+right-click the shortcut's background or logo area to set each one.
+
 ### Command line
 
 ```sh

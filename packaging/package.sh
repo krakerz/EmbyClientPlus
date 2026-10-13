@@ -47,6 +47,7 @@ install -Dm644 "packaging/$APP_ID.svg" "$archive_root/$APP_ID.svg"
 install -Dm644 packaging/INSTALL.txt "$archive_root/INSTALL.txt"
 install -Dm755 packaging/install.sh "$archive_root/install.sh"
 install -Dm755 packaging/uninstall.sh "$archive_root/uninstall.sh"
+cp -r packaging/steam-library "$archive_root/steam-library"
 tar -C "$DIST" -czf "$DIST/embyclientplus-$VERSION-linux-x86_64.tar.gz" "$bundle"
 
 # 2. AppImage, bundling GTK4/libadwaita/FFmpeg so it runs on SteamOS too.
@@ -93,4 +94,7 @@ export PATH="$REPO_ROOT/$TOOLS:$PATH"
     --exclude-library 'libvapoursynth*' \
     --output appimage
 rm -rf "$appdir" "$archive_root"
+
+# 3. Steam library artwork on its own, for AppImage users.
+bsdtar -a -cf "$DIST/EmbyClientPlus-$VERSION-steam-library.zip" -C packaging steam-library
 ls -l "$DIST"
