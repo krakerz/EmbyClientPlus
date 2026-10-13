@@ -486,6 +486,18 @@ fn stored_session(settings: &Settings) -> Option<Session> {
 }
 
 fn show_main(state: &Rc<State>, session: Session) {
+    // The account's settings apply from now on: its saved copy at once,
+    // then the server's.
+    crate::account::sign_in(&session.user_id);
+    {
+        let (client, user_id) = (session.client.clone(), session.user_id.clone());
+        spawn_detached(async move {
+            match client.user(&user_id).await {
+                Ok(user) => crate::account::refreshed(&user_id, user),
+                Err(e) => tracing::warn!("account settings: {e:#}"),
+            }
+        });
+    }
     let weak = Rc::downgrade(state);
     let ui = Ui::new(
         session,
@@ -572,6 +584,7 @@ fn on_logged_in(state: &Rc<State>, logged_in: LoggedIn) {
 fn logout(state: &Rc<State>, expired: bool) {
     let Some(ui) = state.ui.take() else { return };
     ui.stop_playback();
+    crate::account::sign_out();
     if !expired {
         let client = ui.client();
         spawn_detached(async move {

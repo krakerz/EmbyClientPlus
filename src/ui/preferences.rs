@@ -14,7 +14,7 @@ use crate::playback::tracks::normalize_language;
 use crate::playback::{QUALITIES, Quality};
 
 /// Languages offered in the pickers (ISO 639-2, display name).
-const LANGUAGES: [(&str, &str); 16] = [
+pub(super) const LANGUAGES: [(&str, &str); 16] = [
     ("eng", "English"),
     ("jpn", "Japanese"),
     ("zho", "Chinese"),
@@ -303,26 +303,12 @@ fn show_with(parent: &impl IsA<gtk::Widget>, server: bool) {
         page.add(&home);
     }
 
-    // Languages.
-    let languages = adw::PreferencesGroup::builder()
-        .title("Languages")
-        .description("Used when a title has no remembered choice")
-        .build();
-    let audio = language_row("Audio", &settings.audio.preferred_language);
-    audio.connect_selected_notify(|row| {
-        if let Some(code) = selected_language(row) {
-            save(|s| s.audio.preferred_language = code);
-        }
-    });
-    let subtitles = language_row("Subtitles", &settings.subtitles.preferred_language);
-    subtitles.connect_selected_notify(|row| {
-        if let Some(code) = selected_language(row) {
-            save(|s| s.subtitles.preferred_language = code);
-        }
-    });
-    languages.add(&audio);
-    languages.add(&subtitles);
-    page.add(&languages);
+    // Languages and the rest of the account-style choices: signed in,
+    // they're the Emby account's (Profile), so only player-only mode
+    // keeps its own here.
+    if !server {
+        page.add(&local_playback_group(&settings));
+    }
 
     // Remembered choices.
     let remembered = adw::PreferencesGroup::builder()
@@ -1247,7 +1233,98 @@ fn refresh_svp_folder(row: &adw::ActionRow, reset: &gtk::Button) {
 
 /// A language picker preselected on `current`; an unlisted configured
 /// code is kept as an extra entry so opening the dialog never changes it.
-fn language_row(title: &str, current: &str) -> adw::ComboRow {
+/// Player-only mode's own languages, subtitle mode and the like (what an
+/// Emby account keeps on the server; see `account`).
+fn local_playback_group(settings: &Settings) -> adw::PreferencesGroup {
+    use crate::config::{IntroSkip, SubtitleMode};
+    let group = adw::PreferencesGroup::builder()
+        .title("Languages and Subtitles")
+        .description("For playing files here. Signed in to Emby, your account's settings (Profile) apply instead")
+        .build();
+    let audio = language_row("Audio language", &settings.audio.preferred_language);
+    audio.connect_selected_notify(|row| {
+        if let Some(code) = selected_language(row) {
+            save(|s| s.audio.preferred_language = code);
+        }
+    });
+    group.add(&audio);
+    let default_audio = adw::SwitchRow::builder()
+        .title("Play the default audio track")
+        .subtitle("The file's own choice, whatever its language")
+        .active(settings.audio.play_default_track)
+        .build();
+    default_audio.connect_active_notify(|row| {
+        let on = row.is_active();
+        save(|s| s.audio.play_default_track = on);
+    });
+    group.add(&default_audio);
+    let subtitles = language_row("Subtitle language", &settings.subtitles.preferred_language);
+    subtitles.connect_selected_notify(|row| {
+        if let Some(code) = selected_language(row) {
+            save(|s| s.subtitles.preferred_language = code);
+        }
+    });
+    group.add(&subtitles);
+    let mode = choice_row(
+        "Subtitles",
+        &SubtitleMode::ALL.map(SubtitleMode::label),
+        SubtitleMode::ALL
+            .iter()
+            .position(|m| *m == settings.subtitles.mode)
+            .unwrap_or(0),
+    );
+    mode.connect_selected_notify(|row| {
+        if let Some(mode) = SubtitleMode::ALL.get(row.selected() as usize).copied() {
+            save(|s| s.subtitles.mode = mode);
+        }
+    });
+    group.add(&mode);
+    let autoplay = adw::SwitchRow::builder()
+        .title("Play the next episode automatically")
+        .active(settings.playback.autoplay_next)
+        .build();
+    autoplay.connect_active_notify(|row| {
+        let on = row.is_active();
+        save(|s| s.playback.autoplay_next = on);
+    });
+    group.add(&autoplay);
+    let rewind = adw::SpinRow::with_range(0.0, 60.0, 1.0);
+    rewind.set_title("Rewind on resume");
+    rewind.set_subtitle("Seconds to go back when resuming");
+    rewind.set_value(f64::from(settings.playback.resume_rewind_seconds));
+    rewind.connect_value_notify(|row| {
+        let seconds = row.value() as u32;
+        save(|s| s.playback.resume_rewind_seconds = seconds);
+    });
+    group.add(&rewind);
+    let intro = choice_row(
+        "Intros",
+        &IntroSkip::ALL.map(IntroSkip::label),
+        IntroSkip::ALL
+            .iter()
+            .position(|m| *m == settings.playback.intro_skip)
+            .unwrap_or(0),
+    );
+    intro.connect_selected_notify(|row| {
+        if let Some(skip) = IntroSkip::ALL.get(row.selected() as usize).copied() {
+            save(|s| s.playback.intro_skip = skip);
+        }
+    });
+    group.add(&intro);
+    group
+}
+
+/// A drop-down row of `labels`, with `selected` chosen.
+pub(super) fn choice_row(title: &str, labels: &[&str], selected: usize) -> adw::ComboRow {
+    let row = adw::ComboRow::builder()
+        .title(title)
+        .model(&gtk::StringList::new(labels))
+        .build();
+    row.set_selected(selected as u32);
+    row
+}
+
+pub(super) fn language_row(title: &str, current: &str) -> adw::ComboRow {
     let current = normalize_language(current);
     let mut codes: Vec<String> = LANGUAGES.iter().map(|(code, _)| code.to_string()).collect();
     let mut names: Vec<String> = LANGUAGES.iter().map(|(_, name)| name.to_string()).collect();
@@ -1269,7 +1346,7 @@ fn language_row(title: &str, current: &str) -> adw::ComboRow {
 
 const CODES_KEY: &str = "embyclientplus-language-codes";
 
-fn selected_language(row: &adw::ComboRow) -> Option<String> {
+pub(super) fn selected_language(row: &adw::ComboRow) -> Option<String> {
     // SAFETY: see `language_row`.
     let codes = unsafe { row.data::<Vec<String>>(CODES_KEY)?.as_ref() };
     codes.get(row.selected() as usize).cloned()

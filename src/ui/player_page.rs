@@ -87,6 +87,13 @@ struct Inner {
     up_next: Cell<UpNext>,
     /// Preferences' Up Next countdown, read when playback starts.
     up_next_seconds: Cell<f64>,
+    /// The account's (or player-only mode's) autoplay and intro skipping,
+    /// read when playback starts.
+    autoplay_next: Cell<bool>,
+    intro_skip: Cell<crate::config::IntroSkip>,
+    /// The intro was skipped automatically already (seeking back into it
+    /// is then the user's choice).
+    intro_auto_skipped: Cell<bool>,
     /// When the user last moved the seek bar; position updates pause briefly.
     seeked_at: Cell<Option<Instant>>,
     last_motion: Cell<Option<(f64, f64)>>,
@@ -177,6 +184,9 @@ impl PlayerPage {
             quality: Cell::new(Quality::Original),
             up_next: Cell::new(UpNext::Hidden),
             up_next_seconds: Cell::new(10.0),
+            autoplay_next: Cell::new(true),
+            intro_skip: Cell::new(crate::config::IntroSkip::default()),
+            intro_auto_skipped: Cell::new(false),
             seeked_at: Cell::new(None),
             last_motion: Cell::new(None),
             hide_timer: RefCell::new(None),
@@ -323,6 +333,10 @@ impl PlayerPage {
         inner.handlers.replace(Some(Rc::new(handlers)));
         inner.quality.set(quality);
         inner.up_next.set(UpNext::Hidden);
+        let prefs = crate::account::playback();
+        inner.autoplay_next.set(prefs.autoplay_next);
+        inner.intro_skip.set(prefs.intro_skip);
+        inner.intro_auto_skipped.set(false);
         let playback = crate::config::Settings::load().unwrap_or_default().playback;
         inner
             .up_next_seconds
@@ -1171,7 +1185,7 @@ impl Inner {
     /// End of file: on to the next episode unless the user said no.
     fn finished(self: &Rc<Self>) {
         let has_next = self.session().is_some_and(|s| s.next.is_some());
-        if has_next && self.up_next.get() != UpNext::Cancelled {
+        if has_next && self.autoplay_next.get() && self.up_next.get() != UpNext::Cancelled {
             self.play_neighbour(true);
         } else {
             self.pop();
@@ -1496,10 +1510,20 @@ impl Inner {
         // count show.
         let left_in_file = duration - position;
         let up_next_due = session.next.is_some()
+            && self.autoplay_next.get()
             && !session.item.is_audio()
             && duration > 0.0
             && left_in_file <= self.up_next_seconds.get() + 1.0;
-        let skip_label = if markers.in_intro(position) {
+        let in_intro = markers.in_intro(position);
+        let intro_skip = self.intro_skip.get();
+        if in_intro
+            && intro_skip == crate::config::IntroSkip::AutoSkip
+            && !self.intro_auto_skipped.replace(true)
+            && let Some((_, end)) = markers.intro
+        {
+            warn(self.player.seek_absolute(end));
+        }
+        let skip_label = if in_intro && intro_skip == crate::config::IntroSkip::ShowButton {
             Some("Skip Intro")
         } else if markers.in_credits(position) && !up_next_due {
             Some("Skip Credits")

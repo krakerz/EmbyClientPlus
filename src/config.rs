@@ -345,6 +345,75 @@ pub struct PlaybackSettings {
     /// Up Next card's opacity, 0.2–1.0.
     #[serde(default = "default_up_next_opacity")]
     pub up_next_opacity: f64,
+    // Player-only mode's own copies of Emby account settings (see
+    // `account`); signed in, the account's apply instead.
+    /// Play the next episode when one ends.
+    #[serde(default = "default_true")]
+    pub autoplay_next: bool,
+    /// Seconds to go back when resuming.
+    #[serde(default)]
+    pub resume_rewind_seconds: u32,
+    #[serde(default)]
+    pub intro_skip: IntroSkip,
+}
+
+/// Emby's `IntroSkipMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum IntroSkip {
+    #[default]
+    ShowButton,
+    AutoSkip,
+    None,
+}
+
+impl IntroSkip {
+    pub const ALL: [IntroSkip; 3] = [IntroSkip::ShowButton, IntroSkip::AutoSkip, IntroSkip::None];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            IntroSkip::ShowButton => "Show a Skip button",
+            IntroSkip::AutoSkip => "Skip automatically",
+            IntroSkip::None => "Don't offer to skip",
+        }
+    }
+}
+
+/// Emby's `SubtitleMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SubtitleMode {
+    /// The file's own default or forced subtitles.
+    Default,
+    /// The preferred language whenever there is one.
+    #[default]
+    Always,
+    OnlyForced,
+    None,
+    /// The preferred language only when the audio is in another language.
+    Smart,
+    /// Like Always, preferring tracks for the hard of hearing.
+    HearingImpaired,
+}
+
+impl SubtitleMode {
+    pub const ALL: [SubtitleMode; 6] = [
+        SubtitleMode::Default,
+        SubtitleMode::Always,
+        SubtitleMode::OnlyForced,
+        SubtitleMode::None,
+        SubtitleMode::Smart,
+        SubtitleMode::HearingImpaired,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SubtitleMode::Default => "The file's default",
+            SubtitleMode::Always => "Always",
+            SubtitleMode::OnlyForced => "Only forced",
+            SubtitleMode::None => "None",
+            SubtitleMode::Smart => "Smart (foreign audio only)",
+            SubtitleMode::HearingImpaired => "Hearing impaired",
+        }
+    }
 }
 
 fn default_volume() -> f64 {
@@ -437,6 +506,9 @@ impl Default for PlaybackSettings {
             default_volume: default_volume(),
             up_next_seconds: default_up_next_seconds(),
             up_next_opacity: default_up_next_opacity(),
+            autoplay_next: true,
+            resume_rewind_seconds: 0,
+            intro_skip: IntroSkip::default(),
         }
     }
 }
@@ -456,6 +528,10 @@ pub struct AudioSettings {
     pub preferred_language: String,
     #[serde(default)]
     pub passthrough: AudioPassthrough,
+    /// Player-only mode: keep the file's default audio track, whatever its
+    /// language.
+    #[serde(default)]
+    pub play_default_track: bool,
 }
 
 impl Default for AudioSettings {
@@ -463,6 +539,7 @@ impl Default for AudioSettings {
         Self {
             preferred_language: default_language(),
             passthrough: AudioPassthrough::default(),
+            play_default_track: false,
         }
     }
 }
@@ -486,6 +563,9 @@ pub struct SubtitleSettings {
     /// player's subtitles menu.
     #[serde(default = "default_sub_scale")]
     pub scale: f64,
+    /// Player-only mode: which subtitles start.
+    #[serde(default)]
+    pub mode: SubtitleMode,
 }
 
 fn default_sub_scale() -> f64 {
@@ -498,6 +578,7 @@ impl Default for SubtitleSettings {
             preferred_language: default_language(),
             prefer_text_over_burnin: true,
             scale: default_sub_scale(),
+            mode: SubtitleMode::default(),
         }
     }
 }

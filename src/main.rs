@@ -1,6 +1,7 @@
 // Release builds on Windows are GUI programs: no console window behind them.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod account;
 mod auth;
 #[cfg(any(windows, target_os = "macos"))]
 mod awake;

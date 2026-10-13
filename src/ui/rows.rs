@@ -88,6 +88,19 @@ pub fn row(
     click: Click,
     more: More,
 ) -> gtk::Box {
+    row_ending(ui, title, items, shape, click, more, None)
+}
+
+/// [`row`], with `end` after the cards (a "More Libraries" card, say).
+pub fn row_ending(
+    ui: &Ui,
+    title: &str,
+    items: &[BaseItem],
+    shape: Shape,
+    click: Click,
+    more: More,
+    end: Option<&gtk::Widget>,
+) -> gtk::Box {
     let cards = gtk::Box::builder()
         .spacing(CARD_SPACING)
         .margin_start(ROW_MARGIN)
@@ -105,6 +118,9 @@ pub fn row(
                 }
             }
         }));
+    }
+    if let Some(end) = end {
+        cards.append(end);
     }
     let scroller = gtk::ScrolledWindow::builder()
         .vscrollbar_policy(gtk::PolicyType::Never)

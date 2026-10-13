@@ -185,6 +185,7 @@ impl PlaybackSession {
         quality: Quality,
         audio_stream_index: Option<i32>,
     ) -> Result<Rc<Self>> {
+        let start_ticks = rewound(start_ticks);
         let client = session.client.clone();
         let user_id = session.user_id.clone();
         let item_id = item.id.clone();
@@ -306,6 +307,7 @@ impl PlaybackSession {
         media: LocalMedia,
         start_ticks: i64,
     ) -> Result<Rc<Self>> {
+        let start_ticks = rewound(start_ticks);
         let target = media.target.clone();
         let subtitle_files = media.subtitle_files.clone();
         let options = crate::remote::Options::from_settings(&Settings::load().unwrap_or_default());
@@ -427,19 +429,26 @@ impl PlaybackSession {
         }
         let tracks = self.player.tracks();
         let remembered = self.remembered();
-        let settings = Settings::load().unwrap_or_default();
+        let prefs = crate::account::playback();
         let audio = tracks::initial_audio(
             &tracks,
             remembered
                 .as_ref()
                 .and_then(|o| o.audio_language.as_deref()),
-            &settings.audio.preferred_language,
+            &prefs.audio_language,
+            prefs.play_default_audio,
         );
         if let Some(id) = audio
             && let Err(e) = self.player.set_audio(id)
         {
             tracing::warn!("{e:#}");
         }
+        // The audio that will play: just chosen, else the file's own pick.
+        let audio_language = tracks
+            .iter()
+            .filter(|t| t.kind == Some(TrackKind::Audio))
+            .find(|t| audio.map_or(t.selected, |id| t.id == id))
+            .and_then(|t| t.lang.clone());
         let subtitle = tracks::initial_subtitle(
             &tracks,
             remembered
@@ -449,7 +458,9 @@ impl PlaybackSession {
                 .as_ref()
                 .and_then(|o| o.subtitle_forced_only)
                 .unwrap_or(false),
-            &settings.subtitles.preferred_language,
+            &prefs.subtitle_language,
+            prefs.subtitle_mode,
+            audio_language.as_deref(),
         );
         let result = match subtitle {
             SubtitleStart::Keep => Ok(()),
@@ -491,7 +502,8 @@ impl PlaybackSession {
             return;
         }
         let lang = self.track(TrackKind::Audio, id).and_then(|t| t.lang);
-        if lang.is_some() {
+        // The account can say not to remember (Emby's own setting).
+        if lang.is_some() && crate::account::playback().remember_audio {
             self.remember(|o| o.audio_language = lang);
         }
         self.report_progress(Some("AudioTrackChange"));
@@ -508,7 +520,7 @@ impl PlaybackSession {
             Some(track) => track.lang.clone(),
             None => Some(SUBTITLES_OFF.to_string()),
         };
-        if language.is_some() {
+        if language.is_some() && crate::account::playback().remember_subtitles {
             let forced = track.as_ref().is_some_and(|t| t.forced);
             self.remember(|o| {
                 o.subtitle_language = language;
@@ -825,6 +837,16 @@ fn apply_smoothing(player: Player, svp: bool) {
     {
         tracing::warn!("{e:#}");
     }
+}
+
+/// Where a resume really starts: the configured seconds earlier, so you
+/// see again what you saw last (Emby's "rewind on resume").
+fn rewound(start_ticks: i64) -> i64 {
+    if start_ticks <= 0 {
+        return start_ticks;
+    }
+    let rewind = i64::from(crate::account::playback().resume_rewind_seconds) * TICKS_PER_SECOND;
+    (start_ticks - rewind).max(0)
 }
 
 thread_local! {

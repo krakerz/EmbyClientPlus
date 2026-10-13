@@ -21,6 +21,9 @@ fn has_latest_row(view: &BaseItem) -> bool {
 
 struct HomeData {
     views: Vec<BaseItem>,
+    /// Libraries hidden from Home (Profile), still reachable from the end
+    /// of the Libraries row.
+    hidden: Vec<BaseItem>,
     resume: Vec<BaseItem>,
     next_up: Vec<BaseItem>,
     /// Each library's view, with its newest items.
@@ -67,6 +70,7 @@ pub fn page(ui: &Ui) -> adw::NavigationPage {
     menu.append(Some("Refresh"), Some("home.refresh"));
     menu.append(Some("History"), Some("home.history"));
     menu.append(Some("Downloads"), Some("home.downloads"));
+    menu.append(Some("Profile"), Some("home.profile"));
     menu.append(Some("Preferences"), Some("home.preferences"));
     menu.append(Some("Log Out"), Some("home.logout"));
     // Easier with a controller than Steam's own menu.
@@ -77,6 +81,7 @@ pub fn page(ui: &Ui) -> adw::NavigationPage {
             .menu_model(&menu)
             .build(),
     );
+    header.pack_end(&super::profile::button(ui));
     header.pack_end(&ui_scale_buttons(ui));
 
     let page = scrolled_page("Home", Some("home"), &header, &content);
@@ -153,6 +158,16 @@ pub fn page(ui: &Ui) -> adw::NavigationPage {
         move |_, _| super::preferences::show(&content)
     ));
     actions.add_action(&preferences);
+    let profile = gio::SimpleAction::new("profile", None);
+    profile.connect_activate({
+        let (weak, content) = (ui.downgrade(), content.clone());
+        move |_, _| {
+            if let Some(ui) = weak.upgrade() {
+                super::profile::show(&ui, &content);
+            }
+        }
+    });
+    actions.add_action(&profile);
     let history = gio::SimpleAction::new("history", None);
     history.connect_activate({
         let weak = ui.downgrade();
@@ -212,8 +227,9 @@ fn load(ui: &Ui, content: &gtk::Box) {
     let content = content.clone();
     glib::spawn_future_local(async move {
         let result = spawn_tokio(async move {
-            let (views, settings, resume, next_up) = tokio::join!(
+            let (views, folders, settings, resume, next_up) = tokio::join!(
                 client.views(&user_id),
+                client.media_folders(),
                 client.view_settings(&user_id),
                 client.resume(&user_id, None, ROW_LIMIT),
                 client.next_up(&user_id, None, ROW_LIMIT),
@@ -249,8 +265,26 @@ fn load(ui: &Ui, content: &gtk::Box) {
                 }
             }
             latest.sort_by_key(|(index, _, _)| *index);
+            let shown = settings.libraries_row(&views);
+            // The views leave hidden libraries out; the media folders don't
+            // (but have no channels, which `views` covers).
+            let same =
+                |a: &BaseItem, b: &BaseItem| a.id == b.id || (a.guid.is_some() && a.guid == b.guid);
+            let mut hidden: Vec<BaseItem> = Vec::new();
+            for library in views.iter().cloned().chain(folders.unwrap_or_else(|e| {
+                tracing::warn!("library list failed: {e:#}");
+                Vec::new()
+            })) {
+                if library.collection_type.as_deref() != Some("livetv")
+                    && !shown.iter().any(|s| same(s, &library))
+                    && !hidden.iter().any(|h| same(h, &library))
+                {
+                    hidden.push(library);
+                }
+            }
             Ok::<_, anyhow::Error>(HomeData {
-                views: settings.libraries_row(&views),
+                hidden,
+                views: shown,
                 // A failed secondary row shouldn't blank the whole page.
                 resume: resume.unwrap_or_else(|e| {
                     tracing::warn!("resume row failed: {e:#}");
@@ -327,16 +361,92 @@ fn unreachable(ui: &Ui, content: &gtk::Box) -> adw::StatusPage {
         .build()
 }
 
+/// A card at the end of the Libraries row opening the libraries hidden
+/// from Home.
+fn more_libraries(ui: &Ui, hidden: Vec<BaseItem>) -> gtk::Button {
+    let (width, height) = Shape::Landscape.size();
+    let icon = gtk::Image::builder()
+        .icon_name(crate::ui::icons::FOLDER)
+        .pixel_size(48)
+        .css_classes(["dim-label"])
+        .build();
+    let frame = gtk::CenterBox::builder()
+        .width_request(super::scaled(width))
+        .height_request(super::scaled(height))
+        .css_classes(["card"])
+        .halign(gtk::Align::Start)
+        .build();
+    // Centred, not expanded: expanding would spread up and widen the card.
+    icon.set_halign(gtk::Align::Center);
+    icon.set_valign(gtk::Align::Center);
+    frame.set_halign(gtk::Align::Start);
+    frame.set_center_widget(Some(&icon));
+    let title = gtk::Label::builder()
+        .label(format!("More Libraries ({})", hidden.len()))
+        .xalign(0.0)
+        .margin_top(6)
+        .css_classes(["card-title"])
+        .build();
+    let body = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .build();
+    body.append(&frame);
+    body.append(&title);
+    let button = gtk::Button::builder()
+        .child(&body)
+        .tooltip_text("Libraries hidden from Home (Profile)")
+        .css_classes(["flat", "card-button"])
+        .valign(gtk::Align::Start)
+        .hexpand(false)
+        .build();
+    let weak = ui.downgrade();
+    button.connect_clicked(move |_| {
+        let Some(ui) = weak.upgrade() else { return };
+        let grid = gtk::FlowBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .homogeneous(true)
+            .row_spacing(12)
+            .column_spacing(12)
+            .margin_top(12)
+            .margin_start(12)
+            .margin_end(12)
+            .valign(gtk::Align::Start)
+            .build();
+        for library in &hidden {
+            let (weak, target) = (ui.downgrade(), library.clone());
+            grid.append(&super::card::button(
+                &ui,
+                library,
+                Shape::Landscape,
+                move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.open(&target);
+                    }
+                },
+            ));
+        }
+        ui.push(&scrolled_page(
+            "More Libraries",
+            None,
+            &adw::HeaderBar::new(),
+            &grid,
+        ));
+    });
+    button
+}
+
 fn show(ui: &Ui, content: &gtk::Box, data: HomeData) {
     clear(content);
-    if !data.views.is_empty() {
-        content.append(&row(
+    if !data.views.is_empty() || !data.hidden.is_empty() {
+        let more = (!data.hidden.is_empty()).then(|| more_libraries(ui, data.hidden.clone()));
+        content.append(&super::rows::row_ending(
             ui,
             "Libraries",
             &data.views,
             Shape::Landscape,
             Click::Open,
             More::None,
+            more.as_ref().map(|b| b.upcast_ref()),
         ));
     }
     if !data.resume.is_empty() {

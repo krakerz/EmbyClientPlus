@@ -6,6 +6,7 @@ pub mod playback_info;
 pub mod playlists;
 pub mod sessions;
 pub mod trickplay;
+pub mod user;
 
 use anyhow::{Context, Result};
 use reqwest::header::{HeaderMap, HeaderValue};

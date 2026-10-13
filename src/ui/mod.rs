@@ -24,6 +24,7 @@ mod music;
 pub mod player_page;
 mod playlists;
 mod preferences;
+mod profile;
 mod rows;
 mod scrub_preview;
 mod search;

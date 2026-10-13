@@ -85,13 +85,15 @@ pub fn button(item: &BaseItem) -> Option<gtk::MenuButton> {
     if entries.is_empty() {
         return None;
     }
-    let preferred = crate::config::Settings::load()
-        .unwrap_or_default()
-        .subtitles
-        .preferred_language;
+    let preferred = crate::account::playback().subtitle_language;
+    let default_label = if preferred.is_empty() {
+        "Default".to_string()
+    } else {
+        format!("Default ({})", language_name(&preferred))
+    };
     let menu = gio::Menu::new();
     menu.append(
-        Some(&format!("Default ({})", language_name(&preferred))),
+        Some(&default_label),
         Some(&format!("subtitles.choice::{DEFAULT}")),
     );
     menu.append(Some("Off"), Some(&format!("subtitles.choice::{OFF}")));

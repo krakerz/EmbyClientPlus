@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [1.14.0] — 2026-10-13
+
+### Added
+- Profile: your own Emby account settings, from the avatar at the top right of Home (or the menu's Profile). Change your picture or password, set a profile PIN, sign out, and edit the settings Emby's own apps share: audio and subtitle language, subtitle mode (including Smart, Only forced and None), playing the default audio track, remembering audio and subtitle choices, autoplaying the next episode, rewinding on resume, skipping intros (button, automatic or not at all), missing episodes, hiding watched items, and each library's place on Home, with one switch to show or hide it there (its Latest row included). Changes are saved to the server as you make them.
+- Libraries hidden from Home stay reachable: a "More Libraries" card at the end of Home's Libraries row lists them.
+- Player-only mode has its own copies of these playback settings in Preferences, saved in the app's config, so playing files never needs a server.
+
+### Changed
+- Signed in, playback follows your Emby account's settings instead of the app's: Preferences no longer shows its own audio and subtitle languages then (they're on Profile). A copy of the account's settings is kept for playing downloads without a connection.
+
 ## [1.13.1] — 2026-10-11
 
 ### Fixed
