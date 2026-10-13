@@ -162,6 +162,19 @@ pub fn move_in_grid(focus: &gtk::Widget, direction: gtk::DirectionType) -> bool 
     true
 }
 
+/// The bar above the grid holding `focus` (count, filter, sort), if the
+/// grid has one: what Up from its top row goes to.
+pub fn grid_header(focus: &gtk::Widget) -> Option<gtk::Widget> {
+    focus
+        .ancestor(gtk::GridView::static_type())?
+        .parent()?
+        .prev_sibling()
+        .filter(|bar| bar.is_visible() && bar.has_css_class(GRID_BAR_CLASS))
+}
+
+/// Marks a grid's bar (see `grid_header`).
+pub const GRID_BAR_CLASS: &str = "grid-bar";
+
 /// Appends pages of `query` to `store` until `max_items` are in, stopping
 /// early if the grid went away (page popped) or `still_wanted` says the
 /// results are stale.

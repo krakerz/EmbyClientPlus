@@ -159,9 +159,12 @@ fn picture_group(ui: &Ui, user: &Value) -> adw::PreferencesGroup {
         .label(&name)
         .css_classes(["title-2"])
         .build();
+    // A file chooser can't be worked with a controller in Steam Game Mode
+    // (Preferences' folder picker is hidden there too).
     let change = gtk::Button::builder()
         .label("Change Picture…")
         .css_classes(["pill"])
+        .visible(!crate::gamescope::detected())
         .build();
     let remove = gtk::Button::builder()
         .label("Remove")

@@ -544,6 +544,10 @@ fn running_row(download: &Running) -> adw::ActionRow {
     let id = download.item.id.clone();
     pause_button.connect_clicked(move |_| pause(&id));
     row.add_suffix(&pause_button);
+    // A on the row (controller) pauses, like its button.
+    row.set_activatable(true);
+    let id = download.item.id.clone();
+    row.connect_activated(move |_| pause(&id));
     let cancel = row_button(
         crate::ui::icons::REMOVE,
         "Cancel and delete the partial download",
@@ -579,7 +583,15 @@ fn paused_row(ui: &Ui, item: &BaseItem) -> adw::ActionRow {
     let row = adw::ActionRow::builder()
         .title(glib::markup_escape_text(&title_of(item)))
         .subtitle("Continues where it stopped")
+        .activatable(true)
         .build();
+    // A on the row (controller) resumes, like its button.
+    let (weak, id) = (ui.downgrade(), item.id.clone());
+    row.connect_activated(move |_| {
+        if let Some(ui) = weak.upgrade() {
+            resume(&ui, Some(&id));
+        }
+    });
     let play = row_button(crate::ui::icons::PLAY, "Resume");
     let (weak, id) = (ui.downgrade(), item.id.clone());
     play.connect_clicked(move |_| {

@@ -319,6 +319,16 @@ fn show_with(parent: &impl IsA<gtk::Widget>, server: bool) {
         save(|s| s.home.show_more_libraries = show);
     });
     home.add(&more_libraries);
+    let in_progress = adw::SwitchRow::builder()
+        .title("\"In Progress\" filter for TV")
+        .subtitle("Lists the series you've started; with a long watch history it can take a moment")
+        .active(settings.home.series_in_progress)
+        .build();
+    in_progress.connect_active_notify(|row| {
+        let on = row.is_active();
+        save(|s| s.home.series_in_progress = on);
+    });
+    home.add(&in_progress);
     if server {
         page.add(&home);
     }

@@ -642,6 +642,17 @@ fn move_focus(window: &adw::ApplicationWindow, direction: gtk::DirectionType) {
     {
         return;
     }
+    // Up from a grid's top row: its bar (filter, sort), which sits centred
+    // and so isn't straight above most cards for GTK's own focus move.
+    if direction == gtk::DirectionType::Up
+        && let Some(focus) = &focus
+        && let Some(bar) = library::grid_header(focus)
+        && let Some(target) =
+            nearest_in_direction(&bar, focus, direction).or_else(|| first_focusable(&bar))
+    {
+        target.grab_focus();
+        return;
+    }
     let mut scope: gtk::Widget = focus
         .as_ref()
         .and_then(|widget| widget.native())
@@ -905,6 +916,24 @@ fn activate_focus(window: &adw::ApplicationWindow) {
         }
         return;
     }
+    // The same for a drop-down (a grid's filter and sort): its list opens
+    // but its choices don't take a press.
+    let dropdown = focus
+        .downcast_ref::<gtk::DropDown>()
+        .cloned()
+        .or_else(|| focus.ancestor(gtk::DropDown::static_type()).and_downcast());
+    if let Some(dropdown) = dropdown {
+        let count = dropdown.model().map_or(0, |m| m.n_items());
+        if count > 0 {
+            let selected = dropdown.selected();
+            dropdown.set_selected(if selected == gtk::INVALID_LIST_POSITION {
+                0
+            } else {
+                (selected + 1) % count
+            });
+        }
+        return;
+    }
     if let Some(button) = focus.downcast_ref::<gtk::Button>() {
         button.emit_clicked();
     } else if let Some(row) = focus.downcast_ref::<gtk::ListBoxRow>() {
@@ -932,4 +961,25 @@ fn back(window: &adw::ApplicationWindow, ui: Option<&Ui>) {
             ui.nav().pop();
         }
     }
+}
+
+/// The first focusable, visible widget inside `root`, in tree order.
+fn first_focusable(root: &gtk::Widget) -> Option<gtk::Widget> {
+    let mut stack = vec![root.clone()];
+    while let Some(widget) = stack.pop() {
+        if !widget.is_mapped() || !widget.is_sensitive() {
+            continue;
+        }
+        if widget != *root && widget.is_focusable() && !is_container(&widget) {
+            return Some(widget);
+        }
+        let mut children = Vec::new();
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            child = current.next_sibling();
+            children.push(current);
+        }
+        stack.extend(children.into_iter().rev());
+    }
+    None
 }

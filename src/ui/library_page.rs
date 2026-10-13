@@ -455,7 +455,21 @@ fn sortable_grid_of(ui: &Ui, base: ItemQuery, shape: Shape) -> gtk::Box {
         .margin_end(6)
         .css_classes(["dim-label"])
         .build();
-    let filter = gtk::DropDown::from_strings(&FILTERS.map(|(label, _)| label));
+    // TV's "In Progress" is worked out from the episodes (see
+    // `reload_grid`); Preferences can leave it out.
+    let series = base.include_types.is_some_and(|t| t.contains("Series"));
+    let series_in_progress = crate::config::Settings::load()
+        .unwrap_or_default()
+        .home
+        .series_in_progress;
+    let filters: Rc<Vec<(&'static str, Option<&'static str>)>> = Rc::new(
+        FILTERS
+            .into_iter()
+            .filter(|(_, f)| series_in_progress || !series || *f != Some("IsResumable"))
+            .collect(),
+    );
+    let labels: Vec<&str> = filters.iter().map(|(label, _)| *label).collect();
+    let filter = gtk::DropDown::from_strings(&labels);
     filter.set_tooltip_text(Some("Filter"));
     let sort = gtk::DropDown::from_strings(&SORTS.map(|(label, _, _)| label));
     sort.set_tooltip_text(Some("Sort by"));
@@ -471,6 +485,7 @@ fn sortable_grid_of(ui: &Ui, base: ItemQuery, shape: Shape) -> gtk::Box {
         .margin_start(18)
         .margin_end(18)
         .margin_top(6)
+        .css_classes([library::GRID_BAR_CLASS])
         .build();
     bar.append(&count);
     bar.append(&filter);
@@ -497,7 +512,7 @@ fn sortable_grid_of(ui: &Ui, base: ItemQuery, shape: Shape) -> gtk::Box {
         if let Some(index) = SORTS.iter().position(|(_, s, _)| *s == prefs.sort_by) {
             sort.set_selected(index as u32);
         }
-        if let Some(index) = FILTERS
+        if let Some(index) = filters
             .iter()
             .position(|(_, f)| *f == prefs.filter.as_deref())
         {
@@ -533,7 +548,9 @@ fn sortable_grid_of(ui: &Ui, base: ItemQuery, shape: Shape) -> gtk::Box {
             let choice = Choice {
                 sort: SORTS[sort.selected() as usize].1,
                 descending: descending.is_active(),
-                filter: FILTERS[filter.selected() as usize].1,
+                filter: filters
+                    .get(filter.selected() as usize)
+                    .and_then(|(_, f)| *f),
             };
             // Remembered for next time (not the first load: nothing changed).
             if !opened.replace(false) {
@@ -623,10 +640,64 @@ fn reload_grid(
     query.descending = choice.descending;
     query.filters.extend(choice.filter);
     query.limit = PAGE_SIZE;
+    // "In Progress" for series: Emby never calls a series resumable, so
+    // it's the series with an episode watched or part-watched, minus the
+    // ones watched to the end.
+    if choice.filter == Some("IsResumable")
+        && base.include_types.is_some_and(|t| t.contains("Series"))
+    {
+        query.filters.retain(|f| *f != "IsResumable");
+        query.filters.push("IsUnplayed");
+        let (client, user_id, parent) = (ui.client(), ui.user_id(), base.parent_id.clone());
+        let (weak, store, count, generation) = (
+            ui.downgrade(),
+            store.clone(),
+            count.downgrade(),
+            generation.clone(),
+        );
+        glib::spawn_future_local(async move {
+            let ids = crate::runtime::spawn_tokio(async move {
+                client.started_series_ids(&user_id, parent.as_deref()).await
+            })
+            .await;
+            if generation.get() != current {
+                return;
+            }
+            let ids = match ids {
+                Ok(ids) => ids,
+                Err(e) => {
+                    tracing::warn!("in-progress series: {e:#}");
+                    Vec::new()
+                }
+            };
+            let Some(count) = count.upgrade() else { return };
+            if ids.is_empty() {
+                count.set_label("0 items");
+                return;
+            }
+            query.ids = Some(ids.join(","));
+            if let Some(ui) = weak.upgrade() {
+                load_query(&ui, &store, &count, query, &generation, current);
+            }
+        });
+        return;
+    }
+    load_query(&ui, store, count, query, generation, current);
+}
+
+/// Fills `store` with `query`'s pages while it's still the current one.
+fn load_query(
+    ui: &Ui,
+    store: &gtk::gio::ListStore,
+    count: &gtk::Label,
+    query: ItemQuery,
+    generation: &Rc<Cell<u64>>,
+    current: u64,
+) {
     let still_current = generation.clone();
     let count = count.downgrade();
     library::load_pages(
-        &ui,
+        ui,
         store,
         query,
         usize::MAX,
