@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [1.16.0] — 2026-10-13
+
+### Added
+- Downloads survive closing the app, even an abrupt close or crash: what was downloading or waiting is remembered, and a download that was cut off continues from where it stopped instead of starting over. Preferences → Downloads → "Resume downloads at start" (on by default) carries them on when the app opens again; off, they wait on the Downloads page.
+- The Downloads page can pause and resume: a running download has Pause (keeps what's downloaded) and Cancel (deletes the partial file); paused ones are listed under "Paused" with Resume, and "Resume All". A download interrupted by a lost connection lands there too, ready to continue.
+- The Downloads page shows how much space downloads use and how much is free on that disk, and groups finished downloads by series, each with its total size.
+- Preferences → Playback → "Quality menu for downloads", off by default: when on, downloaded titles keep the Quality button, and picking a lower quality streams the title from the server from the same spot; Original goes back to the download. If the server can't be reached, it plays the download instead.
+- The player says when a video plays from this device: a "Downloaded" tag (or "Local file" in the standalone player) at the right of the top bar, appearing with the controls.
+
+### Changed
+- Downloads check for disk space first and keep at least 1 GB free: when there isn't room, the download and everything waiting pause with a note saying how much space is needed, instead of filling the disk. Auto-download leaves paused episodes alone.
+- Library grids (and search, playlists, artists, collections, More Libraries) are packed with the same tight 12px gap as Home's rows and centred, fitting as many columns as the window allows; a short list (even a single result) sits in the middle, and the bar above (item count, filter, sort) sits centred over them. Genre and tag tiles are centred too.
+
+### Fixed
+- A downloaded title showed the Quality button, and picking a quality quietly switched to streaming it from the server. Downloads now hide it, like other local files.
+- Playing a downloaded episode, Up Next and previous/next only knew the other downloaded episodes: with episodes 2 and 4 downloaded but not 3, episode 2 went straight to 4. When the server is reachable they now follow the series itself, playing the next episode from disk if it's downloaded and streaming it if not; offline, the downloaded episodes still follow each other.
+- mpv no longer logs "vf-remove: item label @svp not found" before every video when SVP isn't attached.
+
 ## [1.15.0] — 2026-10-13
 
 ### Added

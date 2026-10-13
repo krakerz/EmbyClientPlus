@@ -35,11 +35,24 @@ pub struct Settings {
     pub downloads: DownloadSettings,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadSettings {
     /// Where downloads go; unset means `~/Videos/Emby Client+`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder: Option<String>,
+    /// Downloads queued when the app last closed (even abruptly) carry on
+    /// at the next start; off, they wait on the Downloads page.
+    #[serde(default = "default_true")]
+    pub resume_at_start: bool,
+}
+
+impl Default for DownloadSettings {
+    fn default() -> Self {
+        DownloadSettings {
+            folder: None,
+            resume_at_start: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -359,6 +372,10 @@ pub struct PlaybackSettings {
     pub resume_rewind_seconds: u32,
     #[serde(default)]
     pub intro_skip: IntroSkip,
+    /// Downloaded titles offer the Quality menu; picking a quality streams
+    /// the title from the server instead (Original goes back to the file).
+    #[serde(default)]
+    pub download_quality_streams: bool,
 }
 
 /// Emby's `IntroSkipMode`.
@@ -513,6 +530,7 @@ impl Default for PlaybackSettings {
             autoplay_next: true,
             resume_rewind_seconds: 0,
             intro_skip: IntroSkip::default(),
+            download_quality_streams: false,
         }
     }
 }

@@ -12,7 +12,7 @@ use gtk::{gdk, gio, glib};
 use super::{format_timestamp, images};
 use crate::emby::EmbyClient;
 use crate::emby::models::BaseItem;
-use crate::playback::{PlaybackSession, QUALITIES, Quality, TICKS_PER_SECOND, TrackEntry};
+use crate::playback::{Origin, PlaybackSession, QUALITIES, Quality, TICKS_PER_SECOND, TrackEntry};
 use crate::player::compositor::BarFill;
 use crate::player::{
     self, Aspect, END_FILE_REASON_EOF, END_FILE_REASON_ERROR, Player, PlayerEvent, TrackKind,
@@ -127,6 +127,10 @@ struct Inner {
 
 struct Osd {
     top: gtk::Revealer,
+    /// Top right: where the video comes from, when it isn't streamed.
+    origin: gtk::Box,
+    origin_icon: gtk::Image,
+    origin_label: gtk::Label,
     bottom: gtk::Revealer,
     title: gtk::Label,
     subtitle: gtk::Label,
@@ -378,8 +382,32 @@ impl PlayerPage {
                 .preview
                 .load(client, &session.item, session.trickplay_source());
         }
-        // Nothing to transcode without a server.
-        inner.osd.quality.set_visible(session.is_from_server());
+        // Nothing to transcode without a server; say where it plays from.
+        inner.osd.quality.set_visible(
+            session.is_from_server()
+                || (session.origin == Origin::Download
+                    && crate::config::Settings::load()
+                        .unwrap_or_default()
+                        .playback
+                        .download_quality_streams),
+        );
+        let origin = match session.origin {
+            Origin::Server | Origin::Link => None,
+            Origin::Download => Some(("Downloaded", "Playing the downloaded copy on this device")),
+            Origin::File => Some(("Local file", "Playing a file on this device")),
+        };
+        inner.osd.origin.set_visible(origin.is_some());
+        if let Some((label, tooltip)) = origin {
+            inner
+                .osd
+                .origin_icon
+                .set_icon_name(Some(match session.origin {
+                    Origin::Download => crate::ui::icons::DOWNLOAD,
+                    _ => crate::ui::icons::FOLDER,
+                }));
+            inner.osd.origin_label.set_label(label);
+            inner.osd.origin.set_tooltip_text(Some(tooltip));
+        }
         inner.osd.previous.set_sensitive(session.previous.is_some());
         inner.osd.next.set_sensitive(session.next.is_some());
         inner.osd.svp.set_active(session.svp_enabled());
@@ -465,15 +493,29 @@ impl Osd {
             .ellipsize(gtk::pango::EllipsizeMode::End)
             .css_classes(["dim-label"])
             .build();
-        let titles = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let titles = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .hexpand(true)
+            .build();
         titles.append(&title);
         titles.append(&subtitle);
+        let origin_icon = gtk::Image::new();
+        let origin_label = gtk::Label::new(None);
+        let origin = gtk::Box::builder()
+            .spacing(6)
+            .valign(gtk::Align::Center)
+            .css_classes(["origin-badge"])
+            .visible(false)
+            .build();
+        origin.append(&origin_icon);
+        origin.append(&origin_label);
         let top_bar = gtk::Box::builder()
             .spacing(12)
             .css_classes(["osd", "player-bar"])
             .build();
         top_bar.append(&back);
         top_bar.append(&titles);
+        top_bar.append(&origin);
         // The player hides the window's title bar, so this bar stands in for
         // it: drag to move the window, double-click to maximize.
         let handle = gtk::WindowHandle::builder().child(&top_bar).build();
@@ -686,6 +728,9 @@ impl Osd {
 
         let osd = Osd {
             top,
+            origin,
+            origin_icon,
+            origin_label,
             bottom,
             title,
             subtitle,

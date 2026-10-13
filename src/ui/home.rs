@@ -393,6 +393,7 @@ fn more_libraries(ui: &Ui, hidden: Vec<BaseItem>) -> gtk::Button {
         let Some(ui) = weak.upgrade() else { return };
         let grid = gtk::FlowBox::builder()
             .selection_mode(gtk::SelectionMode::None)
+            .halign(gtk::Align::Center)
             .homogeneous(true)
             .row_spacing(12)
             .column_spacing(12)

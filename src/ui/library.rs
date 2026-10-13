@@ -94,6 +94,7 @@ pub fn grid(ui: &Ui, shape: Shape) -> (gtk::GridView, gio::ListStore) {
         .margin_bottom(12)
         .css_classes(["poster-grid"])
         .build();
+    fit_columns(&grid, shape);
     let weak = ui.downgrade();
     grid.connect_activate(move |grid, position| {
         let (Some(ui), Some(object)) = (
@@ -215,5 +216,42 @@ pub fn load_pages(
                 return;
             }
         }
+    });
+}
+
+/// Gap between grid cards, the same as Home's rows (half on each side of
+/// a cell, from the `poster-grid` CSS).
+const GRID_GAP: i32 = super::rows::CARD_SPACING;
+
+/// The grid's least margin at each side.
+const GRID_MARGIN: i32 = 12;
+
+/// Keeps `grid` at as many columns as fit its space, so each cell is just
+/// a card plus the gap (a GridView otherwise shares the whole width out
+/// among its columns, leaving wide gaps between posters), and centres
+/// them by splitting what's left between its side margins. Margins, not
+/// `halign`: an aligned GridView in a scroller gets measured against the
+/// visible height and GTK warns on every frame.
+fn fit_columns(grid: &gtk::GridView, shape: Shape) {
+    let last = std::cell::Cell::new((-1, u32::MAX));
+    grid.add_tick_callback(move |grid, _| {
+        let Some(space) = grid.parent().map(|p| p.width()) else {
+            return glib::ControlFlow::Continue;
+        };
+        // A short list (three collections) centres too: no empty columns.
+        let items = grid.model().map_or(0, |m| m.n_items());
+        if (space, items) != last.get() {
+            last.set((space, items));
+            let cell = (super::scaled(shape.size().0) + GRID_GAP).max(1);
+            let room = (space - 2 * GRID_MARGIN).max(cell);
+            let fit = (room / cell).clamp(1, 64);
+            let columns = fit.min(i32::try_from(items).unwrap_or(i32::MAX).max(1));
+            let side = GRID_MARGIN + (room - columns * cell) / 2;
+            grid.set_margin_start(side);
+            grid.set_margin_end(side);
+            grid.set_min_columns(columns.min(2) as u32);
+            grid.set_max_columns(columns as u32);
+        }
+        glib::ControlFlow::Continue
     });
 }

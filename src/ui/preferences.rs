@@ -113,8 +113,18 @@ fn show_with(parent: &impl IsA<gtk::Widget>, server: bool) {
             save(|s| s.playback.set_bitrate_cap_kbps(kbps));
         }
     });
+    let download_quality = adw::SwitchRow::builder()
+        .title("Quality menu for downloads")
+        .subtitle("Picking a quality streams the title from the server instead; Original goes back to the download")
+        .active(settings.playback.download_quality_streams)
+        .build();
+    download_quality.connect_active_notify(|row| {
+        let on = row.is_active();
+        save(|s| s.playback.download_quality_streams = on);
+    });
     if server {
         playback.add(&quality);
+        playback.add(&download_quality);
     }
     let mpv_conf = adw::SwitchRow::builder()
         .title("Use my mpv.conf")
@@ -492,6 +502,21 @@ fn downloads_group(parent: &gtk::Widget) -> adw::PreferencesGroup {
             "Titles downloaded for offline playback (Download in a movie's or episode's menu)",
         )
         .build();
+    let resume = adw::SwitchRow::builder()
+        .title("Resume downloads at start")
+        .subtitle("Downloads left unfinished when the app closed carry on; off, they wait on the Downloads page")
+        .active(
+            Settings::load()
+                .unwrap_or_default()
+                .downloads
+                .resume_at_start,
+        )
+        .build();
+    resume.connect_active_notify(|row| {
+        let on = row.is_active();
+        save(|s| s.downloads.resume_at_start = on);
+    });
+    group.add(&resume);
     let folder = adw::EntryRow::builder()
         .title("Download folder")
         .text(crate::downloads::folder().to_string_lossy())

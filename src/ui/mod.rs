@@ -516,6 +516,13 @@ impl Ui {
                     );
                     ui.inner.nav.pop();
                 }
+                // Streaming a downloaded title failed (offline, say): back
+                // to the file.
+                Err(e) if let Some(download) = crate::downloads::find(&item.id) => {
+                    tracing::warn!("streaming a downloaded title failed: {e:#}");
+                    ui.toast("Couldn't stream it, playing the download instead");
+                    ui.play_download(&download, start_ticks);
+                }
                 Err(e) if quality != Quality::Original => {
                     tracing::warn!("transcode failed: {e:#}");
                     ui.toast("Transcoding failed, playing the original instead");
@@ -559,20 +566,28 @@ impl Ui {
         }
     }
 
-    /// Restarts the current item at the same spot and audio in `quality`.
+    /// Restarts the current item at the same spot and audio in `quality`:
+    /// streamed from the server, except Original for a downloaded title,
+    /// which goes back to the file.
     fn change_quality(&self, quality: Quality) {
         let Some(session) = self.inner.playback.borrow().clone() else {
             return;
         };
         let position = session.position_ticks();
+        if quality == Quality::Original
+            && let Some(download) = crate::downloads::find(&session.item.id)
+        {
+            return self.play_download(&download, position);
+        }
         let audio = session.audio_stream_index();
         let item = session.item.clone();
         self.play_with(&item, position, quality, audio);
     }
 
     /// Plays a downloaded title from its file. Progress still goes to the
-    /// server, when it's reachable; previous/next are the other downloaded
-    /// episodes.
+    /// server, when it's reachable. Previous/next are the series' real
+    /// neighbours when the server answers (each then plays from disk if
+    /// downloaded, else streams); offline, the other downloaded episodes.
     pub fn play_download(&self, download: &crate::downloads::Download, start_ticks: i64) {
         self.inner.music.stop();
         self.stop_playback();
@@ -583,7 +598,7 @@ impl Ui {
         }
         let (previous, next) = crate::downloads::neighbours(download);
         let item = &download.item;
-        let media = crate::playback::LocalMedia {
+        let mut media = crate::playback::LocalMedia {
             target: download.file.to_string_lossy().into_owned(),
             item: item.clone(),
             previous: previous.map(|d| d.item),
@@ -596,8 +611,28 @@ impl Ui {
                 .map(|path| path.to_string_lossy().into_owned())
                 .collect(),
         };
+        let series_id = item.series_id.clone();
+        let (client, user_id) = (self.client(), self.user_id());
         let ui = self.clone();
         glib::spawn_future_local(async move {
+            if let Some(series_id) = series_id {
+                // Briefly: offline, the downloaded neighbours do.
+                let episodes = crate::runtime::spawn_tokio(async move {
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(3),
+                        client.series_episodes(&series_id, &user_id),
+                    )
+                    .await
+                })
+                .await;
+                if let Ok(Ok(episodes)) = episodes {
+                    let (previous, next) =
+                        crate::playback::markers::neighbours(&episodes, &media.item.id);
+                    if previous.is_some() || next.is_some() {
+                        (media.previous, media.next) = (previous, next);
+                    }
+                }
+            }
             match PlaybackSession::start_local(ui.inner.player, media, start_ticks).await {
                 Ok(session) => {
                     ui.inner.playback.replace(Some(session.clone()));

@@ -21,12 +21,18 @@ use crate::update::Progress;
 struct Running {
     item: BaseItem,
     progress: Arc<Progress>,
+    /// Stops it (a pause keeps the partial file to continue later)...
     cancelled: Arc<AtomicBool>,
+    /// ...and a cancel deletes that file too.
+    discard: Arc<AtomicBool>,
 }
 
 thread_local! {
     static RUNNING: RefCell<Vec<Running>> = const { RefCell::new(Vec::new()) };
     static QUEUE: RefCell<VecDeque<BaseItem>> = const { RefCell::new(VecDeque::new()) };
+    /// Stopped downloads (paused, interrupted, or out of disk space),
+    /// continued from where they stopped when resumed.
+    static PAUSED: RefCell<Vec<BaseItem>> = const { RefCell::new(Vec::new()) };
     /// An auto-download check is under way.
     static SYNCING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// The check waiting to run after playback stops.
@@ -44,6 +50,10 @@ pub fn is_running(item_id: &str) -> bool {
         || QUEUE.with(|q| q.borrow().iter().any(|i| i.id == item_id))
 }
 
+fn is_paused(item_id: &str) -> bool {
+    PAUSED.with(|p| p.borrow().iter().any(|i| i.id == item_id))
+}
+
 /// Downloads `item` (once), after whatever is already downloading.
 pub fn start(ui: &Ui, item: &BaseItem) {
     if enqueue(item) {
@@ -56,12 +66,21 @@ pub fn start(ui: &Ui, item: &BaseItem) {
     }
 }
 
-/// Queues `item` unless it's downloaded, downloading or queued already.
+/// Queues `item` unless it's downloaded, downloading or queued already;
+/// a paused one is resumed.
 fn enqueue(item: &BaseItem) -> bool {
     if is_running(&item.id) || crate::downloads::find(&item.id).is_some() {
         return false;
     }
-    QUEUE.with(|q| q.borrow_mut().push_back(item.clone()));
+    let paused = PAUSED.with(|p| {
+        let mut paused = p.borrow_mut();
+        let index = paused.iter().position(|i| i.id == item.id)?;
+        Some(paused.remove(index))
+    });
+    QUEUE.with(|q| {
+        q.borrow_mut()
+            .push_back(paused.unwrap_or_else(|| item.clone()))
+    });
     true
 }
 
@@ -104,14 +123,77 @@ pub fn start_episodes_of(ui: &Ui, target: &BaseItem) {
     });
 }
 
-/// Starts the next queued download if none is running.
+/// Starts the next queued download if none is running, and saves what's
+/// left to do.
 fn pump(ui: &Ui) {
-    if !RUNNING.with(|r| r.borrow().is_empty()) {
-        return;
-    }
-    if let Some(item) = QUEUE.with(|q| q.borrow_mut().pop_front()) {
+    if RUNNING.with(|r| r.borrow().is_empty())
+        && let Some(item) = QUEUE.with(|q| q.borrow_mut().pop_front())
+    {
         run(ui, &item);
     }
+    save_state(ui);
+}
+
+/// Saves the running, queued and paused downloads, so they survive the
+/// app closing, even abruptly.
+fn save_state(ui: &Ui) {
+    let user_id = ui.user_id();
+    let mut pending: Vec<crate::downloads::Pending> = Vec::new();
+    RUNNING.with(|r| {
+        pending.extend(
+            r.borrow()
+                .iter()
+                .map(|d| crate::downloads::Pending::new(&user_id, &d.item, false)),
+        )
+    });
+    QUEUE.with(|q| {
+        pending.extend(
+            q.borrow()
+                .iter()
+                .map(|i| crate::downloads::Pending::new(&user_id, i, false)),
+        )
+    });
+    PAUSED.with(|p| {
+        pending.extend(
+            p.borrow()
+                .iter()
+                .map(|i| crate::downloads::Pending::new(&user_id, i, true)),
+        )
+    });
+    crate::downloads::save_pending(&user_id, &pending);
+}
+
+/// At sign-in: the downloads left from last time. Queued ones carry on if
+/// Preferences says so (else they wait, paused); paused ones stay paused.
+pub fn restore(ui: &Ui) {
+    let pending = crate::downloads::load_pending(&ui.user_id());
+    if pending.is_empty() {
+        return;
+    }
+    let resume = crate::config::Settings::load()
+        .unwrap_or_default()
+        .downloads
+        .resume_at_start;
+    let mut resumed = 0;
+    for entry in pending {
+        let item = entry.item();
+        if crate::downloads::find(&item.id).is_some() || is_running(&item.id) || is_paused(&item.id)
+        {
+            continue;
+        }
+        if resume && !entry.paused {
+            QUEUE.with(|q| q.borrow_mut().push_back(item));
+            resumed += 1;
+        } else {
+            PAUSED.with(|p| p.borrow_mut().push(item));
+        }
+    }
+    match resumed {
+        0 => {}
+        1 => ui.toast("Resuming 1 download"),
+        n => ui.toast(&format!("Resuming {n} downloads")),
+    }
+    pump(ui);
 }
 
 fn run(ui: &Ui, item: &BaseItem) {
@@ -119,31 +201,94 @@ fn run(ui: &Ui, item: &BaseItem) {
         item: item.clone(),
         progress: Arc::new(Progress::default()),
         cancelled: Arc::new(AtomicBool::new(false)),
+        discard: Arc::new(AtomicBool::new(false)),
     };
     RUNNING.with(|r| r.borrow_mut().push(running.clone()));
     let (client, user_id) = (ui.client(), ui.user_id());
     let weak = ui.downgrade();
     glib::spawn_future_local(async move {
-        let (progress, cancelled, id) = (
+        let (progress, cancelled, discard, id) = (
             running.progress.clone(),
             running.cancelled.clone(),
+            running.discard.clone(),
             running.item.id.clone(),
         );
         let result = crate::runtime::spawn_tokio(crate::downloads::fetch(
-            client, user_id, id, progress, cancelled,
+            client, user_id, id, progress, cancelled, discard,
         ))
         .await;
         RUNNING.with(|r| r.borrow_mut().retain(|d| d.item.id != running.item.id));
         let Some(ui) = weak.upgrade() else { return };
         let name = running.item.episode_label();
+        let pause = |item: BaseItem| PAUSED.with(|p| p.borrow_mut().push(item));
         match result {
             Ok(_) => ui.toast(&format!("Downloaded {name}")),
-            Err(_) if running.cancelled.load(Ordering::Relaxed) => {}
-            Err(e) => ui.report_error(&format!("Couldn't download {name}"), &e),
+            Err(_) if running.discard.load(Ordering::Relaxed) => {}
+            Err(_) if running.cancelled.load(Ordering::Relaxed) => pause(running.item.clone()),
+            Err(e) => {
+                // Out of space: everything waiting pauses too, rather than
+                // failing one by one.
+                if let Some(space) = e.downcast_ref::<crate::downloads::NotEnoughSpace>() {
+                    pause(running.item.clone());
+                    let waiting: Vec<BaseItem> = QUEUE.with(|q| q.borrow_mut().drain(..).collect());
+                    PAUSED.with(|p| p.borrow_mut().extend(waiting));
+                    ui.toast(&format!(
+                        "Downloads paused: not enough disk space ({:.1} GB needed, {:.1} GB free)",
+                        space.needed as f64 / 1e9,
+                        space.free as f64 / 1e9
+                    ));
+                } else {
+                    // Interrupted (connection lost, server gone): resumable.
+                    pause(running.item.clone());
+                    ui.report_error(&format!("Couldn't finish downloading {name}"), &e);
+                }
+            }
         }
         pump(&ui);
         ui.data_changed();
     });
+}
+
+/// Pauses the running download `item_id`, keeping what's downloaded.
+fn pause(item_id: &str) {
+    RUNNING.with(|r| {
+        if let Some(d) = r.borrow().iter().find(|d| d.item.id == item_id) {
+            d.cancelled.store(true, Ordering::Relaxed);
+        }
+    });
+}
+
+/// Cancels the running download `item_id` and deletes its partial file.
+fn cancel_running(item_id: &str) {
+    RUNNING.with(|r| {
+        if let Some(d) = r.borrow().iter().find(|d| d.item.id == item_id) {
+            d.discard.store(true, Ordering::Relaxed);
+            d.cancelled.store(true, Ordering::Relaxed);
+        }
+    });
+}
+
+/// Resumes paused downloads (all of them, or just `item_id`).
+fn resume(ui: &Ui, item_id: Option<&str>) {
+    let items: Vec<BaseItem> = PAUSED.with(|p| {
+        let mut paused = p.borrow_mut();
+        let (chosen, kept) = paused
+            .drain(..)
+            .partition(|i| item_id.is_none_or(|id| i.id == id));
+        *paused = kept;
+        chosen
+    });
+    QUEUE.with(|q| q.borrow_mut().extend(items));
+    pump(ui);
+    ui.data_changed();
+}
+
+/// Drops a paused download and its partial file.
+fn cancel_paused(ui: &Ui, item_id: &str) {
+    PAUSED.with(|p| p.borrow_mut().retain(|i| i.id != item_id));
+    crate::downloads::discard_partial(item_id);
+    save_state(ui);
+    ui.data_changed();
 }
 
 /// Deletes `item`'s download (from a menu).
@@ -224,18 +369,15 @@ pub fn page(ui: &Ui) -> adw::NavigationPage {
     page
 }
 
-/// What's downloading and waiting: the page rebuilds when this changes.
+/// What's downloading, waiting and paused: the page rebuilds when this
+/// changes.
 fn running_ids() -> Vec<String> {
-    RUNNING
-        .with(|r| {
-            r.borrow()
-                .iter()
-                .map(|d| d.item.id.clone())
-                .collect::<Vec<_>>()
-        })
-        .into_iter()
-        .chain(QUEUE.with(|q| q.borrow().iter().map(|i| i.id.clone()).collect::<Vec<_>>()))
-        .collect()
+    let mut ids: Vec<String> =
+        RUNNING.with(|r| r.borrow().iter().map(|d| d.item.id.clone()).collect());
+    QUEUE.with(|q| ids.extend(q.borrow().iter().map(|i| i.id.clone())));
+    ids.push(String::new());
+    PAUSED.with(|p| ids.extend(p.borrow().iter().map(|i| i.id.clone())));
+    ids
 }
 
 const PROGRESS_KEY: &str = "embyclientplus-download-progress";
@@ -245,18 +387,33 @@ fn fill(ui: &Ui, content: &gtk::Box) {
     clear(content);
     let running: Vec<Running> = RUNNING.with(|r| r.borrow().clone());
     let waiting: Vec<BaseItem> = QUEUE.with(|q| q.borrow().iter().cloned().collect());
+    let paused: Vec<BaseItem> = PAUSED.with(|p| p.borrow().clone());
     let finished = crate::downloads::list();
     let folder = crate::downloads::folder();
+    let used: u64 = finished.iter().map(Download::size).sum();
+    let mut storage = format!(
+        "Saved in {} · {} used",
+        folder.display(),
+        super::format_size(used)
+    );
+    if let Some(free) = crate::downloads::free_space(&folder) {
+        storage.push_str(&format!(" · {} free", super::format_size(free)));
+    }
     content.append(
         &gtk::Label::builder()
-            .label(format!("Saved in {}", folder.display()))
+            .label(storage)
             .xalign(0.0)
             .wrap(true)
             .css_classes(["dim-label", "caption"])
             .build(),
     );
     let jobs = crate::auto_downloads::for_user(&ui.user_id());
-    if running.is_empty() && waiting.is_empty() && finished.is_empty() && jobs.is_empty() {
+    if running.is_empty()
+        && waiting.is_empty()
+        && paused.is_empty()
+        && finished.is_empty()
+        && jobs.is_empty()
+    {
         content.append(
             &adw::StatusPage::builder()
                 .icon_name(crate::ui::icons::DOWNLOAD)
@@ -271,26 +428,57 @@ fn fill(ui: &Ui, content: &gtk::Box) {
         return;
     }
     if !jobs.is_empty() {
-        let list = section(content, "Auto-download");
+        let list = section(content, "Auto-download", None);
         for job in &jobs {
             list.append(&job_row(ui, job));
         }
     }
     if !running.is_empty() {
-        let list = section(content, "Downloading");
+        let list = section(content, "Downloading", None);
         for download in running {
             list.append(&running_row(&download));
         }
     }
     if !waiting.is_empty() {
-        let list = section(content, "Waiting");
+        let list = section(content, "Waiting", None);
         for item in waiting {
             list.append(&waiting_row(ui, &item));
         }
     }
-    if !finished.is_empty() {
-        let list = section(content, "Downloaded");
-        for download in finished {
+    if !paused.is_empty() {
+        let resume_all = gtk::Button::builder()
+            .label("Resume All")
+            .css_classes(["flat"])
+            .build();
+        let weak = ui.downgrade();
+        resume_all.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                resume(&ui, None);
+            }
+        });
+        let list = section(content, "Paused", Some(resume_all.upcast_ref()));
+        for item in paused {
+            list.append(&paused_row(ui, &item));
+        }
+    }
+    // Downloaded, a section per series (with its size), movies last.
+    let mut groups: Vec<(String, Vec<Download>)> = Vec::new();
+    for download in finished {
+        let name = match (&download.item.series_name, download.item.item_type.as_str()) {
+            (Some(series), "Episode") => series.clone(),
+            _ => "Movies and Videos".to_string(),
+        };
+        match groups.iter_mut().find(|(n, _)| *n == name) {
+            Some((_, list)) => list.push(download),
+            None => groups.push((name, vec![download])),
+        }
+    }
+    groups.sort_by_key(|(name, _)| name == "Movies and Videos");
+    for (name, downloads) in groups {
+        let size: u64 = downloads.iter().map(Download::size).sum();
+        let title = format!("{name} · {}", super::format_size(size));
+        let list = section(content, &title, None);
+        for download in downloads {
             list.append(&finished_row(ui, &download));
         }
     }
@@ -299,20 +487,37 @@ fn fill(ui: &Ui, content: &gtk::Box) {
     }
 }
 
-fn section(content: &gtk::Box, title: &str) -> gtk::ListBox {
-    content.append(
+/// A heading (with an optional button at its end) over a list.
+fn section(content: &gtk::Box, title: &str, action: Option<&gtk::Widget>) -> gtk::ListBox {
+    let heading = gtk::Box::builder().spacing(12).build();
+    heading.append(
         &gtk::Label::builder()
             .label(title)
             .xalign(0.0)
+            .hexpand(true)
             .css_classes(["heading"])
             .build(),
     );
+    if let Some(action) = action {
+        heading.append(action);
+    }
+    content.append(&heading);
     let list = gtk::ListBox::builder()
         .selection_mode(gtk::SelectionMode::None)
         .css_classes(["boxed-list"])
         .build();
     content.append(&list);
     list
+}
+
+/// A flat icon button for a row's end.
+fn row_button(icon: &str, tooltip: &str) -> gtk::Button {
+    gtk::Button::builder()
+        .icon_name(icon)
+        .tooltip_text(tooltip)
+        .valign(gtk::Align::Center)
+        .css_classes(["flat"])
+        .build()
 }
 
 fn title_of(item: &BaseItem) -> String {
@@ -335,14 +540,16 @@ fn running_row(download: &Running) -> adw::ActionRow {
         bar.set_fraction(fraction);
     }
     row.add_suffix(&bar);
-    let cancel = gtk::Button::builder()
-        .icon_name(crate::ui::icons::REMOVE)
-        .tooltip_text("Cancel")
-        .valign(gtk::Align::Center)
-        .css_classes(["flat"])
-        .build();
-    let cancelled = download.cancelled.clone();
-    cancel.connect_clicked(move |_| cancelled.store(true, Ordering::Relaxed));
+    let pause_button = row_button(crate::ui::icons::PAUSE, "Pause (keeps what's downloaded)");
+    let id = download.item.id.clone();
+    pause_button.connect_clicked(move |_| pause(&id));
+    row.add_suffix(&pause_button);
+    let cancel = row_button(
+        crate::ui::icons::REMOVE,
+        "Cancel and delete the partial download",
+    );
+    let id = download.item.id.clone();
+    cancel.connect_clicked(move |_| cancel_running(&id));
     row.add_suffix(&cancel);
     // SAFETY: only ever stored and read as this type.
     unsafe {
@@ -355,17 +562,40 @@ fn waiting_row(ui: &Ui, item: &BaseItem) -> adw::ActionRow {
     let row = adw::ActionRow::builder()
         .title(glib::markup_escape_text(&title_of(item)))
         .build();
-    let cancel = gtk::Button::builder()
-        .icon_name(crate::ui::icons::REMOVE)
-        .tooltip_text("Don't download")
-        .valign(gtk::Align::Center)
-        .css_classes(["flat"])
-        .build();
+    let cancel = row_button(crate::ui::icons::REMOVE, "Don't download");
     let (weak, id) = (ui.downgrade(), item.id.clone());
     cancel.connect_clicked(move |_| {
         QUEUE.with(|q| q.borrow_mut().retain(|i| i.id != id));
         if let Some(ui) = weak.upgrade() {
+            save_state(&ui);
             ui.data_changed();
+        }
+    });
+    row.add_suffix(&cancel);
+    row
+}
+
+fn paused_row(ui: &Ui, item: &BaseItem) -> adw::ActionRow {
+    let row = adw::ActionRow::builder()
+        .title(glib::markup_escape_text(&title_of(item)))
+        .subtitle("Continues where it stopped")
+        .build();
+    let play = row_button(crate::ui::icons::PLAY, "Resume");
+    let (weak, id) = (ui.downgrade(), item.id.clone());
+    play.connect_clicked(move |_| {
+        if let Some(ui) = weak.upgrade() {
+            resume(&ui, Some(&id));
+        }
+    });
+    row.add_suffix(&play);
+    let cancel = row_button(
+        crate::ui::icons::REMOVE,
+        "Cancel and delete the partial download",
+    );
+    let (weak, id) = (ui.downgrade(), item.id.clone());
+    cancel.connect_clicked(move |_| {
+        if let Some(ui) = weak.upgrade() {
+            cancel_paused(&ui, &id);
         }
     });
     row.add_suffix(&cancel);
@@ -591,8 +821,10 @@ pub fn auto_dialog(ui: &Ui, item: &BaseItem, parent: &impl IsA<gtk::Widget>) {
     dialog.present(Some(parent));
 }
 
-/// Checks auto-downloads now, then every half hour while signed in.
+/// At sign-in: carries on with last time's downloads, then checks
+/// auto-downloads now and every half hour while signed in.
 pub fn start_auto(ui: &Ui) {
+    restore(ui);
     sync_auto(ui);
     let weak = ui.downgrade();
     glib::timeout_add_seconds_local(30 * 60, move || match weak.upgrade() {
@@ -665,7 +897,12 @@ pub fn sync_auto(ui: &Ui) {
                     }
                 })
                 .count();
-            let queued = plan.download.iter().filter(|e| enqueue(e)).count();
+            // A paused episode stays paused (by you, or for disk space).
+            let queued = plan
+                .download
+                .iter()
+                .filter(|e| !is_paused(&e.id) && enqueue(e))
+                .count();
             let mut news = Vec::new();
             match queued {
                 0 => {}

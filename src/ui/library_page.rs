@@ -452,8 +452,7 @@ fn sortable_grid(ui: &Ui, base: ItemQuery) -> gtk::Box {
 fn sortable_grid_of(ui: &Ui, base: ItemQuery, shape: Shape) -> gtk::Box {
     let (grid, store) = library::grid(ui, shape);
     let count = gtk::Label::builder()
-        .xalign(0.0)
-        .hexpand(true)
+        .margin_end(6)
         .css_classes(["dim-label"])
         .build();
     let filter = gtk::DropDown::from_strings(&FILTERS.map(|(label, _)| label));
@@ -465,8 +464,10 @@ fn sortable_grid_of(ui: &Ui, base: ItemQuery, shape: Shape) -> gtk::Box {
         .tooltip_text("Sort order")
         .build();
 
+    // Count, filter and sort together in the middle, over the centred grid.
     let bar = gtk::Box::builder()
         .spacing(6)
+        .halign(gtk::Align::Center)
         .margin_start(18)
         .margin_end(18)
         .margin_top(6)
@@ -646,6 +647,7 @@ fn chips(ui: &Ui, library_id: &str, item_type: &'static str, kind: Chips) -> gtk
     let flow = gtk::FlowBox::builder()
         .selection_mode(gtk::SelectionMode::None)
         .activate_on_single_click(true)
+        .halign(gtk::Align::Center)
         .homogeneous(true)
         .min_children_per_line(1)
         .max_children_per_line(8)
