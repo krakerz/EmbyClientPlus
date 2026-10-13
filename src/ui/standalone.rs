@@ -375,29 +375,35 @@ fn open_file(state: &Rc<State>, anchor: &gtk::Button) {
 }
 
 fn open_url(state: &Rc<State>, anchor: &gtk::Button) {
-    let entry = gtk::Entry::builder()
-        .placeholder_text("https://…")
-        .activates_default(true)
+    let entry = adw::EntryRow::builder().title("Link").build();
+    let link = adw::PreferencesGroup::builder()
+        .description("A video file or stream link, or a video page (with yt-dlp installed)")
         .build();
-    let dialog = adw::AlertDialog::builder()
-        .heading("Open URL")
-        .body("A video file or stream link, or a video page (with yt-dlp installed)")
-        .extra_child(&entry)
-        .default_response("open")
-        .close_response("cancel")
-        .build();
-    dialog.add_responses(&[("cancel", "Cancel"), ("open", "Open")]);
-    dialog.set_response_appearance("open", adw::ResponseAppearance::Suggested);
+    link.add(&entry);
+    let open = super::action_row("Open", "suggested-action");
+    let dialog = super::form_dialog("Open URL", &[&link, &super::actions_group(&[&open])]);
     let state = Rc::downgrade(state);
-    dialog.connect_response(None, move |_, response| {
-        let link = entry.text().trim().to_string();
-        if response == "open"
-            && !link.is_empty()
-            && let Some(state) = state.upgrade()
-        {
-            play(&state, crate::local::media(&link));
+    let go = Rc::new(glib::clone!(
+        #[weak]
+        entry,
+        #[weak]
+        dialog,
+        move || {
+            let link = entry.text().trim().to_string();
+            if link.is_empty() {
+                return;
+            }
+            dialog.close();
+            if let Some(state) = state.upgrade() {
+                play(&state, crate::local::media(&link));
+            }
         }
+    ));
+    open.connect_activated({
+        let go = go.clone();
+        move |_| go()
     });
+    entry.connect_entry_activated(move |_| go());
     dialog.present(Some(anchor));
 }
 

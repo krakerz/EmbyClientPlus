@@ -3,6 +3,7 @@
 
 mod account;
 mod auth;
+mod auto_downloads;
 #[cfg(any(windows, target_os = "macos"))]
 mod awake;
 mod cli;

@@ -409,6 +409,9 @@ fn episode_row(ui: &Ui, episode: &BaseItem) -> adw::ActionRow {
                 .build(),
         );
     }
+    if crate::downloads::is_downloaded(&episode.id) {
+        frame.add_overlay(&super::download_badge());
+    }
     images::load(ui, &thumb, episode.landscape(), 320);
     row.add_prefix(&frame);
     if episode.played() {
@@ -509,6 +512,7 @@ fn download_button(ui: &Ui, view: &Rc<SeriesView>, series: &BaseItem) -> gtk::Me
     let menu = gtk::gio::Menu::new();
     menu.append(Some("Download Series"), Some("series-download.series"));
     menu.append(Some("Download This Season"), Some("series-download.season"));
+    menu.append(Some("Auto-download…"), Some("series-download.auto"));
     let button = gtk::MenuButton::builder()
         .icon_name(crate::ui::icons::DOWNLOAD)
         .tooltip_text("Download")
@@ -540,8 +544,16 @@ fn download_button(ui: &Ui, view: &Rc<SeriesView>, series: &BaseItem) -> gtk::Me
             super::downloads::start_episodes_of(&ui, &season);
         }
     });
+    let auto = gtk::gio::SimpleAction::new("auto", None);
+    let (weak, target, anchor) = (ui.downgrade(), series.clone(), button.downgrade());
+    auto.connect_activate(move |_, _| {
+        if let (Some(ui), Some(anchor)) = (weak.upgrade(), anchor.upgrade()) {
+            ui.auto_download(&target, &anchor);
+        }
+    });
     group.add_action(&whole);
     group.add_action(&season);
+    group.add_action(&auto);
     button.insert_action_group("series-download", Some(&group));
     button
 }

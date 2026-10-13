@@ -141,6 +141,18 @@ popover modelbutton:focus-visible {
     padding: 2px;
     -gtk-icon-size: 10px;
 }
+/* Downloaded: a badge on the artwork and a green button on the page. */
+.download-badge {
+    background: rgba(0, 0, 0, 0.7);
+    color: @success_color;
+    border-radius: 999px;
+    padding: 4px;
+    -gtk-icon-size: 12px;
+}
+button.downloaded {
+    background: @success_color;
+    color: @window_bg_color;
+}
 .unplayed-count {
     color: @accent_color;
     font-weight: bold;
@@ -532,6 +544,7 @@ fn show_main(state: &Rc<State>, session: Session) {
             }
         });
     }
+    ui.start_auto_downloads();
     state.ui.replace(Some(ui));
     state.refresh_legend();
     state.login.replace(None);

@@ -2,10 +2,15 @@
 
 ## [Unreleased]
 
-## [1.14.2] — 2026-10-13
+## [1.15.0] — 2026-10-13
 
 ### Added
+- Auto-download for series: "Auto-download…" in a series' Download menu (or its card's menu) keeps its next unwatched episodes downloaded, 1 to 20 of them, as the usual original files, and can delete episodes once they're watched. It checks when the app starts, every half hour, and shortly after you stop watching something; the Downloads page lists each series' setting to change or stop it.
+- Downloaded titles are marked: a small download badge on their artwork in episode lists and on movie and episode cards. Movie and episode pages have a download button beside the favourite star: it downloads the title, shows a spinner while it's queued or downloading (opening Downloads), and turns green once downloaded, offering to delete the download.
 - Steam library artwork (cover, wide cover, background and logo) for adding the app as a non-Steam game: in the Linux archive's `steam-library` folder, and as its own download on the release page.
+
+### Changed
+- Every dialog now looks like Preferences and Profile, in the app's colours with a close button at the top: Add to Playlist, Open URL, the SVP folder, and the sign-in-again prompt no longer use the plain grey pop-up style.
 
 ## [1.14.1] — 2026-10-13
 

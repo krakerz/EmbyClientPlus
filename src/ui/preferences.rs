@@ -1126,22 +1126,24 @@ fn do_not_disturb_row(settings: &Settings) -> adw::ExpanderRow {
 /// The server keeps the app name it saw at sign-in, so a new identity
 /// only shows after signing in again: offer that now.
 fn ask_sign_out(anchor: &adw::SwitchRow, home: &gtk::Widget) {
-    let dialog = adw::AlertDialog::builder()
-        .heading("Sign in again?")
-        .body(
+    let message = adw::PreferencesGroup::builder()
+        .title("Sign in again?")
+        .description(
             "The server shows the new name after you sign in again. Sign out now? Downloads and \
              settings are kept.",
         )
-        .default_response("later")
-        .close_response("later")
         .build();
-    dialog.add_responses(&[("later", "Later"), ("sign-out", "Sign Out")]);
-    dialog.set_response_appearance("sign-out", adw::ResponseAppearance::Suggested);
+    let sign_out = super::action_row("Sign Out", "suggested-action");
+    let dialog = super::form_dialog(
+        "Sign In Again",
+        &[&message, &super::actions_group(&[&sign_out])],
+    );
     let home = home.downgrade();
     let anchor_weak = anchor.downgrade();
-    dialog.connect_response(None, move |_, response| {
-        if response != "sign-out" {
-            return;
+    let dialog_weak = dialog.downgrade();
+    sign_out.connect_activated(move |_| {
+        if let Some(dialog) = dialog_weak.upgrade() {
+            dialog.close();
         }
         // Close Preferences, then use Home's own Log Out.
         if let Some(prefs) = anchor_weak
@@ -1164,37 +1166,40 @@ fn ask_svp_folder(anchor: &gtk::Button, row: &adw::ActionRow, reset: &gtk::Butto
     let current = crate::svp::install_dir()
         .map(|dir| dir.display().to_string())
         .unwrap_or_default();
-    let entry = gtk::Entry::builder()
+    let entry = adw::EntryRow::builder()
+        .title("Folder")
         .text(current)
-        .activates_default(true)
         .build();
-    let dialog = adw::AlertDialog::builder()
-        .heading("SVP folder")
-        .body("Where SVP 4 is installed")
-        .extra_child(&entry)
-        .default_response("save")
-        .close_response("cancel")
+    let folder = adw::PreferencesGroup::builder()
+        .description("Where SVP 4 is installed")
         .build();
-    dialog.add_responses(&[("cancel", "Cancel"), ("save", "Save")]);
-    dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
-    dialog.connect_response(
-        None,
-        glib::clone!(
-            #[weak]
-            row,
-            #[weak]
-            reset,
-            #[weak]
-            entry,
-            move |_, response| {
-                if response == "save" {
-                    let value = entry.text().trim().to_string();
-                    save(|s| s.frame_gen.svp_dir = value);
-                    refresh_svp_folder(&row, &reset);
-                }
-            }
-        ),
+    folder.add(&entry);
+    let save_row = super::action_row("Save", "suggested-action");
+    let dialog = super::form_dialog(
+        "SVP Folder",
+        &[&folder, &super::actions_group(&[&save_row])],
     );
+    let apply = std::rc::Rc::new(glib::clone!(
+        #[weak]
+        row,
+        #[weak]
+        reset,
+        #[weak]
+        entry,
+        #[weak]
+        dialog,
+        move || {
+            let value = entry.text().trim().to_string();
+            save(|s| s.frame_gen.svp_dir = value);
+            refresh_svp_folder(&row, &reset);
+            dialog.close();
+        }
+    ));
+    save_row.connect_activated({
+        let apply = apply.clone();
+        move |_| apply()
+    });
+    entry.connect_entry_activated(move |_| apply());
     dialog.present(Some(anchor));
 }
 
