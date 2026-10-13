@@ -1,6 +1,7 @@
 //! Audio/subtitle track choice: matching remembered and preferred
 //! languages against what mpv actually loaded, and labelling tracks.
 
+use crate::config::SubtitleMode;
 use crate::emby::models::MediaStream;
 use crate::player::{Track, TrackKind};
 
@@ -39,12 +40,19 @@ fn same_language(a: Option<&str>, b: &str) -> bool {
 
 /// The audio track to start with: the language remembered for this title,
 /// else the configured preference; `None` keeps mpv's own pick.
-pub fn initial_audio(tracks: &[Track], remembered: Option<&str>, preferred: &str) -> Option<i64> {
+pub fn initial_audio(
+    tracks: &[Track],
+    remembered: Option<&str>,
+    preferred: &str,
+    play_default: bool,
+) -> Option<i64> {
     let audio: Vec<&Track> = tracks
         .iter()
         .filter(|t| t.kind == Some(TrackKind::Audio))
         .collect();
-    [remembered, Some(preferred)]
+    // "Play the default track": the file's choice beats the language.
+    let preferred = (!play_default).then_some(preferred);
+    [remembered, preferred]
         .into_iter()
         .flatten()
         .find_map(|lang| {
@@ -64,13 +72,17 @@ pub enum SubtitleStart {
     Select(i64),
 }
 
-/// Remembered choice wins ("off" included); otherwise the preferred
-/// language if present. With `forced_only`, only forced tracks qualify.
+/// Remembered choice wins ("off" included); otherwise `mode` decides
+/// (Emby's subtitle modes), with the preferred language. `forced_only`
+/// (a per-title choice) narrows it to forced tracks. `audio_language`:
+/// the audio track playing, for Smart.
 pub fn initial_subtitle(
     tracks: &[Track],
     remembered: Option<&str>,
     forced_only: bool,
     preferred: &str,
+    mode: SubtitleMode,
+    audio_language: Option<&str>,
 ) -> SubtitleStart {
     if remembered == Some(SUBTITLES_OFF) {
         return SubtitleStart::Off;
@@ -78,24 +90,41 @@ pub fn initial_subtitle(
     let subtitles: Vec<&Track> = tracks
         .iter()
         .filter(|t| t.kind == Some(TrackKind::Subtitle))
-        .filter(|t| !forced_only || t.forced)
         .collect();
-    let pick = |lang: &str| {
+    let pick = |lang: &str, forced: bool| {
         let matching: Vec<&&Track> = subtitles
             .iter()
+            .filter(|t| !forced || t.forced)
             .filter(|t| same_language(t.lang.as_deref(), lang))
             .collect();
         // Full subtitles over signs/songs-only tracks unless forced is wanted.
         matching
             .iter()
-            .find(|t| t.forced == forced_only)
+            .find(|t| t.forced == forced)
             .or(matching.first())
             .map(|t| t.id)
     };
-    match remembered.and_then(pick).or_else(|| pick(preferred)) {
-        Some(id) => SubtitleStart::Select(id),
-        None if forced_only => SubtitleStart::Off,
-        None => SubtitleStart::Keep,
+    if let Some(id) = remembered.and_then(|lang| pick(lang, forced_only)) {
+        return SubtitleStart::Select(id);
+    }
+    let mode = if forced_only {
+        SubtitleMode::OnlyForced
+    } else {
+        mode
+    };
+    let found = |id: Option<i64>, otherwise| id.map_or(otherwise, SubtitleStart::Select);
+    match mode {
+        SubtitleMode::None => SubtitleStart::Off,
+        SubtitleMode::Default => SubtitleStart::Keep,
+        SubtitleMode::OnlyForced => found(pick(preferred, true), SubtitleStart::Off),
+        SubtitleMode::Always | SubtitleMode::HearingImpaired => {
+            found(pick(preferred, false), SubtitleStart::Keep)
+        }
+        // Audio already in the preferred language: only signs and songs.
+        SubtitleMode::Smart if same_language(audio_language, preferred) => {
+            found(pick(preferred, true), SubtitleStart::Off)
+        }
+        SubtitleMode::Smart => found(pick(preferred, false), SubtitleStart::Keep),
     }
 }
 
@@ -200,39 +229,78 @@ mod tests {
 
     #[test]
     fn remembered_audio_beats_preference() {
-        assert_eq!(initial_audio(&sample(), Some("ja"), "eng"), Some(1));
-        assert_eq!(initial_audio(&sample(), None, "eng"), Some(2));
-        assert_eq!(initial_audio(&sample(), None, "fra"), None);
+        assert_eq!(initial_audio(&sample(), Some("ja"), "eng", false), Some(1));
+        assert_eq!(initial_audio(&sample(), None, "eng", false), Some(2));
+        assert_eq!(initial_audio(&sample(), None, "fra", false), None);
     }
 
     #[test]
     fn subtitles_prefer_full_tracks_over_forced() {
         assert_eq!(
-            initial_subtitle(&sample(), None, false, "eng"),
+            initial_subtitle(&sample(), None, false, "eng", SubtitleMode::Always, None),
             SubtitleStart::Select(2)
         );
         assert_eq!(
-            initial_subtitle(&sample(), None, true, "eng"),
+            initial_subtitle(&sample(), None, true, "eng", SubtitleMode::Always, None),
             SubtitleStart::Select(1)
+        );
+    }
+
+    #[test]
+    fn subtitle_modes() {
+        let start = |mode, audio| initial_subtitle(&sample(), None, false, "eng", mode, audio);
+        assert_eq!(start(SubtitleMode::None, None), SubtitleStart::Off);
+        assert_eq!(start(SubtitleMode::Default, None), SubtitleStart::Keep);
+        assert_eq!(
+            start(SubtitleMode::OnlyForced, None),
+            SubtitleStart::Select(1)
+        );
+        // Smart: foreign audio gets full subtitles, same-language only forced.
+        assert_eq!(
+            start(SubtitleMode::Smart, Some("jpn")),
+            SubtitleStart::Select(2)
+        );
+        assert_eq!(
+            start(SubtitleMode::Smart, Some("en")),
+            SubtitleStart::Select(1)
+        );
+        assert_eq!(
+            initial_audio(&sample(), None, "eng", true),
+            None,
+            "the file's default track"
         );
     }
 
     #[test]
     fn remembered_subtitle_choice_including_off() {
         assert_eq!(
-            initial_subtitle(&sample(), Some("ind"), false, "eng"),
+            initial_subtitle(
+                &sample(),
+                Some("ind"),
+                false,
+                "eng",
+                SubtitleMode::Always,
+                None
+            ),
             SubtitleStart::Select(3)
         );
         assert_eq!(
-            initial_subtitle(&sample(), Some(SUBTITLES_OFF), false, "eng"),
+            initial_subtitle(
+                &sample(),
+                Some(SUBTITLES_OFF),
+                false,
+                "eng",
+                SubtitleMode::Always,
+                None
+            ),
             SubtitleStart::Off
         );
         assert_eq!(
-            initial_subtitle(&sample(), None, false, "kor"),
+            initial_subtitle(&sample(), None, false, "kor", SubtitleMode::Always, None),
             SubtitleStart::Keep
         );
         assert_eq!(
-            initial_subtitle(&sample(), None, true, "kor"),
+            initial_subtitle(&sample(), None, true, "kor", SubtitleMode::Always, None),
             SubtitleStart::Off
         );
     }

@@ -58,7 +58,8 @@ impl Options {
             captions: settings
                 .playback
                 .trailer_captions
-                .then(|| settings.subtitles.preferred_language.clone()),
+                .then(|| crate::account::playback().subtitle_language)
+                .filter(|language| !language.is_empty()),
         }
     }
 }

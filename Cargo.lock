@@ -601,9 +601,10 @@ dependencies = [
 
 [[package]]
 name = "embyclientplus"
-version = "1.13.1"
+version = "1.14.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "directories",
  "embed-resource",
  "gdk4-win32",

@@ -132,6 +132,13 @@ impl EmbyClient {
         Ok(result.items)
     }
 
+    /// Every library the user can see, including ones hidden from Home
+    /// (which `views` leaves out).
+    pub async fn media_folders(&self) -> Result<Vec<BaseItem>> {
+        let result: QueryResult<BaseItem> = self.get("/emby/Library/MediaFolders").await?;
+        Ok(result.items)
+    }
+
     /// The user's library order and hidden libraries.
     pub async fn view_settings(&self, user_id: &str) -> Result<crate::emby::models::ViewSettings> {
         let user: crate::emby::models::UserWithSettings =
