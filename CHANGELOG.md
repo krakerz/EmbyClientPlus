@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [1.18.0] — 2026-10-17
+
+### Added
+- Controller: the right stick scrubs in the player. Tilt it to move along the seek bar with the preview (further is faster); it seeks there 2 seconds after you let go.
+
+### Changed
+- Controller: ← / → in the player always seek 10 seconds right away; holding them no longer starts a scrub, so quick taps never wait for one to land. The keyboard's arrow keys still scrub when held.
+
 ## [1.17.0] — 2026-10-17
 
 ### Changed

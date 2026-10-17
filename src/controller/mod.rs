@@ -19,6 +19,8 @@ use crate::config::Settings;
 /// it must fall back under to release (so it doesn't flicker).
 const STICK_PRESS: f32 = 0.5;
 const STICK_RELEASE: f32 = 0.3;
+/// Right-stick tilt below this is noise (a resting stick isn't centred).
+const SCRUB_DEADZONE: f32 = 0.2;
 const POLL: Duration = Duration::from_millis(16);
 
 /// What the input thread reports.
@@ -27,6 +29,8 @@ pub enum PadEvent {
     Pressed(Pad),
     /// A held direction repeating (see `Repeater`).
     Repeated(Pad),
+    /// Right stick left/right, -1.0..=1.0 past the deadzone (0.0: let go).
+    Scrub(f32),
     Connected(String),
     Disconnected,
 }
@@ -34,6 +38,7 @@ pub enum PadEvent {
 /// Gets each press; `true` for a held direction's repeats.
 type Handler = Box<dyn Fn(Pad, bool)>;
 type Capture = Box<dyn FnOnce(Pad)>;
+type ScrubHandler = Box<dyn Fn(f32)>;
 
 thread_local! {
     static HUB: Hub = Hub::default();
@@ -43,6 +48,7 @@ thread_local! {
 #[derive(Default)]
 struct Hub {
     handler: RefCell<Option<Handler>>,
+    scrub: RefCell<Option<ScrubHandler>>,
     /// A one-shot "press a button…" listener (Preferences remapping), with
     /// the token that cancels exactly this one.
     capture: RefCell<Option<(u64, Capture)>>,
@@ -134,8 +140,21 @@ impl Hub {
                     handler(pad, true);
                 }
             }
+            PadEvent::Scrub(tilt) => {
+                if self.capture.borrow().is_none()
+                    && let Some(handler) = self.scrub.borrow().as_ref()
+                {
+                    handler(tilt);
+                }
+            }
         }
     }
+}
+
+/// Right-stick scrubbing goes to `handler` (the stick isn't a button, so
+/// it isn't remappable and never reaches the press handler).
+pub fn on_scrub(handler: impl Fn(f32) + 'static) {
+    HUB.with(|hub| hub.scrub.replace(Some(Box::new(handler))));
 }
 
 /// The action `pad` maps to in `context`.
@@ -200,6 +219,7 @@ fn read_pads(sender: &tokio::sync::mpsc::UnboundedSender<PadEvent>) {
     }
     let mut repeater = Repeater::default();
     let mut stick = StickState::default();
+    let mut scrub = 0.0;
     loop {
         // One event per turn, so held directions still repeat while a
         // noisy stick keeps the queue busy.
@@ -217,6 +237,15 @@ fn read_pads(sender: &tokio::sync::mpsc::UnboundedSender<PadEvent>) {
                 EventType::ButtonReleased(button, _) => {
                     if let Some(pad) = pad_for(button) {
                         repeater.release(pad);
+                    }
+                }
+                EventType::AxisChanged(Axis::RightStickX, value, _) => {
+                    let tilt = scrub_tilt(value);
+                    if tilt != scrub {
+                        scrub = tilt;
+                        if !send(PadEvent::Scrub(tilt)) {
+                            return;
+                        }
                     }
                 }
                 EventType::AxisChanged(axis, value, _) => {
@@ -240,6 +269,10 @@ fn read_pads(sender: &tokio::sync::mpsc::UnboundedSender<PadEvent>) {
                     // left to release it.
                     repeater = Repeater::default();
                     stick = StickState::default();
+                    if scrub != 0.0 {
+                        scrub = 0.0;
+                        send(PadEvent::Scrub(0.0));
+                    }
                     // Another pad still plugged in keeps the legend.
                     let remaining = gilrs
                         .gamepads()
@@ -261,8 +294,9 @@ fn read_pads(sender: &tokio::sync::mpsc::UnboundedSender<PadEvent>) {
     }
 }
 
-/// Testing aid: button names (`A`, `Down`, `LB`, ...), one per line, read
-/// from the FIFO named by `EMBYCLIENTPLUS_FAKE_PAD`, arrive as presses —
+/// Testing aid: button names (`A`, `Down`, `LB`, ...) or `RS <tilt>`, one
+/// per line, read from the FIFO named by `EMBYCLIENTPLUS_FAKE_PAD`, arrive
+/// as presses (or right-stick scrubbing) —
 /// for driving the controller code without a controller.
 fn read_fake_pad(fifo: &std::path::Path, sender: &tokio::sync::mpsc::UnboundedSender<PadEvent>) {
     use std::io::BufRead;
@@ -273,6 +307,13 @@ fn read_fake_pad(fifo: &std::path::Path, sender: &tokio::sync::mpsc::UnboundedSe
             return;
         };
         for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+            // `RS 0.8`: the right stick tilted that far (`RS 0` lets go).
+            if let Some(tilt) = line.strip_prefix("RS ").and_then(|t| t.trim().parse().ok()) {
+                if sender.send(PadEvent::Scrub(tilt)).is_err() {
+                    return;
+                }
+                continue;
+            }
             match Pad::from_name(&line) {
                 Some(pad) => {
                     if sender.send(PadEvent::Pressed(pad)).is_err() {
@@ -305,6 +346,20 @@ fn pad_for(button: Button) -> Option<Pad> {
         Button::DPadRight => Pad::Right,
         _ => return None,
     })
+}
+
+/// The right stick's X axis as a scrub tilt: 0.0 inside the deadzone, else
+/// rescaled to start from 0 at its edge and rounded to 0.05, so a stick
+/// held still doesn't send a stream of tiny changes.
+fn scrub_tilt(value: f32) -> f32 {
+    let magnitude = value.abs();
+    if magnitude < SCRUB_DEADZONE {
+        return 0.0;
+    }
+    let scaled = ((magnitude - SCRUB_DEADZONE) / (1.0 - SCRUB_DEADZONE)).min(1.0);
+    // At least one step, so a tilt just past the deadzone still counts.
+    let stepped = ((scaled * 20.0).round() / 20.0).max(0.05);
+    stepped.copysign(value)
 }
 
 /// Left stick as four virtual direction buttons, with hysteresis.
@@ -366,6 +421,18 @@ mod tests {
             [(Pad::Up, false), (Pad::Down, true)]
         );
         assert!(stick.update(Axis::RightStickX, 1.0).is_empty());
+    }
+
+    #[test]
+    fn scrub_tilt_has_a_deadzone_and_steps() {
+        assert_eq!(scrub_tilt(0.0), 0.0);
+        assert_eq!(scrub_tilt(-0.19), 0.0);
+        assert_eq!(scrub_tilt(0.21), 0.05);
+        assert_eq!(scrub_tilt(1.0), 1.0);
+        assert_eq!(scrub_tilt(-1.0), -1.0);
+        assert_eq!(scrub_tilt(0.6), 0.5);
+        // Jitter on a held stick stays one value.
+        assert_eq!(scrub_tilt(0.61), scrub_tilt(0.6));
     }
 
     #[test]

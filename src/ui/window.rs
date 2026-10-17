@@ -399,6 +399,26 @@ pub fn build(app: &adw::Application, player: Player) -> adw::ApplicationWindow {
         }
     });
 
+    // The right stick scrubs in the player; letting go always gets through,
+    // so a scrub never keeps running.
+    crate::controller::on_scrub({
+        let state = Rc::downgrade(&state);
+        let window = window.downgrade();
+        move |tilt| {
+            let (Some(state), Some(window)) = (state.upgrade(), window.upgrade()) else {
+                return;
+            };
+            let Some(ui) = state.ui.borrow().clone() else {
+                return;
+            };
+            let page = ui.player_page();
+            if tilt == 0.0
+                || (ui.player_visible() && window.visible_dialog().is_none() && !page.menu_open())
+            {
+                page.scrub_stick(tilt);
+            }
+        }
+    });
     super::gamepad::track_focus(&window);
     // Steam's "Exit game", a logout or Ctrl+C: shut down as if the window
     // were closed (final playback report, SVP Manager stopped).

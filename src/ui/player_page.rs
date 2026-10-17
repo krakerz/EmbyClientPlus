@@ -27,8 +27,10 @@ const SEEK_STEP: i32 = 10;
 const ZOOM_STEP: f64 = 0.1;
 /// How often the SVP button re-checks whether SVP attached.
 const SVP_CHECK_INTERVAL: Duration = Duration::from_secs(2);
-/// Holding seek this long starts scrubbing (a tap seeks right away).
+/// Holding an arrow key this long starts scrubbing (a tap seeks right away).
 const HOLD_TO_SCRUB: Duration = Duration::from_secs(1);
+/// How often a tilted right stick moves the scrub target.
+const STICK_TICK: Duration = Duration::from_millis(33);
 /// A scrub lands this long after the target last moved.
 const SCRUB_COMMIT: Duration = Duration::from_secs(2);
 /// Longest gap between auto-repeats of a held key (keyboard repeat
@@ -117,6 +119,10 @@ struct Inner {
     /// last fired, to tell auto-repeat from fresh presses.
     key_held: Cell<Option<(gdk::Key, Instant)>>,
     scrub_timer: RefCell<Option<glib::SourceId>>,
+    /// Right-stick tilt (-1.0..=1.0) and the timer moving the scrub target
+    /// while it's tilted.
+    stick_tilt: Cell<f32>,
+    stick_timer: RefCell<Option<glib::SourceId>>,
     volume_osd_timer: RefCell<Option<glib::SourceId>>,
     svp_checked_at: Cell<Option<Instant>>,
     /// The "SVP Manager isn't running" toast shows once per item.
@@ -203,6 +209,8 @@ impl PlayerPage {
             hold_started: Cell::new(None),
             key_held: Cell::new(None),
             scrub_timer: RefCell::new(None),
+            stick_tilt: Cell::new(0.0),
+            stick_timer: RefCell::new(None),
             volume_osd_timer: RefCell::new(None),
             svp_checked_at: Cell::new(None),
             svp_warned: Cell::new(false),
@@ -260,11 +268,11 @@ impl PlayerPage {
             Action::Leave => inner.pop(),
             Action::SeekBack => {
                 inner.show_osd();
-                inner.seek_by(-SEEK_STEP, repeat);
+                inner.seek_by(-SEEK_STEP, repeat, false);
             }
             Action::SeekForward => {
                 inner.show_osd();
-                inner.seek_by(SEEK_STEP, repeat);
+                inner.seek_by(SEEK_STEP, repeat, false);
             }
             // Volume shows only its own indicator (`flash_volume`), not the
             // whole OSD.
@@ -303,6 +311,11 @@ impl PlayerPage {
         inner.show_osd();
     }
 
+    /// The right stick's tilt (0.0: let go), for scrubbing.
+    pub fn scrub_stick(&self, tilt: f32) {
+        self.inner.scrub_stick(tilt);
+    }
+
     /// Readies the page for `item` before its stream is negotiated.
     pub fn prepare(&self, item: &BaseItem, quality: Quality, handlers: Handlers) {
         self.inner.osd.preview.clear();
@@ -325,6 +338,7 @@ impl PlayerPage {
             self.inner.controls_mode.set(false);
         }
         // A scrub still waiting to land belongs to the previous video.
+        self.inner.stop_stick();
         self.inner.scrub_target.set(None);
         if let Some(pending) = self.inner.scrub_timer.take() {
             pending.remove();
@@ -1159,6 +1173,7 @@ impl Inner {
                 if let Some(tick) = inner.tick.take() {
                     tick.remove();
                 }
+                inner.stop_stick();
                 inner.set_fullscreen(false);
                 inner.keep_screen_on(false);
                 #[cfg(target_os = "linux")]
@@ -1740,11 +1755,13 @@ impl Inner {
     }
 
     /// A relative seek (controller or arrow keys), previewed on the bar.
-    /// A press seeks at once. Held for [`HOLD_TO_SCRUB`], it scrubs: the
-    /// target moves along the bar with the preview, and mpv seeks there
-    /// once nothing has moved it for [`SCRUB_COMMIT`]. Presses while
-    /// scrubbing move the target too.
-    fn seek_by(self: &Rc<Self>, seconds: i32, repeat: bool) {
+    /// A press seeks at once. With `hold_scrubs` (arrow keys), holding it
+    /// for [`HOLD_TO_SCRUB`] scrubs: the target moves along the bar with the
+    /// preview, and mpv seeks there once nothing has moved it for
+    /// [`SCRUB_COMMIT`]; presses while scrubbing move the target too. The
+    /// controller scrubs with the right stick instead, so its presses always
+    /// seek right away (one waiting to land lands with the press).
+    fn seek_by(self: &Rc<Self>, seconds: i32, repeat: bool, hold_scrubs: bool) {
         let (Some(position), Some(duration)) = (self.player.position(), self.player.duration())
         else {
             if !repeat {
@@ -1752,6 +1769,28 @@ impl Inner {
             }
             return;
         };
+        if !hold_scrubs {
+            if repeat {
+                return;
+            }
+            match self.scrub_target.take() {
+                Some(from) => {
+                    if let Some(pending) = self.scrub_timer.take() {
+                        pending.remove();
+                    }
+                    let target = (from + f64::from(seconds)).clamp(0.0, duration);
+                    self.seeked_at.set(Some(Instant::now()));
+                    warn(self.player.seek_absolute(target));
+                    self.preview_at(target, true);
+                }
+                None => {
+                    warn(self.player.seek_relative(seconds));
+                    let target = (position + f64::from(seconds)).clamp(0.0, duration);
+                    self.preview_at(target, true);
+                }
+            }
+            return;
+        }
         let now = Instant::now();
         if !repeat {
             self.hold_started.set(Some(now));
@@ -1779,6 +1818,12 @@ impl Inner {
         self.scrub_target.set(Some(target));
         self.osd.seek.set_value(target);
         self.preview_at(target, false);
+        self.land_scrub_later();
+    }
+
+    /// Seeks to the scrub target once [`SCRUB_COMMIT`] passes with no move
+    /// (each call restarts the wait).
+    fn land_scrub_later(self: &Rc<Self>) {
         if let Some(pending) = self.scrub_timer.take() {
             pending.remove();
         }
@@ -1793,6 +1838,62 @@ impl Inner {
             }
         });
         self.scrub_timer.replace(Some(pending));
+    }
+
+    /// Right-stick scrubbing: while it's tilted the target moves along the
+    /// bar, faster the further it's pushed, and mpv seeks there
+    /// [`SCRUB_COMMIT`] after it's let go (tilting again in that time
+    /// carries on from the target).
+    fn scrub_stick(self: &Rc<Self>, tilt: f32) {
+        self.stick_tilt.set(tilt);
+        if tilt == 0.0 {
+            if let Some(timer) = self.stick_timer.take() {
+                timer.remove();
+                if self.scrub_target.get().is_some() {
+                    self.land_scrub_later();
+                }
+            }
+            return;
+        }
+        if self.stick_timer.borrow().is_some() || self.player.duration().is_none() {
+            return;
+        }
+        // Moving again: it lands after the next let-go.
+        if let Some(pending) = self.scrub_timer.take() {
+            pending.remove();
+        }
+        let weak = Rc::downgrade(self);
+        let timer = glib::timeout_add_local(STICK_TICK, move || {
+            let Some(inner) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            inner.stick_step();
+            glib::ControlFlow::Continue
+        });
+        self.stick_timer.replace(Some(timer));
+        self.stick_step();
+    }
+
+    fn stick_step(self: &Rc<Self>) {
+        let (Some(position), Some(duration)) = (self.player.position(), self.player.duration())
+        else {
+            return;
+        };
+        let rate = scrub_rate(f64::from(self.stick_tilt.get()), duration);
+        let from = self.scrub_target.get().unwrap_or(position);
+        let target = (from + rate * STICK_TICK.as_secs_f64()).clamp(0.0, duration);
+        self.scrub_target.set(Some(target));
+        self.osd.seek.set_value(target);
+        self.show_osd();
+        self.preview_at(target, false);
+    }
+
+    /// Drops a stick scrub in progress (a new video, the player left).
+    fn stop_stick(&self) {
+        self.stick_tilt.set(0.0);
+        if let Some(timer) = self.stick_timer.take() {
+            timer.remove();
+        }
     }
 
     /// Whether this press of `key` is auto-repeat: the key hasn't been
@@ -1844,11 +1945,11 @@ impl Inner {
             KeyAction::PlayPause => warn(player.toggle_pause()),
             KeyAction::SeekBack => {
                 self.show_osd();
-                self.seek_by(-SEEK_STEP, self.key_repeating(key));
+                self.seek_by(-SEEK_STEP, self.key_repeating(key), true);
             }
             KeyAction::SeekForward => {
                 self.show_osd();
-                self.seek_by(SEEK_STEP, self.key_repeating(key));
+                self.seek_by(SEEK_STEP, self.key_repeating(key), true);
             }
             // Volume shows only its own indicator (`flash_volume`).
             KeyAction::VolumeUp => {
@@ -2239,5 +2340,28 @@ fn set_state(actions: &gio::SimpleActionGroup, name: &str, value: glib::Variant)
 fn warn(result: anyhow::Result<()>) {
     if let Err(e) = result {
         tracing::warn!("{e:#}");
+    }
+}
+
+/// Seconds of video the scrub target moves per second at `tilt`: squared,
+/// for fine control near the centre; at full tilt it crosses the whole
+/// video in 30 s, but never slower than a minute per second.
+fn scrub_rate(tilt: f64, duration: f64) -> f64 {
+    tilt * tilt.abs() * (duration / 30.0).max(60.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scrub_speed_follows_tilt_and_length() {
+        assert_eq!(scrub_rate(0.0, 7200.0), 0.0);
+        // Full tilt: a 2 h film in 30 s, a short clip still a minute a second.
+        assert_eq!(scrub_rate(1.0, 7200.0), 240.0);
+        assert_eq!(scrub_rate(-1.0, 7200.0), -240.0);
+        assert_eq!(scrub_rate(1.0, 600.0), 60.0);
+        // A light touch is slow.
+        assert_eq!(scrub_rate(0.25, 600.0), 3.75);
     }
 }
