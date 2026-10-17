@@ -120,6 +120,20 @@ pub fn present(app: &adw::Application, player: Player, target: Option<&str>) {
             }
         }
     });
+    crate::controller::on_scrub({
+        let (state, window) = (Rc::downgrade(&state), window.downgrade());
+        move |tilt| {
+            let (Some(state), Some(window)) = (state.upgrade(), window.upgrade()) else {
+                return;
+            };
+            let playing = state.nav.visible_page().as_ref() == Some(state.page.page());
+            if tilt == 0.0
+                || (playing && window.visible_dialog().is_none() && !state.page.menu_open())
+            {
+                state.page.scrub_stick(tilt);
+            }
+        }
+    });
     window.connect_close_request({
         let state = state.clone();
         move |_| {

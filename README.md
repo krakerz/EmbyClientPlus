@@ -87,6 +87,7 @@ current screen's buttons.
 | F / F11 | Fullscreen | Select | Search | Skip intro/credits |
 | Q | Skip intro/credits | Start | Preferences | On-screen controls |
 | Esc | Leave fullscreen, then the player | D-pad | Move | Seek (←/→), volume (↑/↓) |
+|  |  | Right stick | — | Scrub along the bar (seeks 2 s after you let go) |
 
 ### Command line
 
