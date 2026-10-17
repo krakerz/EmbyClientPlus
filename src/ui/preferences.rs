@@ -219,7 +219,7 @@ fn show_with(parent: &impl IsA<gtk::Widget>, server: bool) {
     });
     playback.add(&up_next_opacity);
     page.add(&playback);
-    page.add(&downloads_group(parent.upcast_ref()));
+    page.add(&downloads_group(parent.upcast_ref(), &toasts));
 
     // Display.
     let display = adw::PreferencesGroup::builder()
@@ -505,7 +505,22 @@ fn show_with(parent: &impl IsA<gtk::Widget>, server: bool) {
 
 /// Where downloads are saved: typed (works in Game Mode, where file
 /// choosers don't show) or picked with Choose… on the desktop.
-fn downloads_group(parent: &gtk::Widget) -> adw::PreferencesGroup {
+/// A typed download folder: a leading `~` becomes the home folder; `None`
+/// when what's left isn't an absolute path (a relative one would depend on
+/// wherever the app was started from).
+fn expand_folder(text: &str, home: Option<&std::path::Path>) -> Option<String> {
+    let path = match text.strip_prefix('~') {
+        Some("") => home?.to_path_buf(),
+        Some(rest) if rest.starts_with(['/', '\\']) => {
+            home?.join(rest.trim_start_matches(['/', '\\']))
+        }
+        _ => std::path::PathBuf::from(text),
+    };
+    path.is_absolute()
+        .then(|| path.to_string_lossy().into_owned())
+}
+
+fn downloads_group(parent: &gtk::Widget, toasts: &adw::ToastOverlay) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder()
         .title("Downloads")
         .description(
@@ -532,11 +547,27 @@ fn downloads_group(parent: &gtk::Widget) -> adw::PreferencesGroup {
         .text(crate::downloads::folder().to_string_lossy())
         .show_apply_button(true)
         .build();
-    folder.connect_apply(|row| {
-        let text = row.text().trim().to_string();
-        save(|s| s.downloads.folder = (!text.is_empty()).then_some(text));
-        row.set_text(&crate::downloads::folder().to_string_lossy());
-    });
+    folder.connect_apply(glib::clone!(
+        #[weak]
+        toasts,
+        move |row| {
+            let text = row.text().trim().to_string();
+            // Empty goes back to the default.
+            let chosen = if text.is_empty() {
+                Some(None)
+            } else {
+                let home = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf());
+                expand_folder(&text, home.as_deref()).map(Some)
+            };
+            match chosen {
+                Some(chosen) => save(|s| s.downloads.folder = chosen),
+                None => toasts.add_toast(adw::Toast::new(
+                    "Use a full path, like /home/you/Videos or ~/Videos",
+                )),
+            }
+            row.set_text(&crate::downloads::folder().to_string_lossy());
+        }
+    ));
     if !crate::gamescope::detected() {
         let choose = gtk::Button::builder()
             .label("Choose…")
@@ -900,7 +931,7 @@ fn refresh_bindings(rows: &[(Action, adw::ActionRow)]) {
 fn capture_binding(action: Action, row: &adw::ActionRow) {
     row.set_subtitle("Press a button on the controller…");
     let done = std::rc::Rc::new(std::cell::Cell::new(false));
-    controller::capture_next({
+    let token = controller::capture_next({
         let done = done.clone();
         let row = row.downgrade();
         move |pad| {
@@ -913,10 +944,17 @@ fn capture_binding(action: Action, row: &adw::ActionRow) {
             }
         }
     });
+    // Closing the dialog mid-capture mustn't leave the next press rebinding.
+    if let Some(dialog) = row.ancestor(adw::Dialog::static_type()) {
+        dialog
+            .downcast_ref::<adw::Dialog>()
+            .map(|dialog| dialog.connect_closed(move |_| controller::cancel_capture(token)));
+    }
     let row = row.downgrade();
     glib::timeout_add_local_once(CAPTURE_TIMEOUT, move || {
         if !done.get() {
-            controller::cancel_capture();
+            // Only this capture's: another may have started since.
+            controller::cancel_capture(token);
             if let Some(row) = row.upgrade() {
                 row.set_subtitle("No button pressed");
             }
@@ -1417,5 +1455,35 @@ pub(super) fn selected_language(row: &adw::ComboRow) -> Option<String> {
 fn save(change: impl FnOnce(&mut Settings)) {
     if let Err(e) = Settings::update(change) {
         tracing::warn!("could not save preferences: {e:#}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::expand_folder;
+    use std::path::Path;
+
+    #[test]
+    fn typed_download_folders_expand_tilde_and_must_be_absolute() {
+        let home = Path::new(if cfg!(windows) {
+            "C:\\Users\\me"
+        } else {
+            "/home/me"
+        });
+        let under_home = home.join("Videos").to_string_lossy().into_owned();
+        assert_eq!(expand_folder("~/Videos", Some(home)), Some(under_home));
+        assert_eq!(
+            expand_folder("~", Some(home)),
+            Some(home.to_string_lossy().into_owned())
+        );
+        assert_eq!(expand_folder("~/Videos", None), None);
+        assert_eq!(expand_folder("Videos", Some(home)), None);
+        assert_eq!(expand_folder("~me/Videos", Some(home)), None);
+        let absolute = if cfg!(windows) {
+            "D:\\Media"
+        } else {
+            "/mnt/media"
+        };
+        assert_eq!(expand_folder(absolute, Some(home)), Some(absolute.into()));
     }
 }

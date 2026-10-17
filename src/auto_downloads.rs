@@ -32,16 +32,12 @@ fn path() -> Result<PathBuf> {
 }
 
 fn load_all() -> Vec<Job> {
-    path()
-        .ok()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+    path().map_or_else(|_| Vec::new(), |path| crate::downloads::load_list(&path))
 }
 
 fn save_all(jobs: &[Job]) -> Result<()> {
     let path = path()?;
-    std::fs::write(&path, serde_json::to_string_pretty(jobs)?)
+    crate::config::write_atomic(&path, serde_json::to_string_pretty(jobs)?.as_bytes())
         .with_context(|| format!("writing {}", path.display()))
 }
 

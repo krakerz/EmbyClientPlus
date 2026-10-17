@@ -472,6 +472,9 @@ pub fn build(app: &adw::Application, player: Player) -> adw::ApplicationWindow {
             if let Some(ui) = state.ui.borrow().as_ref() {
                 ui.stop_playback_and_wait();
             }
+            // The player page's hidden handler may never run on close.
+            #[cfg(target_os = "linux")]
+            crate::dnd::set(false);
             // SVP Manager learns right away that we're gone (closing the
             // socket and dropping its connection), rather than whenever the
             // process finally exits.
@@ -609,6 +612,7 @@ fn on_logged_in(state: &Rc<State>, logged_in: LoggedIn) {
 fn logout(state: &Rc<State>, expired: bool) {
     let Some(ui) = state.ui.take() else { return };
     ui.stop_playback();
+    crate::ui::downloads::sign_out(&ui);
     crate::account::sign_out();
     if !expired {
         let client = ui.client();

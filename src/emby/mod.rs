@@ -80,6 +80,9 @@ fn host_name() -> Option<String> {
 }
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// A download with no data for this long has failed.
+const STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 #[derive(Clone)]
 pub struct EmbyClient {
     base_url: String,
@@ -147,12 +150,15 @@ impl EmbyClient {
             .headers(self.headers()?)
             .send()
             .await
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("GET {path} failed"))?
             .error_for_status()
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("GET {path} returned an error status"))?;
         response
             .json()
             .await
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("GET {path} returned an unparsable body"))
     }
 
@@ -163,12 +169,15 @@ impl EmbyClient {
             .headers(self.headers()?)
             .send()
             .await
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("GET {path} failed"))?
             .error_for_status()
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("GET {path} returned an error status"))?;
         response
             .text()
             .await
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("GET {path} returned an unreadable body"))
     }
 
@@ -184,12 +193,15 @@ impl EmbyClient {
             .json(body)
             .send()
             .await
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("POST {path} failed"))?
             .error_for_status()
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("POST {path} returned an error status"))?;
         response
             .json()
             .await
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("POST {path} returned an unparsable body"))
     }
 
@@ -202,8 +214,10 @@ impl EmbyClient {
             .json(body)
             .send()
             .await
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("POST {path} failed"))?
             .error_for_status()
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("POST {path} returned an error status"))?;
         Ok(())
     }
@@ -214,8 +228,10 @@ impl EmbyClient {
             .headers(self.headers()?)
             .send()
             .await
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("DELETE {path} failed"))?
             .error_for_status()
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("DELETE {path} returned an error status"))?;
         Ok(())
     }
@@ -228,12 +244,15 @@ impl EmbyClient {
             .headers(self.headers()?)
             .send()
             .await
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("GET {path} failed"))?
             .error_for_status()
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("GET {path} returned an error status"))?;
         let bytes = response
             .bytes()
             .await
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("GET {path} returned an unreadable body"))?;
         Ok(bytes.to_vec())
     }
@@ -275,20 +294,35 @@ impl EmbyClient {
         resume: bool,
     ) -> Result<()> {
         use std::io::Write;
-        let have = if resume {
+        use std::sync::atomic::Ordering::Relaxed;
+        let mut have = if resume {
             std::fs::metadata(file).map_or(0, |m| m.len())
         } else {
             0
         };
-        let mut request = self.http.get(url).headers(self.headers()?);
-        if have > 0 {
-            request = request.header(reqwest::header::RANGE, format!("bytes={have}-"));
+        let mut response = self.get_from(url, have).await?;
+        // The partial file is already the whole thing.
+        if have > 0 && response.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+            progress.start(have);
+            progress.add(have);
+            return Ok(());
         }
-        let mut response = request
-            .send()
-            .await
-            .context("download failed")?
+        // A server that ignores where we asked to resume must not get appended
+        // to; fetch the whole file again.
+        if have > 0
+            && response.status() == reqwest::StatusCode::PARTIAL_CONTENT
+            && !response
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.starts_with(&format!("bytes {have}-")))
+        {
+            have = 0;
+            response = self.get_from(url, 0).await?;
+        }
+        let mut response = response
             .error_for_status()
+            .map_err(reqwest::Error::without_url)
             .context("download failed")?;
         let continuing = have > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
         let already = if continuing { have } else { 0 };
@@ -302,16 +336,46 @@ impl EmbyClient {
         let mut out = std::io::BufWriter::new(
             opened.with_context(|| format!("couldn't write {}", file.display()))?,
         );
-        while let Some(chunk) = response.chunk().await.context("download interrupted")? {
-            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+        // Short waits, so a stalled connection still notices a cancel, and a
+        // dead one fails instead of hanging.
+        let mut last_data = std::time::Instant::now();
+        loop {
+            if cancelled.load(Relaxed) {
                 anyhow::bail!("download cancelled");
             }
-            out.write_all(&chunk)
-                .with_context(|| format!("couldn't write {}", file.display()))?;
-            progress.add(chunk.len() as u64);
+            match tokio::time::timeout(std::time::Duration::from_secs(1), response.chunk()).await {
+                Ok(chunk) => {
+                    let Some(chunk) = chunk
+                        .map_err(reqwest::Error::without_url)
+                        .context("download interrupted")?
+                    else {
+                        break;
+                    };
+                    out.write_all(&chunk)
+                        .with_context(|| format!("couldn't write {}", file.display()))?;
+                    progress.add(chunk.len() as u64);
+                    last_data = std::time::Instant::now();
+                }
+                Err(_) if last_data.elapsed() >= STALL_TIMEOUT => anyhow::bail!("download stalled"),
+                Err(_) => {}
+            }
         }
         out.flush()
             .with_context(|| format!("couldn't write {}", file.display()))
+    }
+
+    /// GET `url`, from byte `from` on when that's above 0. The status is left
+    /// for the caller, since 416 and 206 mean something here.
+    async fn get_from(&self, url: &str, from: u64) -> Result<reqwest::Response> {
+        let mut request = self.http.get(url).headers(self.headers()?);
+        if from > 0 {
+            request = request.header(reqwest::header::RANGE, format!("bytes={from}-"));
+        }
+        request
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .context("download failed")
     }
 
     /// A subtitle stream as a standalone file mpv can load with `sub-add`;

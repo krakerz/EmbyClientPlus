@@ -62,15 +62,35 @@ fn save_plaintext_store_at(path: &std::path::Path, store: &PlaintextStore) -> Re
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let contents = toml::to_string_pretty(store).context("failed to serialize credentials")?;
-    std::fs::write(path, contents)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    write_private(path, contents.as_bytes())
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+/// Writes `contents` atomically, never readable by others: on unix the
+/// temporary file is created 0o600, so there's no window where the tokens
+/// are world-readable.
+fn write_private(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("failed to restrict permissions on {}", path.display()))?;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut name = path.file_name().unwrap_or_default().to_os_string();
+        name.push(".tmp");
+        let temp = path.with_file_name(name);
+        // A leftover temp file could carry looser permissions.
+        let _ = std::fs::remove_file(&temp);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temp)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temp, path)
     }
-    Ok(())
+    #[cfg(not(unix))]
+    crate::config::write_atomic(path, contents)
 }
 
 fn store_plaintext_token_at(path: &std::path::Path, server_url: &str, token: &str) -> Result<()> {

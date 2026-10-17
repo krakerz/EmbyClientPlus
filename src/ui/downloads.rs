@@ -2,7 +2,7 @@
 //! waiting and finished ones), and playing them from disk. One download
 //! runs at a time; the rest wait in a queue (a whole season or series).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -33,8 +33,10 @@ thread_local! {
     /// Stopped downloads (paused, interrupted, or out of disk space),
     /// continued from where they stopped when resumed.
     static PAUSED: RefCell<Vec<BaseItem>> = const { RefCell::new(Vec::new()) };
+    /// Bumped at sign-out: downloads started before it leave the lists alone.
+    static EPOCH: Cell<u64> = const { Cell::new(0) };
     /// An auto-download check is under way.
-    static SYNCING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static SYNCING: Cell<bool> = const { Cell::new(false) };
     /// The check waiting to run after playback stops.
     static PENDING_SYNC: RefCell<Option<glib::SourceId>> = const { RefCell::new(None) };
 }
@@ -69,7 +71,9 @@ pub fn start(ui: &Ui, item: &BaseItem) {
 /// Queues `item` unless it's downloaded, downloading or queued already;
 /// a paused one is resumed.
 fn enqueue(item: &BaseItem) -> bool {
-    if is_running(&item.id) || crate::downloads::find(&item.id).is_some() {
+    // The cached id set: queueing a long series mustn't rescan the folder
+    // for every episode.
+    if is_running(&item.id) || crate::downloads::is_downloaded(&item.id) {
         return false;
     }
     let paused = PAUSED.with(|p| {
@@ -100,7 +104,7 @@ pub fn start_episodes_of(ui: &Ui, target: &BaseItem) {
     let name = target.name.clone();
     glib::spawn_future_local(async move {
         let episodes = crate::runtime::spawn_tokio(async move {
-            client.series_episodes(&series_id, &user_id).await
+            client.downloadable_episodes(&series_id, &user_id).await
         })
         .await;
         let Some(ui) = weak.upgrade() else { return };
@@ -137,30 +141,53 @@ fn pump(ui: &Ui) {
 /// Saves the running, queued and paused downloads, so they survive the
 /// app closing, even abruptly.
 fn save_state(ui: &Ui) {
-    let user_id = ui.user_id();
+    save_state_for(&ui.user_id());
+}
+
+/// [`save_state`] for `user_id`, which needs no live [`Ui`].
+fn save_state_for(user_id: &str) {
     let mut pending: Vec<crate::downloads::Pending> = Vec::new();
     RUNNING.with(|r| {
         pending.extend(
             r.borrow()
                 .iter()
-                .map(|d| crate::downloads::Pending::new(&user_id, &d.item, false)),
+                .map(|d| crate::downloads::Pending::new(user_id, &d.item, false)),
         )
     });
     QUEUE.with(|q| {
         pending.extend(
             q.borrow()
                 .iter()
-                .map(|i| crate::downloads::Pending::new(&user_id, i, false)),
+                .map(|i| crate::downloads::Pending::new(user_id, i, false)),
         )
     });
     PAUSED.with(|p| {
         pending.extend(
             p.borrow()
                 .iter()
-                .map(|i| crate::downloads::Pending::new(&user_id, i, true)),
+                .map(|i| crate::downloads::Pending::new(user_id, i, true)),
         )
     });
-    crate::downloads::save_pending(&user_id, &pending);
+    crate::downloads::save_pending(user_id, &pending);
+}
+
+/// At sign-out: stops the running download keeping its partial file (as
+/// Pause does), saves everything under the signed-out user, and empties the
+/// lists so the next user starts clean.
+pub fn sign_out(ui: &Ui) {
+    RUNNING.with(|r| {
+        for d in r.borrow().iter() {
+            d.cancelled.store(true, Ordering::Relaxed);
+        }
+    });
+    save_state_for(&ui.user_id());
+    EPOCH.with(|e| e.set(e.get() + 1));
+    RUNNING.with(|r| r.borrow_mut().clear());
+    QUEUE.with(|q| q.borrow_mut().clear());
+    PAUSED.with(|p| p.borrow_mut().clear());
+    if let Some(source) = PENDING_SYNC.with(|p| p.take()) {
+        source.remove();
+    }
 }
 
 /// At sign-in: the downloads left from last time. Queued ones carry on if
@@ -177,7 +204,7 @@ pub fn restore(ui: &Ui) {
     let mut resumed = 0;
     for entry in pending {
         let item = entry.item();
-        if crate::downloads::find(&item.id).is_some() || is_running(&item.id) || is_paused(&item.id)
+        if crate::downloads::is_downloaded(&item.id) || is_running(&item.id) || is_paused(&item.id)
         {
             continue;
         }
@@ -206,6 +233,7 @@ fn run(ui: &Ui, item: &BaseItem) {
     RUNNING.with(|r| r.borrow_mut().push(running.clone()));
     let (client, user_id) = (ui.client(), ui.user_id());
     let weak = ui.downgrade();
+    let epoch = EPOCH.with(Cell::get);
     glib::spawn_future_local(async move {
         let (progress, cancelled, discard, id) = (
             running.progress.clone(),
@@ -214,35 +242,56 @@ fn run(ui: &Ui, item: &BaseItem) {
             running.item.id.clone(),
         );
         let result = crate::runtime::spawn_tokio(crate::downloads::fetch(
-            client, user_id, id, progress, cancelled, discard,
+            client,
+            user_id.clone(),
+            id,
+            progress,
+            cancelled,
+            discard,
         ))
         .await;
+        // Signed out meanwhile: `sign_out` saved it, and the lists are the
+        // next user's now.
+        if EPOCH.with(Cell::get) != epoch {
+            return;
+        }
         RUNNING.with(|r| r.borrow_mut().retain(|d| d.item.id != running.item.id));
-        let Some(ui) = weak.upgrade() else { return };
         let name = running.item.episode_label();
         let pause = |item: BaseItem| PAUSED.with(|p| p.borrow_mut().push(item));
-        match result {
-            Ok(_) => ui.toast(&format!("Downloaded {name}")),
+        // The bookkeeping doesn't need the Ui (it may be gone); only the
+        // messages do.
+        let mut toast = None;
+        let mut failure = None;
+        match &result {
+            Ok(_) => toast = Some(format!("Downloaded {name}")),
             Err(_) if running.discard.load(Ordering::Relaxed) => {}
             Err(_) if running.cancelled.load(Ordering::Relaxed) => pause(running.item.clone()),
             Err(e) => {
+                // Interrupted (connection lost, server gone) or out of
+                // space: resumable.
+                pause(running.item.clone());
                 // Out of space: everything waiting pauses too, rather than
                 // failing one by one.
                 if let Some(space) = e.downcast_ref::<crate::downloads::NotEnoughSpace>() {
-                    pause(running.item.clone());
                     let waiting: Vec<BaseItem> = QUEUE.with(|q| q.borrow_mut().drain(..).collect());
                     PAUSED.with(|p| p.borrow_mut().extend(waiting));
-                    ui.toast(&format!(
+                    toast = Some(format!(
                         "Downloads paused: not enough disk space ({:.1} GB needed, {:.1} GB free)",
                         space.needed as f64 / 1e9,
                         space.free as f64 / 1e9
                     ));
                 } else {
-                    // Interrupted (connection lost, server gone): resumable.
-                    pause(running.item.clone());
-                    ui.report_error(&format!("Couldn't finish downloading {name}"), &e);
+                    failure = Some(e);
                 }
             }
+        }
+        save_state_for(&user_id);
+        let Some(ui) = weak.upgrade() else { return };
+        if let Some(toast) = toast {
+            ui.toast(&toast);
+        }
+        if let Some(e) = failure {
+            ui.report_error(&format!("Couldn't finish downloading {name}"), e);
         }
         pump(&ui);
         ui.data_changed();
@@ -341,26 +390,46 @@ pub fn page(ui: &Ui) -> adw::NavigationPage {
         let fill = fill.clone();
         move || fill()
     });
-    // Running downloads' progress, while the page is up.
-    let ticker = glib::timeout_add_local(std::time::Duration::from_millis(500), {
-        let (content, fill) = (content.downgrade(), fill.clone());
-        let shown = RefCell::new(running_ids());
+    // Running downloads' progress, while the page is showing (not hidden,
+    // as when the player is pushed over it).
+    let ticker: Rc<RefCell<Option<glib::SourceId>>> = Rc::default();
+    let start = Rc::new({
+        let (ticker, content, fill) = (ticker.clone(), content.downgrade(), fill.clone());
         move || {
-            let Some(content) = content.upgrade() else {
-                return glib::ControlFlow::Break;
-            };
-            // A download started or finished: rebuild; else just progress.
-            let now = running_ids();
-            if *shown.borrow() != now {
-                shown.replace(now);
-                fill();
-            } else {
-                update_progress(&content);
+            if ticker.borrow().is_some() {
+                return;
             }
-            glib::ControlFlow::Continue
+            let (content, fill) = (content.clone(), fill.clone());
+            let shown = RefCell::new(running_ids());
+            let source =
+                glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+                    let Some(content) = content.upgrade() else {
+                        return glib::ControlFlow::Break;
+                    };
+                    // A download started or finished: rebuild; else just progress.
+                    let now = running_ids();
+                    if *shown.borrow() != now {
+                        shown.replace(now);
+                        fill();
+                    } else {
+                        update_progress(&content);
+                    }
+                    glib::ControlFlow::Continue
+                });
+            ticker.replace(Some(source));
         }
     });
-    let ticker = RefCell::new(Some(ticker));
+    start();
+    page.connect_showing({
+        let (ticker, fill) = (ticker.clone(), fill.clone());
+        move |_| {
+            // Back from the player: what happened meanwhile shows now.
+            if ticker.borrow().is_none() {
+                fill();
+                start();
+            }
+        }
+    });
     page.connect_hidden(move |_| {
         if let Some(source) = ticker.take() {
             source.remove();
@@ -878,7 +947,7 @@ pub fn sync_auto(ui: &Ui) {
             let (client, user_id, series_id) =
                 (client.clone(), user_id.clone(), job.series_id.clone());
             let episodes = crate::runtime::spawn_tokio(async move {
-                client.series_episodes(&series_id, &user_id).await
+                client.downloadable_episodes(&series_id, &user_id).await
             })
             .await;
             let Some(ui) = weak.upgrade() else {

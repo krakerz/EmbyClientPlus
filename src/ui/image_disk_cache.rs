@@ -22,7 +22,14 @@ pub fn file_for(url: &str) -> Option<PathBuf> {
 }
 
 pub fn read(url: &str) -> Option<Vec<u8>> {
-    std::fs::read(file_for(url)?).ok()
+    let path = file_for(url)?;
+    let bytes = std::fs::read(&path).ok()?;
+    // Pruning goes by modified time, so a hit has to count as use or the
+    // most-viewed images would be the first to go.
+    if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&path) {
+        let _ = file.set_modified(SystemTime::now());
+    }
+    Some(bytes)
 }
 
 pub fn write(url: &str, bytes: &[u8]) {

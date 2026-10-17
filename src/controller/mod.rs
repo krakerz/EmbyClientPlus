@@ -43,8 +43,10 @@ thread_local! {
 #[derive(Default)]
 struct Hub {
     handler: RefCell<Option<Handler>>,
-    /// A one-shot "press a button…" listener (Preferences remapping).
-    capture: RefCell<Option<Capture>>,
+    /// A one-shot "press a button…" listener (Preferences remapping), with
+    /// the token that cancels exactly this one.
+    capture: RefCell<Option<(u64, Capture)>>,
+    capture_token: Cell<u64>,
     connected: RefCell<Option<String>>,
     bindings: RefCell<Bindings>,
     started: Cell<bool>,
@@ -81,6 +83,24 @@ pub fn start(handler: impl Fn(Pad, bool) + 'static) {
 }
 
 impl Hub {
+    fn start_capture(&self, callback: Capture) -> u64 {
+        let token = self.capture_token.get() + 1;
+        self.capture_token.set(token);
+        self.capture.replace(Some((token, callback)));
+        token
+    }
+
+    /// Cancels the capture `token` started, unless a newer one replaced it.
+    fn cancel_capture(&self, token: u64) {
+        let mut capture = self.capture.borrow_mut();
+        if capture
+            .as_ref()
+            .is_some_and(|(current, _)| *current == token)
+        {
+            *capture = None;
+        }
+    }
+
     fn changed(&self) {
         for listener in self.listeners.borrow().iter() {
             listener();
@@ -100,7 +120,7 @@ impl Hub {
                 self.changed();
             }
             PadEvent::Pressed(pad) => {
-                if let Some(capture) = self.capture.take() {
+                if let Some((_, capture)) = self.capture.take() {
                     capture(pad);
                 } else if let Some(handler) = self.handler.borrow().as_ref() {
                     handler(pad, false);
@@ -151,12 +171,14 @@ pub fn connected() -> Option<String> {
 }
 
 /// Sends the next press to `callback` instead of the normal handler.
-pub fn capture_next(callback: impl FnOnce(Pad) + 'static) {
-    HUB.with(|hub| hub.capture.replace(Some(Box::new(callback))));
+/// Returns a token for [`cancel_capture`].
+pub fn capture_next(callback: impl FnOnce(Pad) + 'static) -> u64 {
+    HUB.with(|hub| hub.start_capture(Box::new(callback)))
 }
 
-pub fn cancel_capture() {
-    HUB.with(|hub| hub.capture.take());
+/// Stops the capture `token` started; one begun since is left alone.
+pub fn cancel_capture(token: u64) {
+    HUB.with(|hub| hub.cancel_capture(token));
 }
 
 fn load_bindings() -> Bindings {
@@ -214,7 +236,19 @@ fn read_pads(sender: &tokio::sync::mpsc::UnboundedSender<PadEvent>) {
                     send(PadEvent::Connected(name));
                 }
                 EventType::Disconnected => {
-                    send(PadEvent::Disconnected);
+                    // A held direction must not keep repeating with nothing
+                    // left to release it.
+                    repeater = Repeater::default();
+                    stick = StickState::default();
+                    // Another pad still plugged in keeps the legend.
+                    let remaining = gilrs
+                        .gamepads()
+                        .find(|(_, pad)| pad.is_connected())
+                        .map(|(_, pad)| pad.name().to_string());
+                    send(match remaining {
+                        Some(name) => PadEvent::Connected(name),
+                        None => PadEvent::Disconnected,
+                    });
                 }
                 _ => {}
             }
@@ -332,6 +366,17 @@ mod tests {
             [(Pad::Up, false), (Pad::Down, true)]
         );
         assert!(stick.update(Axis::RightStickX, 1.0).is_empty());
+    }
+
+    #[test]
+    fn a_capture_timeout_cancels_only_its_own_capture() {
+        let hub = Hub::default();
+        let first = hub.start_capture(Box::new(|_| {}));
+        let second = hub.start_capture(Box::new(|_| {}));
+        hub.cancel_capture(first);
+        assert!(hub.capture.borrow().is_some(), "the second one survives");
+        hub.cancel_capture(second);
+        assert!(hub.capture.borrow().is_none());
     }
 
     #[test]

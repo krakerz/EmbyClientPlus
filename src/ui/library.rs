@@ -2,7 +2,9 @@
 //! queries or one-off fetches. Library pages, search and full-row pages
 //! build on these.
 
+use std::cell::Cell;
 use std::future::Future;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use adw::prelude::*;
@@ -245,26 +247,79 @@ const GRID_MARGIN: i32 = 12;
 /// them by splitting what's left between its side margins. Margins, not
 /// `halign`: an aligned GridView in a scroller gets measured against the
 /// visible height and GTK warns on every frame.
+///
+/// Re-fits when the grid's width changes (its scroller's page size) or its
+/// items do, not every frame: a tick callback kept the frame clock running
+/// (battery) for as long as a grid was up.
 fn fit_columns(grid: &gtk::GridView, shape: Shape) {
-    let last = std::cell::Cell::new((-1, u32::MAX));
-    grid.add_tick_callback(move |grid, _| {
-        let Some(space) = grid.parent().map(|p| p.width()) else {
-            return glib::ControlFlow::Continue;
-        };
-        // A short list (three collections) centres too: no empty columns.
-        let items = grid.model().map_or(0, |m| m.n_items());
-        if (space, items) != last.get() {
-            last.set((space, items));
-            let cell = (super::scaled(shape.size().0) + GRID_GAP).max(1);
-            let room = (space - 2 * GRID_MARGIN).max(cell);
-            let fit = (room / cell).clamp(1, 64);
-            let columns = fit.min(i32::try_from(items).unwrap_or(i32::MAX).max(1));
-            let side = GRID_MARGIN + (room - columns * cell) / 2;
-            grid.set_margin_start(side);
-            grid.set_margin_end(side);
-            grid.set_min_columns(columns.min(2) as u32);
-            grid.set_max_columns(columns as u32);
+    let last = Rc::new(Cell::new((-1, u32::MAX)));
+    let queued = Rc::new(Cell::new(false));
+    // Applied at the next frame's start, not inside the allocation that
+    // announced it (changing margins there would re-queue the layout).
+    let schedule = Rc::new({
+        let weak = grid.downgrade();
+        move || {
+            let Some(grid) = weak.upgrade() else { return };
+            if queued.replace(true) {
+                return;
+            }
+            let (last, queued) = (last.clone(), queued.clone());
+            grid.add_tick_callback(move |grid, _| {
+                queued.set(false);
+                refit(grid, shape, &last);
+                glib::ControlFlow::Break
+            });
         }
-        glib::ControlFlow::Continue
     });
+    let watch_width = {
+        let schedule = schedule.clone();
+        move |grid: &gtk::GridView| {
+            if let Some(adjustment) = grid.hadjustment() {
+                let schedule = schedule.clone();
+                adjustment.connect_page_size_notify(move |_| schedule());
+            }
+        }
+    };
+    // The scroller hands over its adjustment when the grid is put in it.
+    watch_width(grid);
+    grid.connect_notify_local(Some("hadjustment"), {
+        let schedule = schedule.clone();
+        move |grid, _| {
+            watch_width(grid);
+            schedule();
+        }
+    });
+    grid.connect_parent_notify({
+        let schedule = schedule.clone();
+        move |_| schedule()
+    });
+    if let Some(model) = grid.model() {
+        model.connect_items_changed({
+            let schedule = schedule.clone();
+            move |_, _, _, _| schedule()
+        });
+    }
+    schedule();
+}
+
+/// Sets `grid`'s columns and side margins for its parent's width and its
+/// item count, unless they're what `last` already fitted.
+fn refit(grid: &gtk::GridView, shape: Shape, last: &Cell<(i32, u32)>) {
+    let Some(space) = grid.parent().map(|p| p.width()) else {
+        return;
+    };
+    // A short list (three collections) centres too: no empty columns.
+    let items = grid.model().map_or(0, |m| m.n_items());
+    if (space, items) != last.get() {
+        last.set((space, items));
+        let cell = (super::scaled(shape.size().0) + GRID_GAP).max(1);
+        let room = (space - 2 * GRID_MARGIN).max(cell);
+        let fit = (room / cell).clamp(1, 64);
+        let columns = fit.min(i32::try_from(items).unwrap_or(i32::MAX).max(1));
+        let side = GRID_MARGIN + (room - columns * cell) / 2;
+        grid.set_margin_start(side);
+        grid.set_margin_end(side);
+        grid.set_min_columns(columns.min(2) as u32);
+        grid.set_max_columns(columns as u32);
+    }
 }

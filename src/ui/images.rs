@@ -2,7 +2,7 @@
 //! thread, kept in a per-process memory cache.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use gtk::prelude::*;
@@ -21,35 +21,78 @@ const MAX_CONCURRENT_FETCHES: usize = 6;
 /// slow response for a recycled grid cell doesn't overwrite a newer one.
 const REQUESTED_KEY: &str = "embyclientplus-requested-image";
 
-/// Decoded textures kept in memory; a poster is ~0.5 MB uncompressed, so
-/// this bounds the cache to roughly 150 MB.
-const CACHE_CAPACITY: usize = 300;
+/// Decoded textures are kept up to this many bytes (width x height x 4);
+/// a poster is ~0.5 MB but a hero backdrop can be tens of MB.
+const CACHE_BUDGET: usize = 256 * 1024 * 1024;
 
 thread_local! {
     static CACHE: RefCell<TextureCache> = RefCell::new(TextureCache::default());
 }
 
-/// Evicts the oldest-inserted entry once full.
-#[derive(Default)]
-struct TextureCache {
-    textures: HashMap<String, gdk::Texture>,
-    order: VecDeque<String>,
+type TextureCache = ByteLru<gdk::Texture>;
+
+/// Memory cache that evicts the least recently used entries once their
+/// total size passes the budget.
+struct ByteLru<V> {
+    /// Value, size in bytes, last-use tick.
+    entries: HashMap<String, (V, usize, u64)>,
+    total: usize,
+    tick: u64,
+    budget: usize,
 }
 
-impl TextureCache {
-    fn get(&self, path: &str) -> Option<gdk::Texture> {
-        self.textures.get(path).cloned()
+impl<V> Default for ByteLru<V> {
+    fn default() -> Self {
+        Self::with_budget(CACHE_BUDGET)
+    }
+}
+
+impl<V> ByteLru<V> {
+    fn with_budget(budget: usize) -> Self {
+        ByteLru {
+            entries: HashMap::new(),
+            total: 0,
+            tick: 0,
+            budget,
+        }
+    }
+}
+
+impl<V: Clone> ByteLru<V> {
+    fn get(&mut self, key: &str) -> Option<V> {
+        self.tick += 1;
+        let (value, _, used) = self.entries.get_mut(key)?;
+        *used = self.tick;
+        Some(value.clone())
     }
 
-    fn insert(&mut self, path: String, texture: gdk::Texture) {
-        if self.textures.insert(path.clone(), texture).is_none() {
-            self.order.push_back(path);
+    fn insert(&mut self, key: String, value: V, bytes: usize) {
+        self.tick += 1;
+        if let Some((_, old, _)) = self.entries.insert(key, (value, bytes, self.tick)) {
+            self.total -= old;
         }
-        while self.order.len() > CACHE_CAPACITY {
-            if let Some(oldest) = self.order.pop_front() {
-                self.textures.remove(&oldest);
+        self.total += bytes;
+        // The newest entry stays even when it alone is over budget.
+        while self.total > self.budget && self.entries.len() > 1 {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (_, _, used))| *used)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            if let Some((_, bytes, _)) = self.entries.remove(&oldest) {
+                self.total -= bytes;
             }
         }
+    }
+}
+
+impl ByteLru<gdk::Texture> {
+    fn insert_texture(&mut self, key: String, texture: gdk::Texture) {
+        let bytes = texture.width().max(0) as usize * texture.height().max(0) as usize * 4;
+        self.insert(key, texture, bytes);
     }
 }
 
@@ -83,7 +126,7 @@ pub fn load_with_client(
         picture.set_paintable(None::<&gdk::Paintable>);
         return;
     };
-    if let Some(texture) = CACHE.with(|cache| cache.borrow().get(&path)) {
+    if let Some(texture) = CACHE.with(|cache| cache.borrow_mut().get(&path)) {
         picture.set_paintable(Some(&texture));
         return;
     }
@@ -115,7 +158,11 @@ pub fn load_with_client(
                 return;
             }
         };
-        CACHE.with(|cache| cache.borrow_mut().insert(path.clone(), texture.clone()));
+        CACHE.with(|cache| {
+            cache
+                .borrow_mut()
+                .insert_texture(path.clone(), texture.clone())
+        });
         if let Some(picture) = picture.upgrade()
             && requested(&picture).as_deref() == Some(path.as_str())
         {
@@ -162,4 +209,34 @@ pub async fn file(
         file.is_file().then_some(file)
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ByteLru;
+
+    #[test]
+    fn evicts_least_recently_used_past_the_byte_budget() {
+        let mut cache = ByteLru::<u8>::with_budget(100);
+        cache.insert("a".into(), 1, 40);
+        cache.insert("b".into(), 2, 40);
+        assert_eq!(cache.get("a"), Some(1)); // a is now newer than b
+        cache.insert("c".into(), 3, 40);
+        assert_eq!(cache.get("b"), None);
+        assert_eq!(cache.get("a"), Some(1));
+        assert_eq!(cache.get("c"), Some(3));
+        assert_eq!(cache.total, 80);
+    }
+
+    #[test]
+    fn one_big_entry_evicts_many_small_ones_and_replacing_recounts() {
+        let mut cache = ByteLru::<u8>::with_budget(100);
+        for (i, key) in ["a", "b", "c"].into_iter().enumerate() {
+            cache.insert(key.into(), i as u8, 30);
+        }
+        cache.insert("big".into(), 9, 90);
+        assert_eq!(cache.entries.len(), 1);
+        cache.insert("big".into(), 9, 200); // alone, over budget: kept
+        assert_eq!((cache.entries.len(), cache.total), (1, 200));
+    }
 }

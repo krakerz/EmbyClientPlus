@@ -79,6 +79,9 @@ struct Inner {
     player: Player,
     player_page: PlayerPage,
     playback: RefCell<Option<Rc<PlaybackSession>>>,
+    /// Bumped by every stop or new play, so a session that finishes
+    /// loading after the user moved on is dropped instead of attached.
+    load_generation: Cell<u64>,
     /// Bumped whenever watch state may have changed (playback stopped, an
     /// item marked watched or favourite), so pages showing it reload.
     data_generation: Cell<u64>,
@@ -114,6 +117,7 @@ impl Ui {
                 player,
                 player_page,
                 playback: RefCell::new(None),
+                load_generation: Cell::new(0),
                 data_generation: Cell::new(0),
                 reloaders: RefCell::new(Vec::new()),
                 playing_link: Cell::new(false),
@@ -456,7 +460,7 @@ impl Ui {
         }
         // Downloaded: from disk, offline or not.
         if let Some(download) = crate::downloads::find(&item.id) {
-            return self.play_download(&download, start_ticks);
+            return self.start_download(&download, start_ticks, true);
         }
         // The current session's quality carries over to the next episode;
         // otherwise the configured default applies.
@@ -474,7 +478,7 @@ impl Ui {
                         .bitrate_cap_kbps(),
                 )
             });
-        self.play_with(item, start_ticks, quality, None);
+        self.play_with(item, start_ticks, quality, None, true);
     }
 
     fn play_with(
@@ -483,6 +487,7 @@ impl Ui {
         start_ticks: i64,
         quality: Quality,
         audio_stream_index: Option<i32>,
+        rewind: bool,
     ) {
         self.inner.music.stop();
         self.stop_playback();
@@ -494,6 +499,7 @@ impl Ui {
 
         let ui = self.clone();
         let item = item.clone();
+        let load = self.inner.load_generation.get();
         glib::spawn_future_local(async move {
             let started = PlaybackSession::start(
                 ui.session().clone(),
@@ -502,38 +508,65 @@ impl Ui {
                 start_ticks,
                 quality,
                 audio_stream_index,
+                rewind,
+                || ui.load_is_current(load),
             )
             .await;
-            match started {
-                Ok(session) => {
-                    ui.inner.playback.replace(Some(session.clone()));
-                    ui.inner.player_page.attach(session, Some(&ui.client()));
+            if !ui.load_is_current(load) {
+                // Backed out or replaced while loading: Emby still gets the
+                // Stopped for a session it was told started.
+                if let Ok(session) = started {
+                    session.stop();
                 }
+                return;
+            }
+            match started {
+                Ok(session) => ui.attach_session(session),
                 Err(e) if e.downcast_ref::<crate::remote::NeedsYtDlp>().is_some() => {
                     ui.open_in_browser(
                         e.downcast_ref::<crate::remote::NeedsYtDlp>()
                             .map(|n| n.0.clone()),
                     );
-                    ui.inner.nav.pop();
+                    ui.pop_player_page();
                 }
                 // Streaming a downloaded title failed (offline, say): back
                 // to the file.
                 Err(e) if let Some(download) = crate::downloads::find(&item.id) => {
                     tracing::warn!("streaming a downloaded title failed: {e:#}");
                     ui.toast("Couldn't stream it, playing the download instead");
-                    ui.play_download(&download, start_ticks);
+                    ui.start_download(&download, start_ticks, rewind);
                 }
                 Err(e) if quality != Quality::Original => {
                     tracing::warn!("transcode failed: {e:#}");
                     ui.toast("Transcoding failed, playing the original instead");
-                    ui.play_with(&item, start_ticks, Quality::Original, None);
+                    ui.play_with(&item, start_ticks, Quality::Original, None, rewind);
                 }
                 Err(e) => {
                     ui.report_error("Playback failed", &e);
-                    ui.inner.nav.pop();
+                    ui.pop_player_page();
                 }
             }
         });
+    }
+
+    fn load_is_current(&self, load: u64) -> bool {
+        self.inner.load_generation.get() == load
+    }
+
+    /// Makes `session` the playing one, stopping any it replaces.
+    fn attach_session(&self, session: Rc<PlaybackSession>) {
+        if let Some(old) = self.inner.playback.replace(Some(session.clone())) {
+            old.stop();
+        }
+        self.inner.player_page.attach(session, Some(&self.client()));
+    }
+
+    /// Backs out of a failed load, but only if the player page is what's
+    /// showing (the user may have gone elsewhere meanwhile).
+    fn pop_player_page(&self) {
+        if self.inner.nav.visible_page().as_ref() == Some(self.inner.player_page.page()) {
+            self.inner.nav.pop();
+        }
     }
 
     /// Callbacks the player page uses to drive playback.
@@ -577,11 +610,11 @@ impl Ui {
         if quality == Quality::Original
             && let Some(download) = crate::downloads::find(&session.item.id)
         {
-            return self.play_download(&download, position);
+            return self.start_download(&download, position, false);
         }
         let audio = session.audio_stream_index();
         let item = session.item.clone();
-        self.play_with(&item, position, quality, audio);
+        self.play_with(&item, position, quality, audio, false);
     }
 
     /// Plays a downloaded title from its file. Progress still goes to the
@@ -589,6 +622,16 @@ impl Ui {
     /// neighbours when the server answers (each then plays from disk if
     /// downloaded, else streams); offline, the other downloaded episodes.
     pub fn play_download(&self, download: &crate::downloads::Download, start_ticks: i64) {
+        self.start_download(download, start_ticks, true);
+    }
+
+    /// `rewind`: `start_ticks` is a resume point (not an exact spot).
+    fn start_download(
+        &self,
+        download: &crate::downloads::Download,
+        start_ticks: i64,
+        rewind: bool,
+    ) {
         self.inner.music.stop();
         self.stop_playback();
         let page = &self.inner.player_page;
@@ -614,6 +657,7 @@ impl Ui {
         let series_id = item.series_id.clone();
         let (client, user_id) = (self.client(), self.user_id());
         let ui = self.clone();
+        let load = self.inner.load_generation.get();
         glib::spawn_future_local(async move {
             if let Some(series_id) = series_id {
                 // Briefly: offline, the downloaded neighbours do.
@@ -633,14 +677,26 @@ impl Ui {
                     }
                 }
             }
-            match PlaybackSession::start_local(ui.inner.player, media, start_ticks).await {
-                Ok(session) => {
-                    ui.inner.playback.replace(Some(session.clone()));
-                    ui.inner.player_page.attach(session, Some(&ui.client()));
+            // Backed out while the neighbours were loading.
+            if !ui.load_is_current(load) {
+                return;
+            }
+            let started =
+                PlaybackSession::start_local(ui.inner.player, media, start_ticks, rewind, || {
+                    ui.load_is_current(load)
+                })
+                .await;
+            if !ui.load_is_current(load) {
+                if let Ok(session) = started {
+                    session.stop();
                 }
+                return;
+            }
+            match started {
+                Ok(session) => ui.attach_session(session),
                 Err(e) => {
                     ui.report_error("Playback failed", &e);
-                    ui.inner.nav.pop();
+                    ui.pop_player_page();
                 }
             }
         });
@@ -692,6 +748,7 @@ impl Ui {
         }
         let ui = self.clone();
         let url = url.to_string();
+        let load = self.inner.load_generation.get();
         glib::spawn_future_local(async move {
             let link = url.clone();
             let resolved = crate::runtime::spawn_tokio(async move {
@@ -700,6 +757,9 @@ impl Ui {
                 tokio::task::spawn_blocking(move || crate::remote::resolve(&link, &options)).await?
             })
             .await;
+            if !ui.load_is_current(load) {
+                return;
+            }
             match resolved {
                 Ok(stream) => match ui.inner.player.load_at(
                     &stream.url,
@@ -711,16 +771,16 @@ impl Ui {
                     Ok(()) => ui.inner.playing_link.set(true),
                     Err(e) => {
                         ui.report_error("Playback failed", &e);
-                        ui.inner.nav.pop();
+                        ui.pop_player_page();
                     }
                 },
                 Err(e) if e.downcast_ref::<crate::remote::NeedsYtDlp>().is_some() => {
                     ui.open_in_browser(Some(url));
-                    ui.inner.nav.pop();
+                    ui.pop_player_page();
                 }
                 Err(e) => {
                     ui.report_error("Playback failed", &e);
-                    ui.inner.nav.pop();
+                    ui.pop_player_page();
                 }
             }
         });
@@ -738,6 +798,8 @@ impl Ui {
     /// Stops playback and waits briefly for Emby to get the final
     /// position, for window close.
     pub fn stop_playback_and_wait(&self) {
+        let generation = &self.inner.load_generation;
+        generation.set(generation.get() + 1);
         self.inner.music.stop();
         if let Some(session) = self.inner.playback.take() {
             session.stop_and_wait();
@@ -746,6 +808,8 @@ impl Ui {
 
     /// Stops the current playback session, if any, and reports it.
     pub fn stop_playback(&self) {
+        let generation = &self.inner.load_generation;
+        generation.set(generation.get() + 1);
         if self.inner.playing_link.replace(false)
             && let Err(e) = self.inner.player.stop()
         {

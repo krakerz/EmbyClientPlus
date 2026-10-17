@@ -182,6 +182,8 @@ pub struct PlaybackSession {
     last_ticks: Cell<i64>,
     timer: RefCell<Option<glib::SourceId>>,
     stopped: Cell<bool>,
+    /// Played to its end: the final report says so, not the last tick.
+    ended: Cell<bool>,
     /// HDR source: SVP stays off unless the title explicitly enables it.
     pub hdr: bool,
     /// Shader groups found when playback started (none for music).
@@ -191,6 +193,7 @@ pub struct PlaybackSession {
 }
 
 impl PlaybackSession {
+    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         session: Session,
         player: Player,
@@ -198,8 +201,10 @@ impl PlaybackSession {
         start_ticks: i64,
         quality: Quality,
         audio_stream_index: Option<i32>,
+        rewind: bool,
+        wanted: impl Fn() -> bool,
     ) -> Result<Rc<Self>> {
-        let start_ticks = rewound(start_ticks);
+        let start_ticks = resume_start(start_ticks, rewind);
         let client = session.client.clone();
         let user_id = session.user_id.clone();
         let item_id = item.id.clone();
@@ -291,11 +296,16 @@ impl PlaybackSession {
             last_ticks: Cell::new(start_ticks),
             timer: RefCell::new(None),
             stopped: Cell::new(false),
+            ended: Cell::new(false),
             hdr,
             shader_groups,
             start_volume: Cell::new(player.volume()),
         });
 
+        // The user moved on while this loaded: leave mpv to the newer start.
+        if !wanted() {
+            anyhow::bail!("superseded by a newer start");
+        }
         session.set_up_player()?;
         let subtitle_urls: Vec<&str> = session
             .external_subtitles
@@ -321,8 +331,10 @@ impl PlaybackSession {
         player: Player,
         media: LocalMedia,
         start_ticks: i64,
+        rewind: bool,
+        wanted: impl Fn() -> bool,
     ) -> Result<Rc<Self>> {
-        let start_ticks = rewound(start_ticks);
+        let start_ticks = resume_start(start_ticks, rewind);
         let target = media.target.clone();
         let subtitle_files = media.subtitle_files.clone();
         let options = crate::remote::Options::from_settings(&Settings::load().unwrap_or_default());
@@ -330,10 +342,19 @@ impl PlaybackSession {
             tokio::task::spawn_blocking(move || crate::remote::resolve(&target, &options)).await?
         })
         .await?;
-        let source = MediaSource {
-            id: media.item.id.clone(),
-            ..Default::default()
+        // A download keeps the server's description of its file, so HDR and
+        // the track labels work as when streaming; plain files have none.
+        let source = match media.item.media_sources.first() {
+            Some(source) => MediaSource {
+                is_remote: false,
+                ..source.clone()
+            },
+            None => MediaSource {
+                id: media.item.id.clone(),
+                ..Default::default()
+            },
         };
+        let hdr = crate::emby::models::is_hdr(&source.media_streams);
         let origin = if media.client.is_some() {
             Origin::Download
         } else if media.target.contains("://") {
@@ -358,10 +379,15 @@ impl PlaybackSession {
             last_ticks: Cell::new(start_ticks),
             timer: RefCell::new(None),
             stopped: Cell::new(false),
-            hdr: false,
+            ended: Cell::new(false),
+            hdr,
             shader_groups: crate::shaders::groups(),
             start_volume: Cell::new(player.volume()),
         });
+        // The user moved on while this loaded: leave mpv to the newer start.
+        if !wanted() {
+            anyhow::bail!("superseded by a newer start");
+        }
         session.set_up_player()?;
         let subtitles: Vec<&str> = stream
             .subtitle
@@ -673,10 +699,27 @@ impl PlaybackSession {
     }
 
     pub fn position_ticks(&self) -> i64 {
-        if let Some(seconds) = self.player.position() {
+        if !self.ended.get()
+            && let Some(seconds) = self.player.position()
+        {
             self.last_ticks.set(seconds_to_ticks(seconds));
         }
         self.last_ticks.get()
+    }
+
+    /// mpv hit the end of the file: the position is now gone, so the
+    /// runtime stands in for it (up to a progress interval later than the
+    /// last tick).
+    pub fn mark_ended(&self) {
+        let end = self
+            .item
+            .run_time_ticks
+            .filter(|&ticks| ticks > 0)
+            .or_else(|| self.player.duration().map(seconds_to_ticks));
+        if let Some(end) = end {
+            self.last_ticks.set(end);
+        }
+        self.ended.set(true);
     }
 
     /// Reports the current state; `event` is Emby's `EventName`
@@ -865,12 +908,24 @@ fn apply_smoothing(player: Player, svp: bool) {
 
 /// Where a resume really starts: the configured seconds earlier, so you
 /// see again what you saw last (Emby's "rewind on resume").
-fn rewound(start_ticks: i64) -> i64 {
+fn rewound(start_ticks: i64, rewind_seconds: u32) -> i64 {
     if start_ticks <= 0 {
         return start_ticks;
     }
-    let rewind = i64::from(crate::account::playback().resume_rewind_seconds) * TICKS_PER_SECOND;
-    (start_ticks - rewind).max(0)
+    (start_ticks - i64::from(rewind_seconds) * TICKS_PER_SECOND).max(0)
+}
+
+/// Where playback starts: rewound only for a real resume, not for a
+/// restart at the same spot (a quality change).
+fn resume_start(start_ticks: i64, rewind: bool) -> i64 {
+    if rewind {
+        rewound(
+            start_ticks,
+            crate::account::playback().resume_rewind_seconds,
+        )
+    } else {
+        start_ticks
+    }
 }
 
 thread_local! {
@@ -960,6 +1015,16 @@ fn seconds_to_ticks(seconds: f64) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rewinds_only_a_real_resume() {
+        use super::{TICKS_PER_SECOND, resume_start, rewound};
+        let sec = TICKS_PER_SECOND;
+        assert_eq!(rewound(100 * sec, 5), 95 * sec);
+        assert_eq!(rewound(3 * sec, 5), 0);
+        assert_eq!(rewound(0, 5), 0);
+        // A quality restart keeps the exact spot.
+        assert_eq!(resume_start(100 * sec, false), 100 * sec);
+    }
 
     #[test]
     fn picks_the_chosen_version_or_the_first() {

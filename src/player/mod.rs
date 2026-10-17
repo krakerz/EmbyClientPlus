@@ -876,7 +876,8 @@ fn spawn_event_thread(mpv: &'static Mpv) {
 }
 
 fn log_mpv(prefix: &str, level: &str, text: &str) {
-    let text = text.trim_end();
+    // mpv logs the stream URL, which carries the access token.
+    let text = crate::logging::redact(text.trim_end());
     match level {
         "fatal" | "error" => tracing::error!(target: "mpv", "[{prefix}] {text}"),
         "warn" => tracing::warn!(target: "mpv", "[{prefix}] {text}"),

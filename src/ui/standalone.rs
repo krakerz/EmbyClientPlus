@@ -4,7 +4,7 @@
 //! Emby titles (SVP, shaders, picture options, tracks), with the next video
 //! in the folder after each one. Leaving the player goes back to the start.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -20,6 +20,9 @@ struct State {
     player: Player,
     nav: adw::NavigationView,
     session: RefCell<Option<Rc<PlaybackSession>>>,
+    /// Bumped by every stop or new play: a load finishing after that is
+    /// stale and gets stopped instead of attached.
+    load_generation: Cell<u64>,
     toasts: adw::ToastOverlay,
     /// The start page's list of videos in the downloads folder.
     library: gtk::Box,
@@ -54,6 +57,7 @@ pub fn present(app: &adw::Application, player: Player, target: Option<&str>) {
         player,
         nav: nav.clone(),
         session: RefCell::new(None),
+        load_generation: Cell::new(0),
         toasts,
         library,
     });
@@ -119,9 +123,13 @@ pub fn present(app: &adw::Application, player: Player, target: Option<&str>) {
     window.connect_close_request({
         let state = state.clone();
         move |_| {
+            state.load_generation.set(state.load_generation.get() + 1);
             if let Some(session) = state.session.take() {
                 session.stop();
             }
+            // Playing the last video leaves do-not-disturb on otherwise.
+            #[cfg(target_os = "linux")]
+            crate::dnd::set(false);
             if let Err(e) = state.player.quit() {
                 tracing::warn!("{e:#}");
             }
@@ -408,6 +416,8 @@ fn open_url(state: &Rc<State>, anchor: &gtk::Button) {
 }
 
 fn play(state: &Rc<State>, media: LocalMedia) {
+    state.load_generation.set(state.load_generation.get() + 1);
+    let load = state.load_generation.get();
     if let Some(session) = state.session.take() {
         session.stop();
     }
@@ -419,15 +429,30 @@ fn play(state: &Rc<State>, media: LocalMedia) {
     }
     let state = state.clone();
     glib::spawn_future_local(async move {
-        match PlaybackSession::start_local(state.player, media, 0).await {
+        let started = PlaybackSession::start_local(state.player, media, 0, false, || {
+            state.load_generation.get() == load
+        })
+        .await;
+        if state.load_generation.get() != load {
+            // Backed out or replaced while loading.
+            if let Ok(session) = started {
+                session.stop();
+            }
+            return;
+        }
+        match started {
             Ok(session) => {
-                state.session.replace(Some(session.clone()));
+                if let Some(old) = state.session.replace(Some(session.clone())) {
+                    old.stop();
+                }
                 state.page.attach(session, None);
             }
             Err(e) => {
                 tracing::error!("playback failed: {e:#}");
                 toast(&state, &format!("Couldn't play this: {e}"));
-                state.nav.pop();
+                if state.nav.visible_page().as_ref() == Some(state.page.page()) {
+                    state.nav.pop();
+                }
             }
         }
     });
@@ -449,7 +474,11 @@ fn handlers(state: &Rc<State>) -> Handlers {
         change_quality: Box::new(|_| {}),
         // Back on the start page: stop.
         stopped: Box::new(move || {
-            if let Some(session) = stopped.upgrade().and_then(|s| s.session.take()) {
+            let Some(state) = stopped.upgrade() else {
+                return;
+            };
+            state.load_generation.set(state.load_generation.get() + 1);
+            if let Some(session) = state.session.take() {
                 session.stop();
             }
         }),

@@ -15,31 +15,44 @@ pub enum Command {
     Help,
     /// An option we don't know.
     Unknown(String),
+    /// A second target (or anything after the first one).
+    Unexpected(String),
+}
+
+fn is_option(arg: &str) -> bool {
+    arg.starts_with('-') && arg.len() > 1
 }
 
 /// From the arguments after the program name.
 pub fn parse(args: impl IntoIterator<Item = String>) -> Command {
     let mut args = args.into_iter();
-    match args.next() {
-        None => Command::Run,
-        Some(arg) => match arg.as_str() {
-            "-v" | "-V" | "--version" => Command::Version,
-            "-h" | "--help" => Command::Help,
-            "--player" => Command::Player {
-                target: args.next(),
+    let Some(arg) = args.next() else {
+        return Command::Run;
+    };
+    let target = match arg.as_str() {
+        "--player" => match args.next() {
+            None => None,
+            Some(next) => match next.as_str() {
+                "-v" | "-V" | "--version" => return Command::Version,
+                "-h" | "--help" => return Command::Help,
+                "--" => args.next(),
+                _ if is_option(&next) => return Command::Unknown(next),
+                _ => Some(next),
             },
-            // `--` ends options: a file whose name starts with a dash.
-            "--" => match args.next() {
-                Some(target) => Command::Player {
-                    target: Some(target),
-                },
-                None => Command::Run,
-            },
-            option if option.starts_with('-') && option.len() > 1 => {
-                Command::Unknown(option.to_string())
-            }
-            _ => Command::Player { target: Some(arg) },
         },
+        // `--` ends options: a file whose name starts with a dash.
+        "--" => match args.next() {
+            Some(target) => Some(target),
+            None => return Command::Run,
+        },
+        "-v" | "-V" | "--version" => return Command::Version,
+        "-h" | "--help" => return Command::Help,
+        _ if is_option(&arg) => return Command::Unknown(arg),
+        _ => Some(arg),
+    };
+    match args.next() {
+        Some(extra) => Command::Unexpected(extra),
+        None => Command::Player { target },
     }
 }
 
@@ -48,6 +61,11 @@ pub fn version() -> String {
 }
 
 pub fn help() -> String {
+    // The folder differs per OS; the Linux one is the fallback.
+    let config = crate::config::config_dir().map_or_else(
+        |_| "~/.config/embyclientplus/".into(),
+        |dir| format!("{}", dir.display()),
+    );
     format!(
         "\
 {version} — a native Emby client with SVP frame interpolation.
@@ -67,7 +85,7 @@ Options:
   -h, --help                    show this help and exit
   -v, --version                 show the version and exit
 
-Settings and logs live in ~/.config/embyclientplus/.",
+Settings and logs live in {config}.",
         version = version()
     )
 }
@@ -107,11 +125,45 @@ mod tests {
             }
         );
         assert_eq!(parse_args(&["--player"]), Command::Player { target: None });
+        assert_eq!(parse_args(&["--player", "--help"]), Command::Help);
+        assert_eq!(parse_args(&["--player", "-h"]), Command::Help);
+        assert_eq!(parse_args(&["--player", "-v"]), Command::Version);
+        assert_eq!(parse_args(&["--player", "--version"]), Command::Version);
+        assert_eq!(
+            parse_args(&["--player", "--", "-odd.mkv"]),
+            Command::Player {
+                target: Some("-odd.mkv".into())
+            }
+        );
+        assert_eq!(
+            parse_args(&["--player", "--"]),
+            Command::Player { target: None }
+        );
+        assert_eq!(
+            parse_args(&["--player", "-x"]),
+            Command::Unknown("-x".into())
+        );
         // A lone "-" isn't an option (some tools mean stdin by it).
         assert_eq!(
             parse_args(&["-"]),
             Command::Player {
                 target: Some("-".into())
+            }
+        );
+    }
+
+    #[test]
+    fn extra_arguments_are_errors() {
+        let unexpected = |extra: &str| Command::Unexpected(extra.into());
+        assert_eq!(parse_args(&["a.mkv", "b.mkv"]), unexpected("b.mkv"));
+        assert_eq!(parse_args(&["a.mkv", "--help"]), unexpected("--help"));
+        assert_eq!(parse_args(&["--player", "a.mkv", "b"]), unexpected("b"));
+        assert_eq!(parse_args(&["--", "a.mkv", "b"]), unexpected("b"));
+        assert_eq!(parse_args(&["--player", "--", "a", "b"]), unexpected("b"));
+        assert_eq!(
+            parse_args(&["--player", "--", "--"]),
+            Command::Player {
+                target: Some("--".into())
             }
         );
     }
@@ -127,6 +179,9 @@ mod tests {
             crate::APP_NAME,
         ] {
             assert!(help.contains(needle), "{needle}");
+        }
+        if let Ok(dir) = crate::config::config_dir() {
+            assert!(help.contains(&dir.display().to_string()));
         }
     }
 }

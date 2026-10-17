@@ -231,7 +231,21 @@ jobs:
         id: version
         run: echo "version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)" >> "$GITHUB_OUTPUT"
 
+      # A draft has no tag yet, so same-version pushes still refresh it; once
+      # published (tagged), never overwrite its assets — bump the version.
+      - name: Check the version isn't released yet
+        id: gate
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          if git ls-remote --exit-code --tags origin "refs/tags/$version" >/dev/null; then
+            echo "::notice::$version is already released; bump the version to publish a new one"
+            echo "released=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "released=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Draft release
+        if: steps.gate.outputs.released == 'false'
         uses: softprops/action-gh-release@v2
         with:
           draft: true

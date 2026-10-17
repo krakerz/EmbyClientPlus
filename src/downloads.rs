@@ -159,11 +159,33 @@ fn pending_path() -> Result<PathBuf> {
 }
 
 fn load_all_pending() -> Vec<Pending> {
-    pending_path()
-        .ok()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+    pending_path().map_or_else(|_| Vec::new(), |path| load_list(&path))
+}
+
+/// The JSON list in `path` (empty if there's none). One that can't be
+/// parsed is set aside as `<name>.bad`, so the next save doesn't wipe
+/// what's in it.
+pub fn load_list<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<T> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    match serde_json::from_str(&text) {
+        Ok(list) => list,
+        Err(e) => {
+            let mut name = path.file_name().unwrap_or_default().to_os_string();
+            name.push(".bad");
+            let bad = path.with_file_name(name);
+            tracing::warn!(
+                "{} is unreadable ({e}); keeping it as {}",
+                path.display(),
+                bad.display()
+            );
+            if let Err(e) = std::fs::rename(path, &bad) {
+                tracing::warn!("couldn't set {} aside: {e}", path.display());
+            }
+            Vec::new()
+        }
+    }
 }
 
 /// `user_id`'s saved downloads, in order.
@@ -181,7 +203,7 @@ pub fn save_pending(user_id: &str, pending: &[Pending]) {
     all.extend(pending.iter().cloned());
     let result = (|| -> Result<()> {
         let path = pending_path()?;
-        std::fs::write(&path, serde_json::to_string_pretty(&all)?)
+        crate::config::write_atomic(&path, serde_json::to_string_pretty(&all)?.as_bytes())
             .with_context(|| format!("writing {}", path.display()))
     })();
     if let Err(e) = result {
@@ -236,39 +258,94 @@ pub fn neighbours(download: &Download) -> (Option<Download>, Option<Download>) {
     (previous, episodes.get(index + 1).cloned())
 }
 
+/// A file or folder name safe on every OS: no path separators, characters
+/// Windows forbids or control characters, no trailing dots or spaces, and
+/// no reserved device name (`CON`, `NUL.txt`...).
+fn clean(text: &str) -> String {
+    let mapped: String = text
+        .chars()
+        .filter(|c| !c.is_control())
+        .map(|c| {
+            if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let mut name = mapped
+        .trim_matches(' ')
+        .trim_end_matches([' ', '.'])
+        .to_string();
+    if name.is_empty() {
+        return "_".to_string();
+    }
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end()
+        .to_uppercase();
+    let numbered = |prefix: &str| {
+        stem.strip_prefix(prefix)
+            .is_some_and(|n| matches!(n.as_bytes(), [b'1'..=b'9']))
+    };
+    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || numbered("COM") || numbered("LPT")
+    {
+        name.insert(0, '_');
+    }
+    name
+}
+
 /// Where `item` goes under the downloads folder, without its extension:
 /// `Series/Season 1/S01E04 - Name`, or `Name (Year)` for anything else.
 fn relative_path(item: &BaseItem) -> PathBuf {
-    let clean = |text: &str| -> String {
-        text.chars()
-            .map(|c| {
-                if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
-                    '_'
-                } else {
-                    c
-                }
-            })
-            .collect::<String>()
-            .trim()
-            .trim_end_matches('.')
-            .to_string()
-    };
     match (
         &item.series_name,
         item.parent_index_number,
         item.index_number,
     ) {
-        (Some(series), season, Some(episode)) if item.item_type == "Episode" => {
-            let season = season.unwrap_or(0);
-            PathBuf::from(clean(series))
-                .join(format!("Season {season}"))
-                .join(clean(&format!("S{season:02}E{episode:02} - {}", item.name)))
+        (Some(series), season, episode) if item.item_type == "Episode" => {
+            // Unnumbered episodes stay under their series too, or two shows'
+            // "Special" would land on one file.
+            let series = PathBuf::from(clean(series));
+            match (season, episode) {
+                (None, None) => series.join(clean(&item.name)),
+                (season, episode) => {
+                    let season = season.unwrap_or(0);
+                    let name = match episode {
+                        Some(episode) => format!("S{season:02}E{episode:02} - {}", item.name),
+                        None => item.name.clone(),
+                    };
+                    series.join(format!("Season {season}")).join(clean(&name))
+                }
+            }
         }
         _ => PathBuf::from(clean(&match item.production_year {
             Some(year) => format!("{} ({year})", item.name),
             None => item.name.clone(),
         })),
     }
+}
+
+/// `file`, or, when it's another item's download (or any file we didn't
+/// make) `<name> (<item id>).<ext>`, so a later download never replaces an
+/// earlier one that happens to share its name.
+fn claim(file: PathBuf, item_id: &str) -> PathBuf {
+    let owner = |path: &Path| -> Option<String> {
+        let meta: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(meta_path(path)).ok()?).ok()?;
+        meta["Id"].as_str().map(str::to_string)
+    };
+    if !file.exists() || owner(&file).as_deref() == Some(item_id) {
+        return file;
+    }
+    let stem = file.file_stem().unwrap_or_default().to_string_lossy();
+    let name = match file.extension() {
+        Some(ext) => format!("{stem} ({item_id}).{}", ext.to_string_lossy()),
+        None => format!("{stem} ({item_id})"),
+    };
+    file.with_file_name(name)
 }
 
 /// Not enough room on the disk for a download (it never started).
@@ -338,22 +415,32 @@ fn partial_path(file: &Path, item_id: &str) -> PathBuf {
     file.with_file_name(name)
 }
 
-/// Deletes `item_id`'s half-finished download, if any (a cancelled one).
-pub fn discard_partial(item_id: &str) {
+/// `item_id`'s half-finished downloads anywhere under the downloads
+/// folder (the item may have been renamed since it started).
+fn partials(item_id: &str) -> Vec<PathBuf> {
     let suffix = format!(".{item_id}.part");
-    fn walk(dir: &Path, suffix: &str, depth: usize) {
+    fn walk(dir: &Path, suffix: &str, depth: usize, found: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
         for path in entries.filter_map(|e| e.ok().map(|e| e.path())) {
             if path.is_dir() && depth < 4 {
-                walk(&path, suffix, depth + 1);
+                walk(&path, suffix, depth + 1, found);
             } else if path.to_string_lossy().ends_with(suffix) {
-                let _ = std::fs::remove_file(&path);
+                found.push(path);
             }
         }
     }
-    walk(&folder(), &suffix, 0);
+    let mut found = Vec::new();
+    walk(&folder(), &suffix, 0, &mut found);
+    found
+}
+
+/// Deletes `item_id`'s half-finished download, if any (a cancelled one).
+pub fn discard_partial(item_id: &str) {
+    for path in partials(item_id) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// Downloads `item_id`'s original file with its metadata and artwork;
@@ -396,28 +483,39 @@ pub async fn fetch(
             .with_context(|| format!("couldn't create {}", parent.display()))?;
     }
     // Written as .part and renamed at the end, so a half download is never
-    // mistaken for a finished one.
-    let partial = partial_path(&file, &item.id);
+    // mistaken for a finished one. An earlier attempt's partial is carried
+    // on even if the item has been renamed on the server since.
+    let partial = partials(&item.id)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| partial_path(&file, &item.id));
     let have = std::fs::metadata(&partial).map_or(0, |m| m.len());
-    if let (Some(size), Some(free)) = (source["Size"].as_u64(), free_space(&file)) {
-        let needed = size.saturating_sub(have);
-        if needed + SPACE_RESERVE > free {
-            return Err(NotEnoughSpace { needed, free }.into());
+    let size = source["Size"].as_u64().filter(|s| *s > 0);
+    // Finished but never renamed (the app died in between): nothing to fetch.
+    if !size.is_some_and(|size| have >= size) {
+        if let (Some(size), Some(free)) = (size, free_space(&file)) {
+            let needed = size.saturating_sub(have);
+            if needed + SPACE_RESERVE > free {
+                return Err(NotEnoughSpace { needed, free }.into());
+            }
+        }
+        let url = client.direct_stream_url(&item.id, &source_id)?;
+        if let Err(e) = client
+            .download_to(&url, &partial, &progress, &cancelled, true)
+            .await
+        {
+            if discard.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = std::fs::remove_file(&partial);
+            }
+            return Err(e);
         }
     }
-    let url = client.direct_stream_url(&item.id, &source_id)?;
-    if let Err(e) = client
-        .download_to(&url, &partial, &progress, &cancelled, true)
-        .await
-    {
-        if discard.load(std::sync::atomic::Ordering::Relaxed) {
-            let _ = std::fs::remove_file(&partial);
-        }
-        return Err(e);
-    }
+    // Decided now, not at the start: another download may have taken the
+    // name meanwhile.
+    let file = claim(file, &item.id);
     std::fs::rename(&partial, &file)
         .with_context(|| format!("couldn't finish {}", file.display()))?;
-    std::fs::write(meta_path(&file), &raw)
+    crate::config::write_atomic(&meta_path(&file), raw.as_bytes())
         .with_context(|| format!("couldn't write the metadata for {}", file.display()))?;
     forget_ids();
     save_subtitles(&client, &item.id, &source_id, source, &file).await;
@@ -609,6 +707,71 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(relative_path(&movie), PathBuf::from("Film (2020)"));
+    }
+
+    #[test]
+    fn names_are_safe_on_every_os() {
+        assert_eq!(clean("Name ."), "Name");
+        assert_eq!(clean(" a. . "), "a");
+        assert_eq!(clean("a\u{0}b\tc\nd"), "abcd");
+        assert_eq!(clean("a/b:c"), "a_b_c");
+        assert_eq!(clean(".."), "_");
+        assert_eq!(clean("CON"), "_CON");
+        assert_eq!(clean("nul.txt"), "_nul.txt");
+        assert_eq!(clean("Com1"), "_Com1");
+        assert_eq!(clean("LPT9 (2020)"), "LPT9 (2020)");
+        assert_eq!(clean("COM0"), "COM0");
+        assert_eq!(clean("Console"), "Console");
+    }
+
+    #[test]
+    fn unnumbered_episodes_stay_under_their_series() {
+        let special = BaseItem {
+            name: "Trailer".into(),
+            item_type: "Episode".into(),
+            series_name: Some("Show".into()),
+            parent_index_number: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(
+            relative_path(&special),
+            PathBuf::from("Show/Season 1/Trailer")
+        );
+        let loose = BaseItem {
+            parent_index_number: None,
+            ..special
+        };
+        assert_eq!(relative_path(&loose), PathBuf::from("Show/Trailer"));
+    }
+
+    #[test]
+    fn a_taken_name_is_made_unique_by_item_id() {
+        let dir = std::env::temp_dir().join(format!("ecp-claim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("Trailer.mkv");
+        assert_eq!(claim(file.clone(), "2"), file);
+        std::fs::write(&file, "video").unwrap();
+        std::fs::write(meta_path(&file), r#"{"Id":"1","Name":"Trailer"}"#).unwrap();
+        assert_eq!(claim(file.clone(), "1"), file);
+        assert_eq!(claim(file.clone(), "2"), dir.join("Trailer (2).mkv"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_unreadable_list_is_set_aside_not_overwritten() {
+        let dir = std::env::temp_dir().join(format!("ecp-lists-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("list.json");
+        assert!(load_list::<String>(&path).is_empty());
+        std::fs::write(&path, "[\"a\"").unwrap();
+        assert!(load_list::<String>(&path).is_empty());
+        assert!(!path.exists());
+        assert!(dir.join("list.json.bad").is_file());
+        std::fs::write(&path, "[\"a\"]").unwrap();
+        assert_eq!(load_list::<String>(&path), ["a"]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

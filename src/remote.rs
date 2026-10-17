@@ -74,16 +74,21 @@ pub fn resolve(url: &str, options: &Options) -> Result<Stream> {
             subtitle: None,
         });
     }
-    let output = match Command::new("yt-dlp")
-        .args([
-            "--no-playlist",
-            "-f",
-            &format_selector(options.max_height),
-            "-J",
-            url,
-        ])
-        .output()
+    let mut command = Command::new("yt-dlp");
+    command.args([
+        "--no-playlist",
+        "-f",
+        &format_selector(options.max_height),
+        "-J",
+        url,
+    ]);
+    // The release build has no console, so a console tool would flash one.
+    #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let output = match command.output() {
         Ok(output) => output,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err(NeedsYtDlp(url.to_string()).into());
