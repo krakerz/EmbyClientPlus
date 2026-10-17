@@ -72,6 +72,8 @@ pub struct Update {
     pub version: String,
     pub asset_name: String,
     asset_url: String,
+    /// The asset's checksum (`sha256:<hex>`), checked after downloading.
+    digest: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,6 +87,9 @@ struct ReleaseJson {
 struct AssetJson {
     name: String,
     browser_download_url: String,
+    /// `sha256:<hex>`, when GitHub reports one.
+    #[serde(default)]
+    digest: Option<String>,
 }
 
 fn client() -> Result<reqwest::Client> {
@@ -127,6 +132,7 @@ fn pick_update(release: &ReleaseJson, kind: &InstallKind, current: &str) -> Opti
         version: release.tag_name.trim_start_matches('v').to_string(),
         asset_name: asset.name.clone(),
         asset_url: asset.browser_download_url.clone(),
+        digest: asset.digest.clone(),
     })
 }
 
@@ -217,8 +223,24 @@ impl Progress {
     }
 }
 
-/// Streams `url` to `to`, counting into `progress` as it goes.
-async fn download(url: &str, to: &Path, progress: &Progress) -> Result<()> {
+/// Streams `url` to `to`, counting into `progress` as it goes, and checks
+/// it against `digest` (`sha256:<hex>`) when there is one. A failed download
+/// leaves no file behind.
+async fn download(url: &str, to: &Path, progress: &Progress, digest: Option<&str>) -> Result<()> {
+    let result = download_inner(url, to, progress, digest).await;
+    if result.is_err() {
+        let _ = std::fs::remove_file(to);
+    }
+    result
+}
+
+async fn download_inner(
+    url: &str,
+    to: &Path,
+    progress: &Progress,
+    digest: Option<&str>,
+) -> Result<()> {
+    use sha2::Digest;
     use std::io::Write;
     let mut response = client()?
         .get(url)
@@ -234,15 +256,24 @@ async fn download(url: &str, to: &Path, progress: &Progress) -> Result<()> {
     let mut file = std::io::BufWriter::new(
         std::fs::File::create(to).with_context(|| format!("couldn't write {}", to.display()))?,
     );
+    let mut hash = sha2::Sha256::new();
     while let Some(chunk) = response.chunk().await.context("download interrupted")? {
         file.write_all(&chunk)
             .with_context(|| format!("couldn't write {}", to.display()))?;
+        hash.update(&chunk);
         progress
             .received
             .fetch_add(chunk.len() as u64, Ordering::Relaxed);
     }
     file.flush()
-        .with_context(|| format!("couldn't write {}", to.display()))
+        .with_context(|| format!("couldn't write {}", to.display()))?;
+    if let Some(expected) = digest.and_then(|d| d.strip_prefix("sha256:")) {
+        let actual: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        if !actual.eq_ignore_ascii_case(expected.trim()) {
+            bail!("the download is corrupt (checksum mismatch)");
+        }
+    }
+    Ok(())
 }
 
 /// Downloads `update` into `staging` (made fresh) and unpacks it there.
@@ -250,15 +281,23 @@ async fn fetch_and_unpack(staging: &Path, update: &Update, progress: &Progress) 
     let _ = std::fs::remove_dir_all(staging);
     std::fs::create_dir_all(staging)?;
     let archive = staging.join(&update.asset_name);
-    download(&update.asset_url, &archive, progress).await?;
+    download(
+        &update.asset_url,
+        &archive,
+        progress,
+        update.digest.as_deref(),
+    )
+    .await?;
     // bsdtar (Windows 10+, macOS) and GNU tar both pick the format themselves.
-    let status = Command::new("tar")
-        .arg("-xf")
-        .arg(&archive)
-        .arg("-C")
-        .arg(staging)
-        .status()
-        .context("couldn't run tar")?;
+    let mut tar = Command::new("tar");
+    tar.arg("-xf").arg(&archive).arg("-C").arg(staging);
+    // No console flash from this console tool in the windowless release build.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        tar.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let status = tar.status().context("couldn't run tar")?;
     if !status.success() {
         bail!("couldn't unpack {}", update.asset_name);
     }
@@ -273,41 +312,44 @@ async fn apply_archive(root: &Path, update: &Update, progress: &Progress) -> Res
     let unpacked = find_bundle(&staging)
         .with_context(|| format!("the update archive has no {BUNDLE_PROGRAM}"))?;
     if cfg!(windows) {
-        // Windows won't move a folder with files in use (the running exe,
-        // its DLLs), but it will rename those files: swap file by file.
-        for part in ["bin", "lib", "share"] {
-            if unpacked.join(part).exists() {
-                replace_files(&unpacked.join(part), &root.join(part))
-                    .context("couldn't install the update")?;
-            }
-        }
-        // The launcher beside bin\ (packaging/windows/launcher.c).
-        let launcher = unpacked.join(WINDOWS_LAUNCHER);
-        if launcher.is_file() {
-            let dest = root.join(WINDOWS_LAUNCHER);
-            if dest.exists() {
-                let aside = set_aside_name(&dest);
-                let _ = std::fs::remove_file(&aside);
-                std::fs::rename(&dest, &aside)?;
-            }
-            std::fs::rename(&launcher, &dest).context("couldn't install the update")?;
-        }
+        install_windows(&unpacked, root).context("couldn't install the update")?;
     } else {
-        for part in ["bin", "lib"] {
-            let old = staging.join(format!("old-{part}"));
-            let current = root.join(part);
-            if current.exists() {
-                std::fs::rename(&current, &old)?;
-            }
-            if let Err(e) = std::fs::rename(unpacked.join(part), &current) {
-                // Put the old copy back rather than leave a broken install.
-                let _ = std::fs::rename(&old, &current);
-                return Err(e).context("couldn't install the update");
-            }
-        }
+        swap_dirs(root, &unpacked, &staging, &["bin", "lib"])
+            .context("couldn't install the update")?;
     }
     let _ = std::fs::remove_dir_all(&staging);
     Ok(())
+}
+
+/// Swaps `parts` (folders) of the install at `root` for those of `unpacked`,
+/// the old ones going to `staging`. On an error everything already swapped is
+/// put back rather than leave a half-updated install.
+fn swap_dirs(root: &Path, unpacked: &Path, staging: &Path, parts: &[&str]) -> std::io::Result<()> {
+    // (installed folder, where its old copy went), pushed before the new one
+    // goes in so the one that failed is put back too.
+    let mut done: Vec<(PathBuf, Option<PathBuf>)> = Vec::new();
+    let result = (|| {
+        for part in parts {
+            let old = staging.join(format!("old-{part}"));
+            let current = root.join(part);
+            let had = current.exists();
+            if had {
+                std::fs::rename(&current, &old)?;
+            }
+            done.push((current.clone(), had.then_some(old)));
+            std::fs::rename(unpacked.join(part), &current)?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        for (current, old) in done.into_iter().rev() {
+            let _ = std::fs::remove_dir_all(&current);
+            if let Some(old) = old {
+                let _ = std::fs::rename(old, current);
+            }
+        }
+    }
+    result
 }
 
 const WINDOWS_LAUNCHER: &str = "Emby Client+.exe";
@@ -315,25 +357,81 @@ const WINDOWS_LAUNCHER: &str = "Emby Client+.exe";
 /// Suffix of files set aside by [`replace_files`]; removed on next start.
 const SET_ASIDE: &str = "old-embyclientplus";
 
+/// A file put in place: `dest` now holds the new file, and the one it
+/// replaced (if any) waits at `aside`.
+struct Swap {
+    dest: PathBuf,
+    aside: Option<PathBuf>,
+}
+
+/// Windows: swaps the unpacked release's `bin`, `lib`, `share` and launcher
+/// into `root`, all or nothing.
+fn install_windows(unpacked: &Path, root: &Path) -> std::io::Result<()> {
+    let mut swaps = Vec::new();
+    let result = (|| {
+        // Windows won't move a folder with files in use (the running exe,
+        // its DLLs), but it will rename those files: swap file by file.
+        for part in ["bin", "lib", "share"] {
+            if unpacked.join(part).exists() {
+                replace_files(&unpacked.join(part), &root.join(part), &mut swaps)?;
+            }
+        }
+        // The launcher beside bin\ (packaging/windows/launcher.c).
+        let launcher = unpacked.join(WINDOWS_LAUNCHER);
+        if launcher.is_file() {
+            replace_file(&launcher, &root.join(WINDOWS_LAUNCHER), &mut swaps)?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        undo_swaps(swaps);
+    }
+    result
+}
+
 /// Moves every file under `from` to the same place under `to`, renaming
-/// any file already there out of the way first (it may be in use).
-fn replace_files(from: &Path, to: &Path) -> std::io::Result<()> {
+/// any file already there out of the way first (it may be in use). Each
+/// swap is recorded in `swaps`, to be undone with [`undo_swaps`].
+fn replace_files(from: &Path, to: &Path, swaps: &mut Vec<Swap>) -> std::io::Result<()> {
     std::fs::create_dir_all(to)?;
-    for entry in std::fs::read_dir(from)? {
-        let entry = entry?;
+    let mut entries = std::fs::read_dir(from)?.collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
         let dest = to.join(entry.file_name());
         if entry.file_type()?.is_dir() {
-            replace_files(&entry.path(), &dest)?;
-            continue;
+            replace_files(&entry.path(), &dest, swaps)?;
+        } else {
+            replace_file(&entry.path(), &dest, swaps)?;
         }
-        if dest.exists() {
-            let aside = set_aside_name(&dest);
-            let _ = std::fs::remove_file(&aside);
-            std::fs::rename(&dest, &aside)?;
-        }
-        std::fs::rename(entry.path(), &dest)?;
     }
     Ok(())
+}
+
+fn replace_file(from: &Path, dest: &Path, swaps: &mut Vec<Swap>) -> std::io::Result<()> {
+    let aside = if dest.exists() {
+        let aside = set_aside_name(dest);
+        let _ = std::fs::remove_file(&aside);
+        std::fs::rename(dest, &aside)?;
+        Some(aside)
+    } else {
+        None
+    };
+    // Recorded first: if the move fails, the original still has to come back.
+    swaps.push(Swap {
+        dest: dest.to_path_buf(),
+        aside,
+    });
+    std::fs::rename(from, dest)
+}
+
+/// Puts every set-aside original back, newest swap first.
+fn undo_swaps(swaps: Vec<Swap>) {
+    for swap in swaps.into_iter().rev() {
+        let _ = std::fs::remove_file(&swap.dest);
+        if let Some(aside) = swap.aside {
+            let _ = std::fs::rename(aside, swap.dest);
+        }
+    }
 }
 
 fn set_aside_name(path: &Path) -> PathBuf {
@@ -407,7 +505,13 @@ async fn apply_mac_app(app: &Path, update: &Update, progress: &Progress) -> Resu
 
 async fn apply_appimage(path: &Path, update: &Update, progress: &Progress) -> Result<()> {
     let partial = path.with_extension("AppImage.part");
-    download(&update.asset_url, &partial, progress).await?;
+    download(
+        &update.asset_url,
+        &partial,
+        progress,
+        update.digest.as_deref(),
+    )
+    .await?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -416,8 +520,35 @@ async fn apply_appimage(path: &Path, update: &Update, progress: &Progress) -> Re
     std::fs::rename(&partial, path).context("couldn't replace the AppImage")
 }
 
-/// Starts the updated copy; the caller then quits.
+/// The install to start once this process has exited (see
+/// [`spawn_pending_relaunch`]).
+static PENDING_RELAUNCH: std::sync::Mutex<Option<InstallKind>> = std::sync::Mutex::new(None);
+
+/// Asks for the updated copy to start after this process exits: started now,
+/// it would find this one still owning the app's bus name and just activate
+/// it. The caller then quits.
 pub fn relaunch(kind: &InstallKind) -> Result<()> {
+    if *kind == InstallKind::Source {
+        bail!("nothing to relaunch");
+    }
+    if let Ok(mut pending) = PENDING_RELAUNCH.lock() {
+        *pending = Some(kind.clone());
+    }
+    Ok(())
+}
+
+/// Starts the copy [`relaunch`] asked for, if any; `main` calls it once the
+/// application has shut down.
+pub fn spawn_pending_relaunch() {
+    let Some(kind) = PENDING_RELAUNCH.lock().ok().and_then(|mut p| p.take()) else {
+        return;
+    };
+    if let Err(e) = spawn_updated(&kind) {
+        tracing::warn!("{e:#}");
+    }
+}
+
+fn spawn_updated(kind: &InstallKind) -> Result<()> {
     let program = match kind {
         InstallKind::Archive(root) if cfg!(windows) => root.join(BUNDLE_PROGRAM),
         InstallKind::Archive(root) => root.join("bin/embyclientplus"),
@@ -450,14 +581,17 @@ mod tests {
                 AssetJson {
                     name: format!("embyclientplus-{tag}-linux-x86_64.tar.gz"),
                     browser_download_url: "https://x/archive".into(),
+                    digest: None,
                 },
                 AssetJson {
                     name: format!("embyclientplus-{tag}-windows-x86_64.zip"),
                     browser_download_url: "https://x/windows".into(),
+                    digest: None,
                 },
                 AssetJson {
                     name: format!("EmbyClientPlus-{tag}-x86_64.AppImage"),
                     browser_download_url: "https://x/appimage".into(),
+                    digest: None,
                 },
             ],
         }
@@ -512,7 +646,7 @@ mod tests {
         std::fs::write(new.join("app.exe"), b"new").unwrap();
         std::fs::write(new.join("sub/data"), b"new").unwrap();
         std::fs::write(current.join("app.exe"), b"old").unwrap();
-        replace_files(&new, &current).unwrap();
+        replace_files(&new, &current, &mut Vec::new()).unwrap();
         assert_eq!(std::fs::read(current.join("app.exe")).unwrap(), b"new");
         assert_eq!(std::fs::read(current.join("sub/data")).unwrap(), b"new");
         assert_eq!(
@@ -520,6 +654,70 @@ mod tests {
             b"old"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_failed_file_swap_restores_every_replaced_file() {
+        let root = std::env::temp_dir().join(format!("embyclientplus-undo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (new, current) = (root.join("new"), root.join("current"));
+        std::fs::create_dir_all(new.join("sub")).unwrap();
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(new.join("a.dll"), b"new").unwrap();
+        std::fs::write(new.join("b.dll"), b"new").unwrap();
+        std::fs::write(new.join("sub/data"), b"new").unwrap();
+        std::fs::write(current.join("a.dll"), b"old").unwrap();
+        std::fs::write(current.join("b.dll"), b"old").unwrap();
+        // A file where a folder has to go: the swap fails after a and b.
+        std::fs::write(current.join("sub"), b"in the way").unwrap();
+        let mut swaps = Vec::new();
+        assert!(replace_files(&new, &current, &mut swaps).is_err());
+        undo_swaps(swaps);
+        assert_eq!(std::fs::read(current.join("a.dll")).unwrap(), b"old");
+        assert_eq!(std::fs::read(current.join("b.dll")).unwrap(), b"old");
+        assert!(!set_aside_name(&current.join("a.dll")).exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_failed_folder_swap_restores_every_folder() {
+        let root = std::env::temp_dir().join(format!("embyclientplus-dirs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (install, unpacked, staging) = (
+            root.join("install"),
+            root.join("unpacked"),
+            root.join("stage"),
+        );
+        for dir in ["bin", "lib"] {
+            std::fs::create_dir_all(install.join(dir)).unwrap();
+            std::fs::write(install.join(dir).join("f"), b"old").unwrap();
+        }
+        // The new archive has bin but no lib, so the second swap fails.
+        std::fs::create_dir_all(unpacked.join("bin")).unwrap();
+        std::fs::write(unpacked.join("bin/f"), b"new").unwrap();
+        std::fs::create_dir_all(&staging).unwrap();
+        assert!(swap_dirs(&install, &unpacked, &staging, &["bin", "lib"]).is_err());
+        assert_eq!(std::fs::read(install.join("bin/f")).unwrap(), b"old");
+        assert_eq!(std::fs::read(install.join("lib/f")).unwrap(), b"old");
+        // And a good one swaps both (the failed try moved `bin` out of here).
+        std::fs::create_dir_all(unpacked.join("bin")).unwrap();
+        std::fs::create_dir_all(unpacked.join("lib")).unwrap();
+        std::fs::write(unpacked.join("lib/f"), b"new").unwrap();
+        std::fs::write(unpacked.join("bin/f"), b"new").unwrap();
+        swap_dirs(&install, &unpacked, &staging, &["bin", "lib"]).unwrap();
+        assert_eq!(std::fs::read(install.join("bin/f")).unwrap(), b"new");
+        assert_eq!(std::fs::read(install.join("lib/f")).unwrap(), b"new");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn release_assets_carry_an_optional_digest() {
+        let json = r#"{"tag_name":"v9.9.9","assets":[
+            {"name":"x-linux-x86_64.tar.gz","browser_download_url":"https://x/a","digest":"sha256:ab12"},
+            {"name":"x-x86_64.AppImage","browser_download_url":"https://x/b"}]}"#;
+        let release: ReleaseJson = serde_json::from_str(json).unwrap();
+        assert_eq!(release.assets[0].digest.as_deref(), Some("sha256:ab12"));
+        assert_eq!(release.assets[1].digest, None);
     }
 
     /// End-to-end check against a fake release server (not run by default):
@@ -564,7 +762,7 @@ mod tests {
         let progress = Progress::default();
         tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(download(&url, &to, &progress))
+            .block_on(download(&url, &to, &progress, None))
             .unwrap();
         let size = std::fs::metadata(&to).unwrap().len();
         assert_eq!(progress.received(), size);

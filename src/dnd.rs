@@ -6,7 +6,7 @@
 //! already in do-not-disturb mode is left that way afterwards.
 
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use crate::config::Settings;
 
@@ -46,37 +46,86 @@ fn enable(on_command: &str, off_command: &str) -> Option<Held> {
     if !on_command.trim().is_empty() {
         return shell(on_command).then(|| Held::Custom(off_command.to_string()));
     }
-    if let Some(held) = plasma_inhibit() {
-        return Some(held);
+    // Probing costs a D-Bus wait and several subprocesses, so what this
+    // desktop has is looked up once per process (nothing included).
+    static BACKEND: OnceLock<Option<Backend>> = OnceLock::new();
+    if let Some(backend) = BACKEND.get() {
+        return backend.and_then(|backend| attempt(backend).flatten());
     }
+    let mut found = None;
+    let mut held = None;
+    for backend in Backend::ALL {
+        if let Some(result) = attempt(backend) {
+            found = Some(backend);
+            held = result;
+            break;
+        }
+    }
+    let _ = BACKEND.set(found);
+    held
+}
+
+#[derive(Clone, Copy)]
+enum Backend {
+    Plasma,
+    Caelestia,
+    Swaync,
+    Dunst,
+    Mako,
+    Gnome,
+}
+
+impl Backend {
+    /// In the order they're tried.
+    const ALL: [Backend; 6] = [
+        Backend::Plasma,
+        Backend::Caelestia,
+        Backend::Swaync,
+        Backend::Dunst,
+        Backend::Mako,
+        Backend::Gnome,
+    ];
+}
+
+/// `None`: the backend isn't on this desktop. Otherwise whether
+/// do-not-disturb was switched on: it isn't when it was on already.
+fn attempt(backend: Backend) -> Option<Option<Held>> {
     // Each: is it there, and is do-not-disturb off now? Then switch it on.
-    let caelestia = ["qs", "-c", "caelestia", "ipc", "call", "notifs"];
-    if let Some(enabled) = output(&[&caelestia[..], &["isDndEnabled"]].concat()) {
-        return (enabled.trim() == "false" && run(&[&caelestia[..], &["enableDnd"]].concat()))
-            .then_some(Held::Caelestia);
-    }
-    if let Some(enabled) = output(&["swaync-client", "--get-dnd"]) {
-        return (enabled.trim() == "false" && run(&["swaync-client", "--dnd-on"]))
-            .then_some(Held::Swaync);
-    }
-    if let Some(paused) = output(&["dunstctl", "is-paused"]) {
-        return (paused.trim() == "false" && run(&["dunstctl", "set-paused", "true"]))
-            .then_some(Held::Dunst);
-    }
-    if let Some(modes) = output(&["makoctl", "mode"]) {
-        return (!modes.lines().any(|m| m.trim() == "do-not-disturb")
-            && run(&["makoctl", "mode", "-a", "do-not-disturb"]))
-        .then_some(Held::Mako);
-    }
-    let gnome = std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.contains("GNOME"));
-    if gnome {
-        let key = ["org.gnome.desktop.notifications", "show-banners"];
-        let shown = output(&[&["gsettings", "get"][..], &key[..]].concat())?;
-        return (shown.trim() == "true"
-            && run(&[&["gsettings", "set"][..], &key[..], &["false"]].concat()))
-        .then_some(Held::Gnome);
-    }
-    None
+    Some(match backend {
+        Backend::Plasma => return plasma_inhibit().map(Some),
+        Backend::Caelestia => {
+            let caelestia = ["qs", "-c", "caelestia", "ipc", "call", "notifs"];
+            let enabled = output(&[&caelestia[..], &["isDndEnabled"]].concat())?;
+            (enabled.trim() == "false" && run(&[&caelestia[..], &["enableDnd"]].concat()))
+                .then_some(Held::Caelestia)
+        }
+        Backend::Swaync => {
+            let enabled = output(&["swaync-client", "--get-dnd"])?;
+            (enabled.trim() == "false" && run(&["swaync-client", "--dnd-on"]))
+                .then_some(Held::Swaync)
+        }
+        Backend::Dunst => {
+            let paused = output(&["dunstctl", "is-paused"])?;
+            (paused.trim() == "false" && run(&["dunstctl", "set-paused", "true"]))
+                .then_some(Held::Dunst)
+        }
+        Backend::Mako => {
+            let modes = output(&["makoctl", "mode"])?;
+            (!modes.lines().any(|m| m.trim() == "do-not-disturb")
+                && run(&["makoctl", "mode", "-a", "do-not-disturb"]))
+            .then_some(Held::Mako)
+        }
+        Backend::Gnome => {
+            if !std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.contains("GNOME")) {
+                return None;
+            }
+            let key = ["org.gnome.desktop.notifications", "show-banners"];
+            let shown = output(&[&["gsettings", "get"][..], &key[..]].concat())?;
+            (shown.trim() == "true"
+                && run(&[&["gsettings", "set"][..], &key[..], &["false"]].concat()))
+            .then_some(Held::Gnome)
+        }
+    })
 }
 
 #[cfg(test)]

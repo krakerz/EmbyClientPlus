@@ -111,7 +111,8 @@ fn restart(kind: &InstallKind) {
         tracing::warn!("{e:#}");
         return;
     }
-    // Closing the window runs the normal shutdown (playback report, SVP).
+    // The new copy starts once this one has exited (main). Closing the window
+    // runs the normal shutdown (playback report, SVP).
     if let Some(window) = gio::Application::default()
         .and_downcast::<gtk::Application>()
         .and_then(|app| app.active_window())

@@ -33,7 +33,8 @@ impl Thumbnails {
             0 => 1000,
             ms => ms,
         };
-        let mut frames = Vec::with_capacity(count);
+        // The server's count is untrusted: never reserve more than the data holds.
+        let mut frames = Vec::with_capacity(count.min((data.len() - HEADER) / 8));
         for i in 0..count {
             let entry = HEADER + i * 8;
             let (Some(timestamp), Some(start), Some(end)) =
@@ -131,6 +132,14 @@ mod tests {
         let fine = Thumbnails::parse(bif(&[0, 5], 2000)).unwrap();
         assert_eq!(fine.at(9.0).0, 0);
         assert_eq!(fine.at(10.0).0, 1);
+    }
+
+    #[test]
+    fn a_huge_count_is_not_allocated() {
+        // Reserving 4 billion frames would abort; this just runs out of index.
+        let mut data = bif(&[0, 10], 1000);
+        data[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(Thumbnails::parse(data).is_err());
     }
 
     #[test]

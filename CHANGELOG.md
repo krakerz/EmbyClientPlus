@@ -2,6 +2,41 @@
 
 ## [Unreleased]
 
+## [1.17.0] — 2026-10-17
+
+### Changed
+- Launching the app while it's already open brings its window forward instead of starting a second copy inside it; opening a file still starts its own player.
+- The command line rejects extra or unreadable arguments, and `--help` names the right settings folder on every OS.
+- Auto-download and "Download Series" skip episodes that aren't available yet.
+- A download folder typed in Preferences accepts `~` and rejects relative paths.
+- The updater checks the download's checksum, and puts everything back if an update fails partway.
+
+### Fixed
+- Access tokens no longer appear in log files.
+- Leaving the player or skipping ahead while a title is still loading no longer leaves it playing in the background or closes the wrong page.
+- Changing quality no longer jumps back 5 seconds.
+- Downloaded HDR titles start with SVP off, like streamed ones, and downloads show the server's track names.
+- The end of a video reports the exact final position, so short videos get marked watched.
+- Music keeps playing when the next track isn't ready in time, and skips a track that fails to play.
+- Linux: notifications come back when the window is closed during a video.
+- Do-not-disturb no longer slows every video start when no supported notification service is found.
+- Downloads can be paused or cancelled on a stalled connection, and a dead connection fails instead of hanging.
+- A paused download continues even if the title was renamed on the server, and one that had already finished completes instead of failing.
+- Two downloads with the same title no longer overwrite each other.
+- Downloads are no longer lost from the queue, or carried over to another account, after signing out.
+- Download progress keeps updating after coming back from the player.
+- Queueing a long series no longer freezes the app.
+- Settings, sign-in, the download queue and auto-download survive a crash or power loss while saving.
+- Download file names are valid on Windows (reserved names like CON, trailing dots).
+- Lower CPU and battery use while a library grid is open.
+- The "In Progress" filter shows an error instead of an empty list when loading fails.
+- Image memory is capped by size, so browsing many titles no longer uses gigabytes; often-seen artwork stays in the disk cache.
+- A damaged seek-preview file can no longer crash the app.
+- Unplugging a controller while holding a direction no longer keeps scrolling, and the legend stays while another controller is connected.
+- Controller remapping: two prompts no longer cancel each other, and closing Preferences cancels a pending one.
+- The updater's Restart reliably starts the new version.
+- Windows: no console window flashes when playing trailers or updating, and closing the app no longer waits 2 seconds for SVP Manager.
+
 ## [1.16.1] — 2026-10-13
 
 ### Added

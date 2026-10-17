@@ -666,8 +666,11 @@ fn reload_grid(
             let ids = match ids {
                 Ok(ids) => ids,
                 Err(e) => {
-                    tracing::warn!("in-progress series: {e:#}");
-                    Vec::new()
+                    // Like a failed page load, not an empty list.
+                    if let Some(ui) = weak.upgrade() {
+                        ui.report_error("Could not load items", &e);
+                    }
+                    return;
                 }
             };
             let Some(count) = count.upgrade() else { return };

@@ -20,7 +20,7 @@ use gtk::glib;
 use crate::emby::EmbyClient;
 use crate::emby::models::{BaseItem, ProgressRequest, StoppedRequest};
 use crate::emby::playback_info::StreamRequest;
-use crate::player::{END_FILE_REASON_EOF, Player, PlayerEvent};
+use crate::player::{END_FILE_REASON_EOF, END_FILE_REASON_ERROR, Player, PlayerEvent};
 use crate::runtime::{spawn_detached, spawn_tokio};
 pub use queue::{Queue, Repeat};
 
@@ -28,6 +28,9 @@ const TICKS_PER_SECOND: f64 = 10_000_000.0;
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
 /// "Previous" restarts the track instead when this far in.
 const RESTART_THRESHOLD: f64 = 3.0;
+/// Tracks in a row that may fail to play before the queue gives up, so a
+/// dead server doesn't spin through the queue forever.
+const MAX_FAILURES: u32 = 5;
 
 thread_local! {
     /// The active engine, for player events (main thread only).
@@ -92,6 +95,8 @@ struct Inner {
     paused: Cell<bool>,
     /// Bumped on every load, so late async results for an older one drop.
     generation: Cell<u64>,
+    /// Tracks that failed to play since one last loaded.
+    failures: Cell<u32>,
     timer: RefCell<Option<glib::SourceId>>,
     listeners: RefCell<Vec<Box<dyn Fn()>>>,
 }
@@ -110,6 +115,7 @@ impl MusicPlayer {
             active: Cell::new(false),
             paused: Cell::new(false),
             generation: Cell::new(0),
+            failures: Cell::new(0),
             timer: RefCell::new(None),
             listeners: RefCell::new(Vec::new()),
         });
@@ -499,12 +505,28 @@ impl MusicPlayer {
                 self.report(Some(if *paused { "Pause" } else { "Unpause" }));
                 self.changed();
             }
-            // The last track ended with nothing queued.
-            PlayerEvent::Finished(END_FILE_REASON_EOF) if !self.inner.next_queued.get() => {
-                if self.repeat() == Repeat::One {
+            PlayerEvent::FileLoaded => self.inner.failures.set(0),
+            // A track ended or failed with nothing preloaded: the last one,
+            // or the next is still resolving (a queue edit, a slow server).
+            PlayerEvent::Finished(reason @ (END_FILE_REASON_EOF | END_FILE_REASON_ERROR))
+                if !self.inner.next_queued.get() =>
+            {
+                let failed = *reason == END_FILE_REASON_ERROR;
+                // Repeat-one is mpv's own loop.
+                if self.repeat() == Repeat::One && !failed {
                     return;
                 }
-                self.report_stopped(false);
+                if failed {
+                    tracing::warn!("mpv could not play the track");
+                    self.inner.failures.set(self.inner.failures.get() + 1);
+                }
+                self.report_stopped(!failed);
+                let more = self.inner.failures.get() < MAX_FAILURES
+                    && self.inner.queue.borrow().upcoming(self.repeat()).is_some();
+                if more && self.inner.queue.borrow_mut().advance(self.repeat()) {
+                    self.load_current();
+                    return;
+                }
                 self.inner.current.replace(None);
                 self.inner.paused.set(true);
                 self.changed();

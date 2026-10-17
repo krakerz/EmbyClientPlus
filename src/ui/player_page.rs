@@ -1229,7 +1229,12 @@ impl Inner {
 
     /// End of file: on to the next episode unless the user said no.
     fn finished(self: &Rc<Self>) {
-        let has_next = self.session().is_some_and(|s| s.next.is_some());
+        // A stale EOF from the previous file, while the next one loads.
+        let Some(session) = self.session() else {
+            return;
+        };
+        session.mark_ended();
+        let has_next = session.next.is_some();
         if has_next && self.autoplay_next.get() && self.up_next.get() != UpNext::Cancelled {
             self.play_neighbour(true);
         } else {

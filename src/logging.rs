@@ -2,6 +2,7 @@
 //! keeping only the newest few files. Panics are logged too, since a panic
 //! inside a GTK callback aborts before stderr is usually captured.
 
+use std::borrow::Cow;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -50,6 +51,34 @@ pub fn init() -> Option<PathBuf> {
             None
         }
     }
+}
+
+/// `text` with Emby access tokens (`api_key=`, `X-Emby-Token=`, `AccessToken=`
+/// query values) masked, for anything that may print a stream URL.
+pub fn redact(text: &str) -> Cow<'_, str> {
+    const KEYS: [&str; 3] = ["api_key=", "x-emby-token=", "accesstoken="];
+    // ASCII lowercasing keeps byte offsets, so positions carry over to `text`.
+    let lower = text.to_ascii_lowercase();
+    let mut out = String::new();
+    let mut pos = 0;
+    while let Some((at, len)) = KEYS
+        .iter()
+        .filter_map(|key| lower[pos..].find(key).map(|i| (pos + i, key.len())))
+        .min()
+    {
+        let value = at + len;
+        let end = text[value..]
+            .find(|c: char| c == '&' || c == '"' || c == '\'' || c.is_whitespace())
+            .map_or(text.len(), |i| value + i);
+        out.push_str(&text[pos..value]);
+        out.push_str("***");
+        pos = end;
+    }
+    if pos == 0 {
+        return Cow::Borrowed(text);
+    }
+    out.push_str(&text[pos..]);
+    Cow::Owned(out)
 }
 
 /// Where log files go.
@@ -119,6 +148,21 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn tokens_are_redacted() {
+        assert_eq!(
+            redact("Playing: http://h:8096/stream?static=true&API_KEY=abc123&x=1 ok"),
+            "Playing: http://h:8096/stream?static=true&API_KEY=***&x=1 ok"
+        );
+        assert_eq!(
+            redact("GET \"http://h/a?x-emby-token=t1\" and 'http://h/b?AccessToken=t2'"),
+            "GET \"http://h/a?x-emby-token=***\" and 'http://h/b?AccessToken=***'"
+        );
+        assert_eq!(redact("api_key=a api_key=b"), "api_key=*** api_key=***");
+        assert_eq!(redact("api_key="), "api_key=***");
+        assert!(matches!(redact("nothing secret"), Cow::Borrowed(_)));
+    }
 
     #[test]
     fn timestamps_are_utc_and_sortable() {

@@ -177,7 +177,8 @@ fn write_copy(user_id: &str, user: &Value) {
     let result = (|| -> Result<()> {
         let path = copy_path(user_id)?;
         let text = serde_json::to_string_pretty(user)?;
-        std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))
+        crate::config::write_atomic(&path, text.as_bytes())
+            .with_context(|| format!("writing {}", path.display()))
     })();
     if let Err(e) = result {
         tracing::warn!("couldn't save the account's settings: {e:#}");

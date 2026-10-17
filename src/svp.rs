@@ -267,6 +267,7 @@ fn find_file(dir: &std::path::Path, names: &[&str], depth: usize) -> Option<Path
 }
 
 /// How long SVP Manager gets to exit on SIGTERM before it's killed.
+#[cfg(unix)]
 const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The SVP Manager this app started, if any; only that one gets stopped.
@@ -333,16 +334,16 @@ pub fn stop_started() {
         // Politely first, so it can close cleanly; forcefully if it lingers.
         // (Windows has no polite signal for a GUI process: straight to kill.)
         #[cfg(unix)]
-        // SAFETY: a plain signal to the child process we started.
-        unsafe {
-            libc::kill(child.id() as i32, libc::SIGTERM)
-        };
-        let deadline = std::time::Instant::now() + STOP_GRACE;
-        while std::time::Instant::now() < deadline {
-            if matches!(child.try_wait(), Ok(Some(_))) {
-                break;
+        {
+            // SAFETY: a plain signal to the child process we started.
+            unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+            let deadline = std::time::Instant::now() + STOP_GRACE;
+            while std::time::Instant::now() < deadline {
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
         }
         let _ = child.kill();
         let _ = child.wait();

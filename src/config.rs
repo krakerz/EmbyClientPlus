@@ -777,9 +777,27 @@ impl Settings {
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
         let contents = toml::to_string_pretty(self).context("failed to serialize settings")?;
-        std::fs::write(&path, contents)
+        if std::fs::read_to_string(&path).is_ok_and(|old| old == contents) {
+            return Ok(());
+        }
+        write_atomic(&path, contents.as_bytes())
             .with_context(|| format!("failed to write {}", path.display()))
     }
+}
+
+/// Writes `contents` to a temporary file beside `path`, then renames it over
+/// `path`, so a crash or power loss mid-write leaves the old file intact.
+pub fn write_atomic(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".tmp");
+    let temp = path.with_file_name(name);
+    let mut file = std::fs::File::create(&temp)?;
+    file.write_all(contents)?;
+    file.sync_all()?;
+    drop(file);
+    // Replaces an existing `path` on Windows too (MOVEFILE_REPLACE_EXISTING).
+    std::fs::rename(&temp, path)
 }
 
 #[cfg(test)]

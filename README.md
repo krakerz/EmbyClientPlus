@@ -7,6 +7,9 @@ A native Emby client for Linux, Windows and macOS with SVP frame interpolation, 
 A GTK4/libadwaita Emby client with libmpv embedded in-process. Its libmpv has VapourSynth, so
 SVP 4 attaches just as it does to a standalone mpv.
 
+Icons: [Lucide](https://lucide.dev/) (ISC, `data/icons/LICENSE`), converted for GTK by
+`scripts/update-icons.sh` (needs `picosvg`).
+
 ## Features
 
 - **Browsing:** Home follows your Emby library order and visibility; library grids with remembered sort/filter, Suggestions and Collections tabs; series, seasons, cast, More Like This, Included In, favourites, History, search.
@@ -111,8 +114,5 @@ titles unless you turn it on for that title.
 ---
 
 ### Notes
-
-Icons: [Lucide](https://lucide.dev/) (ISC, `data/icons/LICENSE`), converted for GTK by
-`scripts/update-icons.sh` (needs `picosvg`).
 
 Built and maintained with the help of AI.
