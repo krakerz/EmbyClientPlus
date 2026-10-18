@@ -426,6 +426,12 @@ fn more_libraries(ui: &Ui, hidden: Vec<BaseItem>) -> gtk::Button {
 }
 
 fn show(ui: &Ui, content: &gtk::Box, data: HomeData) {
+    // Home rebuilds every time it comes back into view: the cursor returns
+    // to its spot (same row, same card) instead of the first tile.
+    let mark = content
+        .ancestor(adw::NavigationPage::static_type())
+        .and_downcast::<adw::NavigationPage>()
+        .and_then(|page| super::gamepad::mark_page_cursor(&page));
     clear(content);
     let show_more = crate::config::Settings::load()
         .unwrap_or_default()
@@ -477,6 +483,9 @@ fn show(ui: &Ui, content: &gtk::Box, data: HomeData) {
             Click::Open,
             More::Library(Box::new(library.clone())),
         ));
+    }
+    if let Some(mark) = mark {
+        mark.restore();
     }
 }
 
