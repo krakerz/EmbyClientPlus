@@ -135,14 +135,21 @@ pub fn expose_vapoursynth() {
     #[cfg(not(target_os = "linux"))]
     {
         const VAR: &str = "EMBYCLIENTPLUS_VSSCRIPT";
+        // mpv builds with VapourSynth 74+ support (Homebrew's) load VSScript
+        // at run time from VSSCRIPT_PATH, not through the stand-in; one the
+        // user set wins.
+        const MPV_VAR: &str = "VSSCRIPT_PATH";
         if std::env::var_os(VAR).is_some() {
             return;
         }
+        let user_set = std::env::var_os(MPV_VAR)
+            .map(PathBuf::from)
+            .filter(|path| path.is_file());
         let dirs = vsscript_search_dirs();
-        match dirs
-            .iter()
-            .find_map(|dir| find_file(dir, VSSCRIPT_NAMES, 4))
-        {
+        match user_set.or_else(|| {
+            dirs.iter()
+                .find_map(|dir| find_file(dir, VSSCRIPT_NAMES, 4))
+        }) {
             Some(library) => {
                 // SVP's VapourSynth (pip style) finds Python by searching
                 // for python.exe on the program's folder, then PATH; SVP's
@@ -160,7 +167,10 @@ pub fn expose_vapoursynth() {
                 }
                 // Logging isn't up yet; this is reported by `log_vapoursynth`.
                 // SAFETY: called first thing in main, while single-threaded.
-                unsafe { std::env::set_var(VAR, library) };
+                unsafe {
+                    std::env::set_var(MPV_VAR, &library);
+                    std::env::set_var(VAR, library);
+                }
             }
             None => {
                 let looked = dirs
@@ -246,8 +256,11 @@ fn vsscript_search_dirs() -> Vec<PathBuf> {
         .chain(
             [
                 "/opt/homebrew/opt/vapoursynth/lib",
+                // R74+ lives in a Python venv: libexec/lib/python3.x/site-packages/vapoursynth.
+                "/opt/homebrew/opt/vapoursynth/libexec",
                 "/opt/homebrew/lib",
                 "/usr/local/opt/vapoursynth/lib",
+                "/usr/local/opt/vapoursynth/libexec",
                 "/usr/local/lib",
                 "/opt/local/lib",
                 "/Library/Frameworks/VapourSynth.framework",

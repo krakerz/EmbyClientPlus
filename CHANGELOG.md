@@ -6,6 +6,7 @@
 
 ### Fixed
 - With a controller, coming back to Home (from a series, a library or any other page) put the cursor on the first library tile; it now returns to the card you left from.
+- macOS: SVP works with Homebrew's current VapourSynth without any manual setup.
 
 ## [1.19.0] — 2026-10-18
 
