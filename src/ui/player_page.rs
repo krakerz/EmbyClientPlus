@@ -1641,6 +1641,13 @@ impl Inner {
         button.set_sensitive(true);
         let (class, tooltip) = if !button.is_active() {
             (None, "SVP is off for this title")
+        } else if let Some(hint) = crate::svp::vapoursynth_hint() {
+            if !self.svp_warned.replace(true)
+                && let Some(handlers) = self.handlers()
+            {
+                (handlers.toast)(hint);
+            }
+            (Some("svp-missing"), hint)
         } else if self.player.svp_attached() {
             (Some("svp-active"), "SVP is interpolating")
         } else if crate::svp::manager_running() {

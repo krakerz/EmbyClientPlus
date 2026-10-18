@@ -22,6 +22,10 @@ on:
 permissions:
   contents: write
 
+env:
+  # No debug info in CI's test builds: smaller caches, faster links.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+
 jobs:
   build:
     if: github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'linux'
@@ -44,16 +48,9 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: cargo-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-
+      # Keyed on dependencies, not the app's own version, so a release
+      # doesn't re-upload the cache; only dependency builds are kept.
+      - uses: Swatinem/rust-cache@v2
 
       - name: Cache libmpv
         uses: actions/cache@v4
@@ -145,15 +142,15 @@ jobs:
 
       - uses: actions/checkout@v4
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      # MSYS2's cargo would use MSYS2's home, which the cache doesn't see.
+      - name: Point cargo's home at the cache
+        shell: pwsh
+        run: '"CARGO_HOME=$env:RUNNER_TEMP\cargo-home" >> $env:GITHUB_ENV'
+
+      # rustc/cargo queries go through MSYS2, whose Rust is the one building.
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            target
-          key: cargo-windows-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-windows-
+          cmd-format: msys2 -c "{0}"
 
       - name: Clippy
         if: ${{ !inputs.quick }}
@@ -185,15 +182,7 @@ jobs:
 
       - uses: actions/checkout@v4
 
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            target
-          key: cargo-macos-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-macos-
+      - uses: Swatinem/rust-cache@v2
 
       - name: Clippy
         if: ${{ !inputs.quick }}

@@ -179,6 +179,21 @@ pub fn expose_vapoursynth() {
 #[cfg(not(target_os = "linux"))]
 const NOT_FOUND_VAR: &str = "EMBYCLIENTPLUS_VSSCRIPT_SEARCHED";
 
+/// When no VapourSynth was found for SVP at startup, what to do about it
+/// (SVP attaches but can't interpolate without one). Linux builds link
+/// SVP's own copy, so there it's never missing at run time.
+pub fn vapoursynth_hint() -> Option<&'static str> {
+    #[cfg(not(target_os = "linux"))]
+    if std::env::var_os("EMBYCLIENTPLUS_VSSCRIPT").is_none() {
+        return Some(if cfg!(target_os = "macos") {
+            "SVP needs VapourSynth: install it with “brew install vapoursynth”, then restart the app"
+        } else {
+            "SVP's VapourSynth wasn't found: reinstall SVP 4, then restart the app"
+        });
+    }
+    None
+}
+
 /// Says in the log which VapourSynth SVP will get (once logging is up),
 /// and points the VapourSynth stand-in's own log next to ours.
 pub fn log_vapoursynth() {

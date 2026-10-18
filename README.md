@@ -37,7 +37,8 @@ macOS: the app isn't notarized; allow it once in System Settings → Privacy & S
 Anyway** (or `xattr -dr com.apple.quarantine "/Applications/Emby Client+.app"`).
 
 Every build updates itself (Preferences → Updates). SVP 4 is optional and found in its usual
-folder (`~/SVP4`, `C:\Program Files\SVP 4`, `/Applications/SVP 4 Mac.app`) or one you set.
+folder (`~/SVP4`, `C:\Program Files\SVP 4`, `/Applications/SVP 4 Mac.app`) or one you set. On
+macOS, SVP also needs VapourSynth from Homebrew (`brew install vapoursynth`), as SVP for Mac does.
 
 ## Building from source
 

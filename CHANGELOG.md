@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.19.0] — 2026-10-18
+
+### Added
+- macOS and Windows: when SVP is installed but VapourSynth isn't found, the player says so and how to fix it (on macOS, `brew install vapoursynth`), instead of silently not interpolating.
+
 ## [1.18.0] — 2026-10-17
 
 ### Added
