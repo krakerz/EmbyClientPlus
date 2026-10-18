@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.20.0] — 2026-10-18
+
+### Fixed
+- With a controller, coming back to Home (from a series, a library or any other page) put the cursor on the first library tile; it now returns to the card you left from.
+
 ## [1.19.0] — 2026-10-18
 
 ### Added

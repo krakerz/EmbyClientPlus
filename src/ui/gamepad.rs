@@ -412,6 +412,20 @@ pub(super) fn mark_cursor(anchor: &impl IsA<gtk::Widget>) -> Option<CursorMark> 
     Spot::of(anchor, &focus).map(CursorMark)
 }
 
+/// [`mark_cursor`] for a whole page, falling back to the spot it last had
+/// the cursor: a page coming back into view may rebuild before its own
+/// focus is back.
+pub(super) fn mark_page_cursor(page: &adw::NavigationPage) -> Option<CursorMark> {
+    mark_cursor(page).or_else(|| {
+        // SAFETY: see `track_focus`; cloned out immediately.
+        let spot = unsafe {
+            page.data::<Spot>(LAST_FOCUS_KEY)
+                .map(|s| s.as_ref().clone())
+        };
+        spot.map(CursorMark)
+    })
+}
+
 impl CursorMark {
     /// Back to the marked position (or the nearest one that exists).
     pub(super) fn restore(&self) -> bool {
