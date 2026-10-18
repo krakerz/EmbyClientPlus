@@ -71,13 +71,13 @@ fn open_more(ui: &Ui, more: &More) {
     ui.inner.nav.push(&page);
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum Click {
     Open,
     /// Continue Watching cards start playback right away.
     Resume,
-    /// Open in place of the current page (episode to episode).
-    Replace,
+    /// Up to the page: the details page shows another episode in place.
+    With(Rc<dyn Fn(&BaseItem)>),
 }
 
 pub fn row(
@@ -109,12 +109,13 @@ pub fn row_ending(
     for item in items {
         let weak = ui.downgrade();
         let target = item.clone();
+        let click = click.clone();
         cards.append(&card::button(ui, item, shape, move || {
             if let Some(ui) = weak.upgrade() {
-                match click {
+                match &click {
                     Click::Open => ui.open(&target),
                     Click::Resume => ui.play(&target, target.resume_ticks()),
-                    Click::Replace => ui.open_replacing(&target),
+                    Click::With(action) => action(&target),
                 }
             }
         }));

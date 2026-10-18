@@ -399,24 +399,27 @@ pub fn build(app: &adw::Application, player: Player) -> adw::ApplicationWindow {
         }
     });
 
-    // The right stick scrubs in the player; letting go always gets through,
-    // so a scrub never keeps running.
-    crate::controller::on_scrub({
+    // The right stick scrubs in the player and scrolls everywhere else.
+    // Whichever isn't in use is told it was let go, so neither keeps running.
+    crate::controller::on_right_stick({
         let state = Rc::downgrade(&state);
         let window = window.downgrade();
-        move |tilt| {
+        move |x, y| {
             let (Some(state), Some(window)) = (state.upgrade(), window.upgrade()) else {
                 return;
             };
-            let Some(ui) = state.ui.borrow().clone() else {
-                return;
-            };
-            let page = ui.player_page();
-            if tilt == 0.0
-                || (ui.player_visible() && window.visible_dialog().is_none() && !page.menu_open())
-            {
-                page.scrub_stick(tilt);
+            let ui = state.ui.borrow().clone();
+            let in_player = ui.as_ref().is_some_and(|ui| {
+                ui.player_visible()
+                    && window.visible_dialog().is_none()
+                    && !ui.player_page().menu_open()
+            });
+            if let Some(ui) = &ui {
+                ui.player_page()
+                    .scrub_stick(if in_player { x } else { 0.0 });
             }
+            let (x, y) = if in_player { (0.0, 0.0) } else { (x, y) };
+            super::stick_scroll::set(&window, x, y);
         }
     });
     super::gamepad::track_focus(&window);

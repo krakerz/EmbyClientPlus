@@ -17,6 +17,18 @@ pub fn handle(window: &adw::ApplicationWindow, ui: Option<&Ui>, pad: Pad, repeat
     window.set_focus_visible(true);
     end_tab_switch();
 
+    // The right stick scrolled the cursor out of view: a direction or A
+    // first brings it onto something visible, rather than jumping back.
+    if ui.is_none_or(|ui| !ui.player_visible())
+        && matches!(
+            controller::action_for(pad, Context::Browse),
+            Some(Action::Up | Action::Down | Action::Left | Action::Right | Action::Activate)
+        )
+        && super::stick_scroll::refocus_if_scrolled_away(window)
+    {
+        return;
+    }
+
     // The music panel: its own buttons first, then normal navigation.
     if let Some(ui) = ui
         && !ui.player_visible()
@@ -434,7 +446,7 @@ impl CursorMark {
 }
 
 /// A widget the cursor can sit on.
-fn usable(widget: &gtk::Widget) -> bool {
+pub(super) fn usable(widget: &gtk::Widget) -> bool {
     widget.is_mapped() && widget.is_sensitive() && widget.is_focusable() && !is_container(widget)
 }
 

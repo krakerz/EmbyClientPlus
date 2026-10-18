@@ -23,22 +23,21 @@ struct DetailsView {
     related: gtk::Box,
     /// The previous/next episode links, once loaded.
     neighbours: RefCell<Option<gtk::CenterBox>>,
-    /// Where the cursor goes when this page came from LB/RB.
+    /// Where the cursor goes after stepping to another episode.
     arrived_at: Cell<Option<Spot>>,
+    /// The title shown (episodes change it in place, see [`step`]).
+    item: RefCell<BaseItem>,
+    /// Bumped by every load, so only the newest one is shown.
+    load_generation: Cell<u64>,
 }
 
-/// Where the cursor was when LB/RB stepped to another episode, so the
-/// next page puts it back on the same kind of thing.
+/// Where the cursor was when stepping to another episode, so it goes back
+/// on the same kind of thing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Spot {
     Previous,
     Next,
     Play,
-}
-
-thread_local! {
-    /// Handed from the page LB/RB left to the one it opened.
-    static STEPPED_FROM: Cell<Option<Spot>> = const { Cell::new(None) };
 }
 
 pub fn page(ui: &Ui, item: &BaseItem) -> adw::NavigationPage {
@@ -55,44 +54,50 @@ pub fn page(ui: &Ui, item: &BaseItem) -> adw::NavigationPage {
     hero.extra.append(&related);
     let header = adw::HeaderBar::new();
     let page = scrolled_page(&item.name, None, &header, &hero.root);
-    // X / right-click on the page: the title's own menu (download, watched,
-    // favourite...). Cards below keep theirs.
-    let target = item.clone();
-    super::card::attach_menu(ui, &hero.root, move || Some(target.clone()));
     let view = Rc::new(DetailsView {
         hero,
         episodes,
         related,
         neighbours: RefCell::new(None),
-        arrived_at: Cell::new(STEPPED_FROM.with(Cell::take)),
+        arrived_at: Cell::new(None),
+        item: RefCell::new(item.clone()),
+        load_generation: Cell::new(0),
     });
-    // Opened by LB/RB: the navigation view focuses the header when the
-    // page slides in; put the cursor back where it was.
-    page.connect_shown({
-        let view = Rc::downgrade(&view);
-        move |_| {
-            if let Some(view) = view.upgrade() {
-                place_cursor(&view);
-            }
-        }
+    // X / right-click on the page: the title's own menu (download, watched,
+    // favourite...). Cards below keep theirs.
+    let shown = Rc::downgrade(&view);
+    super::card::attach_menu(ui, &view.hero.root, move || {
+        shown.upgrade().map(|view| view.item.borrow().clone())
     });
 
     // Show what we already have right away, then refresh from the server
     // (list results can lack the overview, and watch state may be stale).
     show(ui, &view, item);
-    let item_id = item.id.clone();
     reload_on_change(ui, &page, {
         let weak = ui.downgrade();
         let view = view.clone();
-        let item_id = item_id.clone();
         move || {
             if let Some(ui) = weak.upgrade() {
-                load(&ui, &view, &item_id);
+                let id = view.item.borrow().id.clone();
+                load(&ui, &view, &id);
             }
         }
     });
-    load(ui, &view, &item_id);
+    load(ui, &view, &item.id);
     page
+}
+
+/// Shows `target` (another episode) in this page instead of opening a new
+/// one: the current episode stays up until the new one has loaded, then
+/// everything changes at once, with no blank frame or scroll jump.
+fn step(ui: &Ui, view: &Rc<DetailsView>, target: &BaseItem, spot: Option<Spot>) {
+    // The rows below (cast...) keep at least their current height while
+    // stepping: an episode without them would shorten the page and scroll it.
+    let related = &view.related;
+    related.set_height_request(related.height().max(related.height_request()));
+    view.arrived_at.set(spot);
+    view.item.replace(target.clone());
+    load(ui, view, &target.id);
 }
 
 fn load(ui: &Ui, view: &Rc<DetailsView>, item_id: &str) {
@@ -101,6 +106,8 @@ fn load(ui: &Ui, view: &Rc<DetailsView>, item_id: &str) {
     let item_id = item_id.to_string();
     let ui = ui.clone();
     let view = view.clone();
+    let generation = view.load_generation.get() + 1;
+    view.load_generation.set(generation);
     glib::spawn_future_local(async move {
         let result = spawn_tokio(async move {
             let item = client.item(&user_id, &item_id).await?;
@@ -118,8 +125,21 @@ fn load(ui: &Ui, view: &Rc<DetailsView>, item_id: &str) {
             Ok::<_, anyhow::Error>((item, episodes))
         })
         .await;
+        // Stepped on again meanwhile: that load shows instead.
+        if view.load_generation.get() != generation {
+            return;
+        }
         match result {
             Ok((item, episodes)) => {
+                view.item.replace(item.clone());
+                if let Some(page) = view
+                    .hero
+                    .root
+                    .ancestor(adw::NavigationPage::static_type())
+                    .and_downcast::<adw::NavigationPage>()
+                {
+                    page.set_title(&item.name);
+                }
                 // Everything below is rebuilt; the cursor comes back to its
                 // spot (or, after LB/RB, to the matching one).
                 let mark = view
@@ -186,7 +206,7 @@ fn show(ui: &Ui, view: &DetailsView, item: &BaseItem) {
 }
 
 /// Previous/next links and "More in Season N" for an episode.
-fn show_episodes(ui: &Ui, view: &DetailsView, item: &BaseItem, episodes: &[BaseItem]) {
+fn show_episodes(ui: &Ui, view: &Rc<DetailsView>, item: &BaseItem, episodes: &[BaseItem]) {
     clear(&view.episodes);
     if episodes.is_empty() {
         return;
@@ -200,23 +220,24 @@ fn show_episodes(ui: &Ui, view: &DetailsView, item: &BaseItem, episodes: &[BaseI
         .ancestor(adw::NavigationPage::static_type())
         .and_downcast::<adw::NavigationPage>()
     {
-        let (weak, previous, next) = (ui.downgrade(), previous.clone(), next.clone());
+        let (weak, shown) = (ui.downgrade(), Rc::downgrade(view));
+        let (previous, next) = (previous.clone(), next.clone());
         let nav = nav.downgrade();
         super::set_tab_label(&page, "Episode");
         super::set_tab_stepper(&page, move |forward| {
             let target = if forward { &next } else { &previous };
-            let (Some(ui), Some(target)) = (weak.upgrade(), target) else {
+            let (Some(ui), Some(view), Some(target)) = (weak.upgrade(), shown.upgrade(), target)
+            else {
                 return;
             };
-            STEPPED_FROM.with(|spot| spot.set(Some(spot_of(nav.upgrade().as_ref()))));
-            ui.open_replacing(target);
+            step(&ui, &view, target, Some(spot_of(nav.upgrade().as_ref())));
         });
     }
     if let Some(previous) = previous {
-        nav.set_start_widget(Some(&neighbour_button(ui, &previous, false)));
+        nav.set_start_widget(Some(&neighbour_button(ui, view, &previous, false)));
     }
     if let Some(next) = next {
-        nav.set_end_widget(Some(&neighbour_button(ui, &next, true)));
+        nav.set_end_widget(Some(&neighbour_button(ui, view, &next, true)));
     }
     view.episodes.append(&nav);
 
@@ -239,7 +260,13 @@ fn show_episodes(ui: &Ui, view: &DetailsView, item: &BaseItem, episodes: &[BaseI
             })
         });
         let more = series.map_or(More::None, More::Library);
-        let strip = row(ui, &title, &season, Shape::Landscape, Click::Replace, more);
+        let (weak, shown) = (ui.downgrade(), Rc::downgrade(view));
+        let open = Click::With(Rc::new(move |target: &BaseItem| {
+            if let (Some(ui), Some(view)) = (weak.upgrade(), shown.upgrade()) {
+                step(&ui, &view, target, None);
+            }
+        }));
+        let strip = row(ui, &title, &season, Shape::Landscape, open, more);
         view.episodes.append(&strip);
         scroll_to_current(&strip, &season, &item.id);
     }
@@ -287,8 +314,8 @@ fn scroll_to_current(strip: &gtk::Box, season: &[BaseItem], item_id: &str) {
     handler.replace(Some(id));
 }
 
-/// "‹ S1:E3 · Title" / "S1:E5 · Title ›"; replaces this page rather than
-/// stacking another.
+/// "‹ S1:E3 · Title" / "S1:E5 · Title ›"; shows that episode in this page
+/// (see [`step`]).
 /// What the cursor is on now: one of the previous/next links, or else
 /// anything (Play stands in for it).
 fn spot_of(nav: Option<&gtk::CenterBox>) -> Spot {
@@ -321,7 +348,12 @@ fn place_cursor(view: &DetailsView) {
     }
 }
 
-fn neighbour_button(ui: &Ui, episode: &BaseItem, forward: bool) -> gtk::Button {
+fn neighbour_button(
+    ui: &Ui,
+    view: &Rc<DetailsView>,
+    episode: &BaseItem,
+    forward: bool,
+) -> gtk::Button {
     let label = gtk::Label::builder()
         .label(episode.episode_label())
         .ellipsize(gtk::pango::EllipsizeMode::End)
@@ -349,11 +381,12 @@ fn neighbour_button(ui: &Ui, episode: &BaseItem, forward: bool) -> gtk::Button {
         })
         .css_classes(["flat"])
         .build();
-    let weak = ui.downgrade();
+    let (weak, shown) = (ui.downgrade(), Rc::downgrade(view));
     let target = episode.clone();
     button.connect_clicked(move |_| {
-        if let Some(ui) = weak.upgrade() {
-            ui.open_replacing(&target);
+        if let (Some(ui), Some(view)) = (weak.upgrade(), shown.upgrade()) {
+            let spot = if forward { Spot::Next } else { Spot::Previous };
+            step(&ui, &view, &target, Some(spot));
         }
     });
     button

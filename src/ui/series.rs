@@ -21,6 +21,12 @@ struct SeriesView {
     episodes: gtk::ListBox,
     /// Cast and similar titles.
     related: gtk::Box,
+    /// The selected season's own dates and overview, when the server has them.
+    season_meta: gtk::Label,
+    season_overview: gtk::Label,
+    /// The series' own overview: a season repeating it word for word
+    /// doesn't show it again.
+    series_overview: RefCell<String>,
     /// Seasons backing the chips, in their order.
     season_items: RefCell<Vec<BaseItem>>,
     /// The episode last opened (season id, row index), so coming back
@@ -166,7 +172,23 @@ pub fn page(ui: &Ui, series: &BaseItem) -> adw::NavigationPage {
         .css_classes(["boxed-list"])
         .build();
     episodes.append(&loading());
+    let season_meta = gtk::Label::builder()
+        .xalign(0.0)
+        .css_classes(["dim-label"])
+        .visible(false)
+        .build();
+    // A readable line length on wide windows (the page is up to 1400 wide).
+    let season_overview = gtk::Label::builder()
+        .xalign(0.0)
+        .halign(gtk::Align::Start)
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .max_width_chars(120)
+        .visible(false)
+        .build();
     hero.extra.append(&seasons.root);
+    hero.extra.append(&season_meta);
+    hero.extra.append(&season_overview);
     hero.extra.append(&episodes);
     hero.extra.append(&related);
     hero.show(ui, series, None);
@@ -178,6 +200,9 @@ pub fn page(ui: &Ui, series: &BaseItem) -> adw::NavigationPage {
         seasons,
         episodes,
         related,
+        season_meta,
+        season_overview,
+        series_overview: RefCell::new(String::new()),
         season_items: RefCell::new(Vec::new()),
         opened: RefCell::new(None),
         reload_mark: RefCell::new(None),
@@ -195,6 +220,7 @@ pub fn page(ui: &Ui, series: &BaseItem) -> adw::NavigationPage {
             };
             let season = view.season_items.borrow().get(index).cloned();
             if let Some(season) = season {
+                show_season_details(&view, &season);
                 load_episodes(&ui, &view, &series_id, &season.id);
             }
         }
@@ -268,6 +294,14 @@ fn load(ui: &Ui, view: &Rc<SeriesView>, series_id: &str) {
         };
 
         view.hero.show(&ui, &series, None);
+        view.series_overview.replace(
+            series
+                .overview
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+        );
         clear(&view.hero.buttons);
         if let Some(episode) = next_to_watch(&all) {
             let play = play_next_button(&ui, episode);
@@ -282,8 +316,8 @@ fn load(ui: &Ui, view: &Rc<SeriesView>, series_id: &str) {
             .append(&download_button(&ui, &view, &series));
         super::hero::show_related(&ui, &view.related, &series);
 
-        // Keep the user's current season across reloads; otherwise start at
-        // the first one with something left to watch.
+        // Keep the user's current season across reloads; otherwise open
+        // where the series continues (see `opening_season`).
         let previous = view
             .season_items
             .borrow()
@@ -291,29 +325,91 @@ fn load(ui: &Ui, view: &Rc<SeriesView>, series_id: &str) {
             .map(|season| season.id.clone());
         let selected = previous
             .and_then(|id| seasons.iter().position(|season| season.id == id))
-            .unwrap_or_else(|| default_season(&seasons));
+            .unwrap_or_else(|| {
+                let selected = opening_season(&seasons, &all);
+                // The cursor starts on that episode, unless one was opened.
+                if view.opened.borrow().is_none()
+                    && let Some(season) = seasons.get(selected)
+                    && let Some(index) = resume_index(&all, &season.id)
+                {
+                    view.opened.replace(Some((season.id.clone(), index)));
+                }
+                selected
+            });
         let names: Vec<&str> = seasons.iter().map(|season| season.name.as_str()).collect();
         view.season_items.replace(seasons.clone());
         view.seasons.set_items(&names, selected);
         view.seasons.root.set_visible(seasons.len() > 1);
         match seasons.get(selected) {
-            Some(season) => load_episodes(&ui, &view, &series_id, &season.id),
+            Some(season) => {
+                show_season_details(&view, season);
+                load_episodes(&ui, &view, &series_id, &season.id);
+            }
             None => clear_list(&view.episodes),
         }
     });
 }
 
-fn default_season(seasons: &[BaseItem]) -> usize {
-    seasons
-        .iter()
-        .position(|season| {
-            season
-                .user_data
-                .as_ref()
-                .and_then(|data| data.unplayed_item_count)
-                .is_some_and(|count| count > 0)
+/// The season to open on: the one holding the episode the Play button
+/// offers (the one in progress, else the one after the last watched); for a
+/// series not started yet, the first real season (Specials come first in
+/// Emby's list but aren't where a series starts).
+fn opening_season(seasons: &[BaseItem], episodes: &[BaseItem]) -> usize {
+    resume_point(episodes)
+        .and_then(|episode| seasons.iter().position(|season| holds(season, episode)))
+        .or_else(|| {
+            seasons
+                .iter()
+                .position(|season| season.index_number != Some(0))
         })
         .unwrap_or(0)
+}
+
+/// Where a started series continues ([`next_to_watch`]); `None` before
+/// anything was watched, so a new series doesn't open on a special.
+fn resume_point(episodes: &[BaseItem]) -> Option<&BaseItem> {
+    episodes
+        .iter()
+        .any(|e| e.played() || e.resume_ticks() > 0)
+        .then(|| next_to_watch(episodes))
+        .flatten()
+}
+
+fn holds(season: &BaseItem, episode: &BaseItem) -> bool {
+    match &episode.season_id {
+        Some(id) => *id == season.id,
+        None => season.index_number.is_some() && season.index_number == episode.parent_index_number,
+    }
+}
+
+/// [`resume_point`]'s row in `season_id`, if it's in that season.
+fn resume_index(episodes: &[BaseItem], season_id: &str) -> Option<usize> {
+    let resume = resume_point(episodes)?;
+    episodes
+        .iter()
+        .filter(|episode| episode.season_id.as_deref() == Some(season_id))
+        .position(|episode| episode.id == resume.id)
+}
+
+/// The season's own air dates and overview under the chips (AniMeta+ and
+/// other metadata sources fill these per season); hidden when missing.
+fn show_season_details(view: &SeriesView, season: &BaseItem) {
+    let meta = super::hero::aired_range(season)
+        .or_else(|| season.production_year.map(|year| year.to_string()))
+        .unwrap_or_default();
+    view.season_meta.set_label(&meta);
+    view.season_meta.set_visible(!meta.is_empty());
+    let overview = super::plain_spaces(
+        season
+            .overview
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default(),
+    );
+    let repeated = overview == super::plain_spaces(&view.series_overview.borrow());
+    view.season_overview.set_label(&overview);
+    view.season_overview
+        .set_visible(!overview.is_empty() && !repeated);
 }
 
 fn load_episodes(ui: &Ui, view: &Rc<SeriesView>, series_id: &str, season_id: &str) {
@@ -610,7 +706,7 @@ fn play_next_button(ui: &Ui, episode: &BaseItem) -> gtk::Button {
 
 #[cfg(test)]
 mod tests {
-    use super::next_to_watch;
+    use super::{next_to_watch, opening_season, resume_index};
     use crate::emby::models::{BaseItem, UserItemData};
 
     fn episode(id: &str, played: bool, position: i64) -> BaseItem {
@@ -655,5 +751,61 @@ mod tests {
         assert_eq!(next_to_watch(&list).unwrap().id, "1");
         let done = [episode("1", true, 0)];
         assert!(next_to_watch(&done).is_none());
+    }
+
+    fn season(id: &str, number: i32) -> BaseItem {
+        BaseItem {
+            id: id.into(),
+            index_number: Some(number),
+            ..Default::default()
+        }
+    }
+
+    fn in_season(mut episode: BaseItem, season: &str) -> BaseItem {
+        episode.season_id = Some(season.into());
+        episode
+    }
+
+    #[test]
+    fn a_new_series_opens_on_season_one_not_specials() {
+        let seasons = [season("s0", 0), season("s1", 1), season("s2", 2)];
+        let episodes = [
+            in_season(episode("a", false, 0), "s0"),
+            in_season(episode("b", false, 0), "s1"),
+        ];
+        assert_eq!(opening_season(&seasons, &episodes), 1);
+        // Only specials: those.
+        assert_eq!(opening_season(&seasons[..1], &episodes), 0);
+    }
+
+    #[test]
+    fn a_started_series_opens_where_play_continues() {
+        let seasons = [season("s0", 0), season("s3", 3), season("s4", 4)];
+        // A special watched (or marked watched) doesn't pull it to Specials.
+        let mid_season = [
+            in_season(episode("sp", true, 0), "s0"),
+            in_season(episode("a", true, 0), "s3"),
+            in_season(episode("b", false, 0), "s3"),
+            in_season(episode("c", false, 0), "s4"),
+        ];
+        assert_eq!(opening_season(&seasons, &mid_season), 1);
+        assert_eq!(resume_index(&mid_season, "s3"), Some(1));
+        // Season 3 finished: on to Season 4, like the Play button.
+        let finished = [
+            in_season(episode("a", true, 0), "s3"),
+            in_season(episode("b", true, 0), "s3"),
+            in_season(episode("c", false, 0), "s4"),
+        ];
+        assert_eq!(opening_season(&seasons, &finished), 2);
+    }
+
+    #[test]
+    fn an_episode_in_progress_wins() {
+        let seasons = [season("s1", 1), season("s2", 2)];
+        let episodes = [
+            in_season(episode("a", true, 0), "s2"),
+            in_season(episode("b", false, 50), "s1"),
+        ];
+        assert_eq!(opening_season(&seasons, &episodes), 0);
     }
 }
