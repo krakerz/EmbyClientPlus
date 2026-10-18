@@ -120,9 +120,9 @@ pub fn present(app: &adw::Application, player: Player, target: Option<&str>) {
             }
         }
     });
-    crate::controller::on_scrub({
+    crate::controller::on_right_stick({
         let (state, window) = (Rc::downgrade(&state), window.downgrade());
-        move |tilt| {
+        move |tilt, _| {
             let (Some(state), Some(window)) = (state.upgrade(), window.upgrade()) else {
                 return;
             };

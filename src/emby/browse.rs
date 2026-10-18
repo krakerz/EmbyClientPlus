@@ -327,7 +327,7 @@ impl EmbyClient {
     pub async fn seasons(&self, series_id: &str, user_id: &str) -> Result<Vec<BaseItem>> {
         let result: QueryResult<BaseItem> = self
             .get(&format!(
-                "/emby/Shows/{series_id}/Seasons?UserId={user_id}&Fields={FIELDS}"
+                "/emby/Shows/{series_id}/Seasons?UserId={user_id}&Fields={FIELDS},EndDate"
             ))
             .await?;
         Ok(result.items)
@@ -350,7 +350,7 @@ impl EmbyClient {
     /// One item with its cast (`People`).
     pub async fn item(&self, user_id: &str, item_id: &str) -> Result<BaseItem> {
         self.get(&format!(
-            "/emby/Users/{user_id}/Items/{item_id}?Fields={FIELDS},People,RemoteTrailers,LocalTrailerCount,MediaStreams"
+            "/emby/Users/{user_id}/Items/{item_id}?Fields={FIELDS},People,RemoteTrailers,LocalTrailerCount,MediaStreams,OriginalTitle,Studios,Tags,Taglines,ProductionLocations,EndDate,Status,CriticRating"
         ))
         .await
     }

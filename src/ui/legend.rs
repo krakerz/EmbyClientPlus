@@ -164,19 +164,28 @@ impl Legend {
             if pads.is_empty() {
                 continue;
             }
-            let hint = gtk::Box::builder().spacing(6).build();
-            for pad in pads {
-                hint.append(
-                    &gtk::Label::builder()
-                        .label(glyph(pad))
-                        .css_classes(["legend-key"])
-                        .build(),
-                );
-            }
-            hint.append(&gtk::Label::new(Some(text)));
-            self.hints.append(&hint);
+            self.hints.append(&hint(pads.into_iter().map(glyph), text));
+        }
+        // The right stick isn't a button (nor remappable): its own hint.
+        if panel.is_none() {
+            self.hints.append(&hint(["RS"], "Scroll"));
         }
     }
+}
+
+/// Button badges, then what they do.
+fn hint<'a>(glyphs: impl IntoIterator<Item = &'a str>, text: &str) -> gtk::Box {
+    let hint = gtk::Box::builder().spacing(6).build();
+    for glyph in glyphs {
+        hint.append(
+            &gtk::Label::builder()
+                .label(glyph)
+                .css_classes(["legend-key"])
+                .build(),
+        );
+    }
+    hint.append(&gtk::Label::new(Some(text)));
+    hint
 }
 
 /// The short name printed on a button badge.

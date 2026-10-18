@@ -29,7 +29,9 @@ mod rows;
 mod scrub_preview;
 mod search;
 mod series;
+mod side_by_side;
 mod standalone;
+mod stick_scroll;
 mod subtitle_picker;
 mod version_picker;
 pub use standalone::present as present_standalone;
@@ -216,22 +218,6 @@ impl Ui {
             return self.play_song(item);
         }
         self.push(&self.page_for(item));
-    }
-
-    /// Like [`open`](Self::open), but swaps out the current page, so
-    /// stepping episode to episode doesn't pile up the back stack.
-    pub fn open_replacing(&self, item: &BaseItem) {
-        let nav = &self.inner.nav;
-        let stack = nav.navigation_stack();
-        let mut pages: Vec<adw::NavigationPage> = (0..stack.n_items())
-            .filter_map(|i| stack.item(i).and_downcast())
-            .collect();
-        if pages.len() < 2 {
-            return self.open(item);
-        }
-        pages.pop();
-        pages.push(self.page_for(item));
-        nav.replace(&pages);
     }
 
     fn page_for(&self, item: &BaseItem) -> adw::NavigationPage {
@@ -1235,6 +1221,13 @@ pub fn format_size(bytes: u64) -> String {
 }
 
 /// "3 Oct 2026" from an Emby date ("2026-10-03T00:00:00.0000000Z").
+/// `text` for a wrapping label: non-breaking spaces (from HTML `&nbsp;` in
+/// metadata) become plain ones, or a paragraph can't wrap and pushes the
+/// whole page wider than the window.
+pub fn plain_spaces(text: &str) -> String {
+    text.replace(['\u{a0}', '\u{202f}', '\u{2007}'], " ")
+}
+
 pub fn format_date(iso: &str) -> Option<String> {
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",

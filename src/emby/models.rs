@@ -379,6 +379,18 @@ pub struct BaseItem {
     pub album_artists: Vec<NameId>,
     pub child_count: Option<i32>,
     pub genre_items: Vec<NameId>,
+    // Details pages only (`item` asks for them); each shows when present.
+    pub original_title: Option<String>,
+    pub studios: Vec<NameId>,
+    pub tags: Vec<String>,
+    pub taglines: Vec<String>,
+    /// Series: "Continuing" or "Ended".
+    pub status: Option<String>,
+    /// When a series or season stopped airing (ISO 8601).
+    pub end_date: Option<String>,
+    pub production_locations: Vec<String>,
+    /// Critics' score, 0–100.
+    pub critic_rating: Option<f64>,
     pub remote_trailers: Vec<RemoteTrailer>,
     /// A person's role in the title they're listed for (cast cards only).
     #[serde(skip)]

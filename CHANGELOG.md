@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [1.21.0] — 2026-10-18
+
+### Added
+- Details pages show more of what the server knows, each only when it has it: tagline, original title, air dates (or release date), status, genres, studios, country and tags, plus the critics' score.
+- The series page shows the selected season's own air dates and overview under the season buttons.
+- Controller: outside the player the right stick scrolls, smoothly and faster the further it's pushed: left/right the row the cursor is in, up/down the page or dialog. When the cursor has scrolled out of view, the next press puts it on the nearest visible item.
+
+### Changed
+- A series opens on the season of the episode Play offers (the one in progress, else the next unwatched), with the cursor on it; one you haven't started opens on Season 1 instead of Specials.
+- Details pages use more of a wide window, with the details beside the description; on narrower windows they stay underneath.
+
+### Fixed
+- Some descriptions ran off the right edge of details pages instead of wrapping.
+- Stepping to the previous or next episode (LB/RB, the episode links or the season strip) no longer flickers or jumps the page: the new episode replaces the old one in place, and the links, season strip and cast below stay where they are whatever the length of the description or a missing cast.
+
 ## [1.20.0] — 2026-10-18
 
 ### Fixed

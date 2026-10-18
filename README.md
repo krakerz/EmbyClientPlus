@@ -12,7 +12,7 @@ Icons: [Lucide](https://lucide.dev/) (ISC, `data/icons/LICENSE`), converted for 
 
 ## Features
 
-- **Browsing:** Home follows your Emby library order and visibility; library grids with remembered sort/filter, Suggestions and Collections tabs; series, seasons, cast, More Like This, Included In, favourites, History, search.
+- **Browsing:** Home follows your Emby library order and visibility; library grids with remembered sort/filter, Suggestions and Collections tabs; series open on the season you're watching; details show original title, air dates, studios, genres, tags and each season's own overview when the server has them; cast, More Like This, Included In, favourites, History, search.
 - **Playback:** direct play or transcode (Original down to 420 kbps), version picker, resume and watched state synced, chapters with seek-bar previews, Skip Intro/Credits, Up Next, aspect/zoom, black-bar blur/glow.
 - **Picture:** quality presets or custom scalers/debanding, deinterlacing, FSR and Anime4K shaders plus your own, per title.
 - **SVP:** attaches when SVP 4 is installed; per-title toggle with a status light; mpv frame blending as an alternative.
@@ -88,7 +88,7 @@ current screen's buttons.
 | F / F11 | Fullscreen | Select | Search | Skip intro/credits |
 | Q | Skip intro/credits | Start | Preferences | On-screen controls |
 | Esc | Leave fullscreen, then the player | D-pad | Move | Seek (←/→), volume (↑/↓) |
-|  |  | Right stick | — | Scrub along the bar (seeks 2 s after you let go) |
+|  |  | Right stick | Scroll the row (←/→) or page (↑/↓) under the cursor | Scrub along the bar (seeks 2 s after you let go) |
 
 ### Command line
 
