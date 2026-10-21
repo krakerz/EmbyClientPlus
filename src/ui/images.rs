@@ -105,6 +105,23 @@ pub fn clear_cache() {
     CACHE.with(|cache| *cache.borrow_mut() = TextureCache::default());
 }
 
+/// Empties the memory and on-disk image caches (the disk part off the main
+/// thread). Pictures already showing stay; they re-fetch next load.
+pub fn clear_all_caches() {
+    clear_cache();
+    std::thread::spawn(image_disk_cache::clear);
+}
+
+/// Bytes the on-disk image cache takes.
+pub async fn disk_cache_size() -> u64 {
+    spawn_tokio(async {
+        tokio::task::spawn_blocking(image_disk_cache::size)
+            .await
+            .unwrap_or(0)
+    })
+    .await
+}
+
 /// Shows `image` (resized server-side to `max_width`) in `picture`, or
 /// nothing when the item has no such image.
 pub fn load(ui: &Ui, picture: &gtk::Picture, image: Option<ImageRef>, max_width: u32) {
@@ -137,16 +154,7 @@ pub fn load_with_client(
     glib::spawn_future_local(async move {
         let fetch_path = path.clone();
         let texture = spawn_tokio(async move {
-            let cache_key = client.url(&fetch_path);
-            let bytes = match image_disk_cache::read(&cache_key) {
-                Some(bytes) => bytes,
-                None => {
-                    let _permit = semaphore().acquire().await?;
-                    let bytes = client.fetch_bytes(&fetch_path).await?;
-                    image_disk_cache::write(&cache_key, &bytes);
-                    bytes
-                }
-            };
+            let bytes = cached_bytes(&client, &fetch_path).await?;
             let texture = gdk::Texture::from_bytes(&glib::Bytes::from_owned(bytes))?;
             Ok::<_, anyhow::Error>(texture)
         })
@@ -169,6 +177,30 @@ pub fn load_with_client(
             picture.set_paintable(Some(&texture));
         }
     });
+}
+
+/// The image at `path`: the disk copy while it's fresh, else fetched (and
+/// stored). A failed fetch falls back to a stale copy, so images still show
+/// offline. Runs on tokio; touches no GTK.
+pub async fn cached_bytes(client: &EmbyClient, path: &str) -> anyhow::Result<Vec<u8>> {
+    let cache_key = client.url(path);
+    let stale = match image_disk_cache::read(&cache_key) {
+        Some(cached) if cached.fresh => return Ok(cached.bytes),
+        other => other,
+    };
+    let fetched = async {
+        let _permit = semaphore().acquire().await?;
+        client.fetch_bytes(path).await
+    }
+    .await;
+    match (fetched, stale) {
+        (Ok(bytes), _) => {
+            image_disk_cache::write(&cache_key, &bytes);
+            Ok(bytes)
+        }
+        (Err(_), Some(stale)) => Ok(stale.bytes),
+        (Err(e), None) => Err(e),
+    }
 }
 
 fn semaphore() -> &'static Semaphore {
@@ -200,12 +232,8 @@ pub async fn file(
 ) -> Option<std::path::PathBuf> {
     spawn_tokio(async move {
         let path = EmbyClient::image_path(&image, max_width);
-        let cache_key = client.url(&path);
-        let file = image_disk_cache::file_for(&cache_key)?;
-        if !file.is_file() {
-            let bytes = client.fetch_bytes(&path).await.ok()?;
-            image_disk_cache::write(&cache_key, &bytes);
-        }
+        let file = image_disk_cache::file_for(&client.url(&path))?;
+        cached_bytes(&client, &path).await.ok()?;
         file.is_file().then_some(file)
     })
     .await

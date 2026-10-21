@@ -2,7 +2,7 @@
 //! anything else (folders, collections) is one sortable grid.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -621,6 +621,10 @@ fn remember(key: &str, choice: &Choice) {
     }
 }
 
+/// Most series asked for by id in one request; a longer `Ids=` list makes
+/// the address too long for the server.
+const MAX_IDS: usize = 100;
+
 fn reload_grid(
     ui: &WeakUi,
     store: &gtk::gio::ListStore,
@@ -678,9 +682,56 @@ fn reload_grid(
                 count.set_label("0 items");
                 return;
             }
-            query.ids = Some(ids.join(","));
-            if let Some(ui) = weak.upgrade() {
-                load_query(&ui, &store, &count, query, &generation, current);
+            if ids.len() <= MAX_IDS {
+                query.ids = Some(ids.join(","));
+                if let Some(ui) = weak.upgrade() {
+                    load_query(&ui, &store, &count, query, &generation, current);
+                }
+                return;
+            }
+            // Too many for one address: walk the library in the chosen
+            // order and keep the started ones.
+            let started: HashSet<String> = ids.into_iter().collect();
+            let Some((client, user_id)) = weak.upgrade().map(|ui| (ui.client(), ui.user_id()))
+            else {
+                return;
+            };
+            let count = count.downgrade();
+            let mut shown = 0;
+            loop {
+                let page = spawn_tokio({
+                    let (client, user_id, query) = (client.clone(), user_id.clone(), query.clone());
+                    async move { client.items(&user_id, &query).await }
+                })
+                .await;
+                if generation.get() != current {
+                    return;
+                }
+                let page = match page {
+                    Ok(page) => page,
+                    Err(e) => {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.report_error("Could not load items", &e);
+                        }
+                        return;
+                    }
+                };
+                let received = page.items.len();
+                let objects: Vec<_> = page
+                    .items
+                    .into_iter()
+                    .filter(|item| started.contains(&item.id))
+                    .map(glib::BoxedAnyObject::new)
+                    .collect();
+                shown += objects.len();
+                store.extend_from_slice(&objects);
+                query.start += received;
+                if received == 0 || query.start >= page.total_record_count {
+                    break;
+                }
+            }
+            if let Some(count) = count.upgrade() {
+                count.set_label(&items_label(shown));
             }
         });
         return;
@@ -707,13 +758,17 @@ fn load_query(
         move || still_current.get() == current,
         move |total| {
             if let Some(count) = count.upgrade() {
-                count.set_label(&match total {
-                    1 => "1 item".to_string(),
-                    n => format!("{n} items"),
-                });
+                count.set_label(&items_label(total));
             }
         },
     );
+}
+
+fn items_label(total: usize) -> String {
+    match total {
+        1 => "1 item".to_string(),
+        n => format!("{n} items"),
+    }
 }
 
 /// Genre or tag tiles; each opens a sortable grid of that genre/tag.

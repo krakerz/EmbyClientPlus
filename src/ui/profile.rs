@@ -237,7 +237,9 @@ pub(super) fn load_picture(ui: &Ui, avatar: &adw::Avatar, user: &Value) {
     );
     let avatar = avatar.downgrade();
     glib::spawn_future_local(async move {
-        let Ok(bytes) = spawn_tokio(async move { client.fetch_bytes(&path).await }).await else {
+        let Ok(bytes) =
+            spawn_tokio(async move { super::images::cached_bytes(&client, &path).await }).await
+        else {
             return;
         };
         if let (Ok(texture), Some(avatar)) = (
