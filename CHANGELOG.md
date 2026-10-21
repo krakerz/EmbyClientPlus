@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [1.22.0] — 2026-10-21
+
+### Added
+- Preferences → Storage shows how much space the image cache takes, with a button to clear it.
+
+### Changed
+- Cached images are downloaded again once they're a week old; without a connection the saved copy still shows.
+- Profile pictures are cached like the rest of the artwork.
+
+### Fixed
+- Closing the window while music plays now saves where the track stopped on the server, as it already did for video.
+- The optional "In Progress" filter for TV libraries (Preferences) works with a very long watch history instead of failing to load.
+
 ## [1.21.0] — 2026-10-18
 
 ### Added

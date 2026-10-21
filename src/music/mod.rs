@@ -10,6 +10,7 @@ pub mod mpris;
 pub mod queue;
 
 use std::cell::{Cell, RefCell};
+use std::future::Future;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,11 +22,13 @@ use crate::emby::EmbyClient;
 use crate::emby::models::{BaseItem, ProgressRequest, StoppedRequest};
 use crate::emby::playback_info::StreamRequest;
 use crate::player::{END_FILE_REASON_EOF, END_FILE_REASON_ERROR, Player, PlayerEvent};
-use crate::runtime::{spawn_detached, spawn_tokio};
+use crate::runtime::{block_on_timeout, spawn_detached, spawn_tokio};
 pub use queue::{Queue, Repeat};
 
 const TICKS_PER_SECOND: f64 = 10_000_000.0;
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
+/// How long closing the window may wait for the final Stopped report.
+const STOP_REPORT_TIMEOUT: Duration = Duration::from_secs(2);
 /// "Previous" restarts the track instead when this far in.
 const RESTART_THRESHOLD: f64 = 3.0;
 /// Tracks in a row that may fail to play before the queue gives up, so a
@@ -235,13 +238,30 @@ impl MusicPlayer {
 
     /// Stops music (also before video starts) and reports it.
     pub fn stop(&self) {
+        if let Some(report) = self.stop_without_reporting() {
+            spawn_detached(report);
+        }
+    }
+
+    /// [`stop`](Self::stop), but waits (briefly) for the report to reach
+    /// Emby, for when the app is about to exit.
+    pub fn stop_and_wait(&self) {
+        if let Some(report) = self.stop_without_reporting()
+            && block_on_timeout(report, STOP_REPORT_TIMEOUT).is_none()
+        {
+            tracing::warn!("music stopped report timed out on exit");
+        }
+    }
+
+    /// Stops music; returns the pending Stopped report if it was playing.
+    fn stop_without_reporting(&self) -> Option<impl Future<Output = ()> + Send + 'static> {
         if !self.inner.active.replace(false) {
-            return;
+            return None;
         }
         if let Some(timer) = self.inner.timer.take() {
             timer.remove();
         }
-        self.report_stopped(false);
+        let report = self.stopped_report(false);
         let player = self.inner.player;
         for result in [
             player.stop(),
@@ -255,6 +275,7 @@ impl MusicPlayer {
         self.inner.current.replace(None);
         self.inner.paused.set(false);
         self.changed();
+        report
     }
 
     pub fn toggle_pause(&self) {
@@ -581,9 +602,13 @@ impl MusicPlayer {
 
     /// `finished`: the track played to its end (a gapless switch).
     fn report_stopped(&self, finished: bool) {
-        let Some(track) = self.inner.current.borrow().clone() else {
-            return;
-        };
+        if let Some(report) = self.stopped_report(finished) {
+            spawn_detached(report);
+        }
+    }
+
+    fn stopped_report(&self, finished: bool) -> Option<impl Future<Output = ()> + Send + 'static> {
+        let track = self.inner.current.borrow().clone()?;
         // At a gapless switch mpv is already on the next file, so a
         // finished track reports its full length.
         let position = track
@@ -598,11 +623,11 @@ impl MusicPlayer {
             position_ticks: position,
         };
         let client = self.inner.client.clone();
-        spawn_detached(async move {
+        Some(async move {
             if let Err(e) = client.report_stopped(&request).await {
                 tracing::debug!("stopped report failed: {e:#}");
             }
-        });
+        })
     }
 }
 

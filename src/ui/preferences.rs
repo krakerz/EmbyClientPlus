@@ -399,6 +399,10 @@ fn show_with(parent: &impl IsA<gtk::Widget>, server: bool) {
         page.add(&group);
     }
 
+    if server {
+        page.add(&storage_group(&toasts));
+    }
+
     // Diagnostics.
     let diagnostics = adw::PreferencesGroup::builder()
         .title("Diagnostics")
@@ -501,6 +505,56 @@ fn show_with(parent: &impl IsA<gtk::Widget>, server: bool) {
         }
     });
     dialog.present(Some(parent));
+}
+
+/// "5.2 MB", or "Empty" for nothing.
+fn cache_size_label(bytes: u64) -> String {
+    if bytes == 0 {
+        "Empty".to_string()
+    } else {
+        glib::format_size(bytes).to_string()
+    }
+}
+
+/// The image cache's size and a Clear button.
+fn storage_group(toasts: &adw::ToastOverlay) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder().title("Storage").build();
+    let row = adw::ActionRow::builder()
+        .title("Image cache")
+        .subtitle("Calculating…")
+        .build();
+    let clear = gtk::Button::builder()
+        .label("Clear")
+        .valign(gtk::Align::Center)
+        .css_classes(["destructive-action"])
+        .build();
+    row.add_suffix(&clear);
+    group.add(&row);
+    glib::spawn_future_local(glib::clone!(
+        #[weak]
+        row,
+        async move {
+            let size = super::images::disk_cache_size().await;
+            row.set_subtitle(&cache_size_label(size));
+        }
+    ));
+    clear.connect_clicked(glib::clone!(
+        #[weak]
+        toasts,
+        #[weak]
+        row,
+        move |_| {
+            super::images::clear_all_caches();
+            row.set_subtitle(&cache_size_label(0));
+            toasts.add_toast(
+                adw::Toast::builder()
+                    .title("Image cache cleared")
+                    .timeout(crate::ui::TOAST_SECONDS)
+                    .build(),
+            );
+        }
+    ));
+    group
 }
 
 /// Where downloads are saved: typed (works in Game Mode, where file

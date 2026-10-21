@@ -786,7 +786,7 @@ impl Ui {
     pub fn stop_playback_and_wait(&self) {
         let generation = &self.inner.load_generation;
         generation.set(generation.get() + 1);
-        self.inner.music.stop();
+        self.inner.music.stop_and_wait();
         if let Some(session) = self.inner.playback.take() {
             session.stop_and_wait();
         }
