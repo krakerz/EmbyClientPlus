@@ -973,7 +973,7 @@ pub fn title_key(item: &BaseItem) -> (String, ItemType) {
 /// The choices remembered under `key` (see [`title_key`]).
 pub fn remembered_for(key: &str) -> Option<TitleOverride> {
     Db::open_default()
-        .and_then(|db| db.get_override(key))
+        .and_then(|db| db.get_override(&crate::account::scope(), key))
         .unwrap_or_else(|e| {
             tracing::warn!("overrides unreadable: {e:#}");
             None
@@ -996,7 +996,9 @@ pub fn remember_for(key: &str, item_type: ItemType, change: impl FnOnce(&mut Tit
         volume: None,
     });
     change(&mut entry);
-    if let Err(e) = Db::open_default().and_then(|db| db.upsert_override(&entry)) {
+    if let Err(e) =
+        Db::open_default().and_then(|db| db.upsert_override(&crate::account::scope(), &entry))
+    {
         tracing::warn!("could not save the title override: {e:#}");
     }
 }

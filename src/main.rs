@@ -14,17 +14,20 @@ mod db;
 mod dnd;
 mod downloads;
 mod emby;
+mod flavour;
 mod frame_gen;
 mod gamescope;
 mod keys;
 mod local;
 mod logging;
 mod music;
+mod osk;
 mod playback;
 mod player;
 mod remote;
 mod runtime;
 mod shaders;
+mod smoke;
 mod svp;
 mod ui;
 mod update;
@@ -113,6 +116,7 @@ fn main() -> glib::ExitCode {
         let result = match &player_only {
             Some(target) => player::Player::new(mpv_config_dir().as_deref()).map(|player| {
                 apply_bar_fill(player);
+                smoke::arm(app);
                 ui::present_standalone(app, player, target.as_deref());
             }),
             None => player::Player::new(mpv_config_dir().as_deref()).map(|player| {
@@ -131,7 +135,7 @@ fn main() -> glib::ExitCode {
     // while this one still owned the name would just activate it and exit.
     drop(app);
     update::spawn_pending_relaunch();
-    code
+    smoke::exit_code().map_or(code, glib::ExitCode::from)
 }
 
 /// The user's mpv.conf, staged for the embedded player, when enabled in

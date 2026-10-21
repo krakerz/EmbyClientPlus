@@ -12,6 +12,7 @@ use crate::runtime::spawn_tokio;
 pub struct LoggedIn {
     pub client: EmbyClient,
     pub server_url: String,
+    pub server_id: String,
     pub user_id: String,
     pub username: String,
     pub token: String,
@@ -124,6 +125,7 @@ impl LoginPage {
                             on_login(LoggedIn {
                                 client,
                                 server_url: url,
+                                server_id: response.server_id,
                                 user_id: response.user.id,
                                 username: response.user.name,
                                 token: response.access_token,

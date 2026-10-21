@@ -17,6 +17,9 @@ use serde_json::{Map, Value};
 use crate::config::{IntroSkip, Settings, SubtitleMode};
 
 struct Account {
+    /// Tells servers apart: the server's id, or its address while that's
+    /// unknown.
+    server: String,
     user_id: String,
     /// The user as Emby sent it (`UserDto`); its `Configuration` is ours to
     /// edit.
@@ -113,14 +116,50 @@ pub fn user() -> Option<Value> {
         .map(|account| account.user.clone())
 }
 
-/// Signed in as `user_id`: its saved copy applies until the server's
+/// Signed in as `user_id` on the server `server_id` (empty if not known
+/// yet; its `url` stands in): its saved copy applies until the server's
 /// arrives (`refresh`), so settings work without a connection too.
-pub fn sign_in(user_id: &str) {
+pub fn sign_in(server_id: &str, url: &str, user_id: &str) {
     let user = read_copy(user_id).unwrap_or_else(|| serde_json::json!({ "Configuration": {} }));
+    let server = if server_id.is_empty() { url } else { server_id };
     *ACCOUNT.lock().unwrap_or_else(|e| e.into_inner()) = Some(Account {
+        server: server.to_string(),
         user_id: user_id.to_string(),
         user,
     });
+    adopt_saved_choices(server, url, user_id, !server_id.is_empty());
+}
+
+/// Hands choices saved before they were kept per server and user (and, once
+/// the server's id is known, any saved under its address) to this account.
+fn adopt_saved_choices(server: &str, url: &str, user_id: &str, by_id: bool) {
+    let scope = scope_of(server, user_id);
+    let result = crate::db::Db::open_default().and_then(|db| {
+        let mut moved = db.adopt_legacy(&scope)?;
+        if by_id && !url.is_empty() {
+            moved += db.adopt_scope(&scope_of(url, user_id), &scope)?;
+        }
+        Ok(moved)
+    });
+    match result {
+        Ok(0) => {}
+        Ok(moved) => tracing::info!("{moved} saved choices now belong to this account"),
+        Err(e) => tracing::warn!("couldn't move saved choices: {e:#}"),
+    }
+}
+
+fn scope_of(server: &str, user_id: &str) -> String {
+    format!("{server}|{user_id}")
+}
+
+/// What per-title and per-view choices are saved under: this server and
+/// user, so another account never inherits them; without an account
+/// (player-only mode), "local".
+pub fn scope() -> String {
+    match ACCOUNT.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        Some(account) => scope_of(&account.server, &account.user_id),
+        None => "local".to_string(),
+    }
 }
 
 /// Back to this app's own settings.
@@ -188,6 +227,13 @@ fn write_copy(user_id: &str, user: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scopes_tell_servers_and_users_apart() {
+        assert_eq!(scope_of("srv1", "u1"), "srv1|u1");
+        assert_ne!(scope_of("srv1", "u1"), scope_of("srv2", "u1"));
+        assert_ne!(scope_of("srv1", "u1"), scope_of("srv1", "u2"));
+    }
 
     #[test]
     fn reads_emby_configuration() {

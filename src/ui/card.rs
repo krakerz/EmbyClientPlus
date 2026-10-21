@@ -227,13 +227,32 @@ pub fn attach_menu(
     widget: &impl IsA<gtk::Widget>,
     item: impl Fn() -> Option<BaseItem> + 'static,
 ) {
+    attach(ui, widget, item, false);
+}
+
+/// Like [`attach_menu`] for a widget on the item's own page (a season chip
+/// on its series page): no "Open" or "Go to Series" back to where it is.
+pub fn attach_menu_in_place(
+    ui: &Ui,
+    widget: &impl IsA<gtk::Widget>,
+    item: impl Fn() -> Option<BaseItem> + 'static,
+) {
+    attach(ui, widget, item, true);
+}
+
+fn attach(
+    ui: &Ui,
+    widget: &impl IsA<gtk::Widget>,
+    item: impl Fn() -> Option<BaseItem> + 'static,
+    in_place: bool,
+) {
     let item = std::rc::Rc::new(item);
     let open = {
         let ui = ui.downgrade();
         let widget = widget.as_ref().downgrade();
         move || {
             if let (Some(ui), Some(widget), Some(item)) = (ui.upgrade(), widget.upgrade(), item()) {
-                show_menu(&ui, &widget, &item);
+                show_menu_with(&ui, &widget, &item, in_place);
             }
         }
     };
@@ -263,7 +282,7 @@ pub fn attach_menu(
 
 /// Opens the card menu for `item` anchored on `widget` (also used by the
 /// controller's context-menu button).
-pub fn show_menu(ui: &Ui, widget: &gtk::Widget, item: &BaseItem) {
+fn show_menu_with(ui: &Ui, widget: &gtk::Widget, item: &BaseItem, in_place: bool) {
     let entries = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .build();
@@ -341,8 +360,10 @@ pub fn show_menu(ui: &Ui, widget: &gtk::Widget, item: &BaseItem) {
         let label = if resume > 0 { "Resume" } else { "Play" };
         add(label, Box::new(move |ui| ui.play(&target, resume)));
     }
-    let target = item.clone();
-    add("Open", Box::new(move |ui| ui.open(&target)));
+    if !in_place {
+        let target = item.clone();
+        add("Open", Box::new(move |ui| ui.open(&target)));
+    }
     if matches!(item.item_type.as_str(), "Series" | "Season") {
         let target = item.clone();
         let label = if item.item_type == "Series" {
@@ -385,6 +406,19 @@ pub fn show_menu(ui: &Ui, widget: &gtk::Widget, item: &BaseItem) {
             Box::new(move |ui| ui.set_played(&target, !played)),
         );
     }
+    if in_progress(item) {
+        let id = item.id.clone();
+        add(
+            "Remove from Continue Watching",
+            Box::new(move |ui| {
+                let (client, user_id, id) = (ui.client(), ui.user_id(), id.clone());
+                ui.update_item(
+                    async move { client.hide_from_resume(&user_id, &id).await },
+                    "Removed from Continue Watching",
+                );
+            }),
+        );
+    }
     let favorite = item.is_favorite();
     let target = item.clone();
     add(
@@ -395,7 +429,8 @@ pub fn show_menu(ui: &Ui, widget: &gtk::Widget, item: &BaseItem) {
         },
         Box::new(move |ui| ui.set_favorite(&target, !favorite)),
     );
-    if let (Some(series_id), Some(series_name)) = (&item.series_id, &item.series_name) {
+    if !in_place && let (Some(series_id), Some(series_name)) = (&item.series_id, &item.series_name)
+    {
         let series = BaseItem {
             id: series_id.clone(),
             name: series_name.clone(),
@@ -405,6 +440,15 @@ pub fn show_menu(ui: &Ui, widget: &gtk::Widget, item: &BaseItem) {
         add("Go to Series", Box::new(move |ui| ui.open(&series)));
     }
     popover.popup();
+}
+
+/// A video with a resume point that isn't watched: what Continue Watching
+/// lists, so what "Remove from Continue Watching" applies to.
+fn in_progress(item: &BaseItem) -> bool {
+    item.is_playable()
+        && !super::playlists::is_music(item)
+        && item.resume_ticks() > 0
+        && !item.played()
 }
 
 thread_local! {
@@ -511,4 +555,32 @@ fn child<T: IsA<gtk::Widget>>(widget: Option<gtk::Widget>) -> T {
     widget
         .and_then(|widget| widget.downcast().ok())
         .expect("card widget tree has an unexpected shape")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::in_progress;
+    use crate::emby::models::{BaseItem, UserItemData};
+
+    fn item(item_type: &str, played: bool, position: i64) -> BaseItem {
+        BaseItem {
+            item_type: item_type.into(),
+            user_data: Some(UserItemData {
+                played,
+                playback_position_ticks: position,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn only_unfinished_videos_can_leave_continue_watching() {
+        assert!(in_progress(&item("Episode", false, 50)));
+        assert!(in_progress(&item("Movie", false, 50)));
+        assert!(!in_progress(&item("Movie", true, 50)));
+        assert!(!in_progress(&item("Movie", false, 0)));
+        assert!(!in_progress(&item("Audio", false, 50)));
+        assert!(!in_progress(&item("Series", false, 50)));
+    }
 }

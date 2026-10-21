@@ -72,14 +72,15 @@ impl SeasonChips {
         self.selected.get()
     }
 
-    /// Rebuilds the chips with `selected` active, without notifying.
-    fn set_items(self: &Rc<Self>, names: &[&str], selected: usize) {
+    /// Rebuilds the chips with `selected` active, without notifying. Each
+    /// chip carries its season's card menu (watched, favourite, download).
+    fn set_items(self: &Rc<Self>, ui: &Ui, seasons: &[BaseItem], selected: usize) {
         clear(&self.row);
         self.quiet.set(true);
         let mut buttons = Vec::new();
-        for (index, name) in names.iter().enumerate() {
+        for (index, season) in seasons.iter().enumerate() {
             let button = gtk::ToggleButton::builder()
-                .label(*name)
+                .label(season.name.as_str())
                 .css_classes(["pill", "season-chip"])
                 .active(index == selected)
                 .build();
@@ -97,6 +98,8 @@ impl SeasonChips {
                     on_change(index);
                 }
             });
+            let target = season.clone();
+            super::card::attach_menu_in_place(ui, &button, move || Some(target.clone()));
             self.row.append(&button);
             buttons.push(button);
         }
@@ -336,9 +339,8 @@ fn load(ui: &Ui, view: &Rc<SeriesView>, series_id: &str) {
                 }
                 selected
             });
-        let names: Vec<&str> = seasons.iter().map(|season| season.name.as_str()).collect();
         view.season_items.replace(seasons.clone());
-        view.seasons.set_items(&names, selected);
+        view.seasons.set_items(&ui, &seasons, selected);
         view.seasons.root.set_visible(seasons.len() > 1);
         match seasons.get(selected) {
             Some(season) => {

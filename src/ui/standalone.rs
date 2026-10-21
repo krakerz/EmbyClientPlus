@@ -96,8 +96,12 @@ pub fn present(app: &adw::Application, player: Player, target: Option<&str>) {
     window.add_controller(drop);
 
     crate::controller::start({
+        let accepts = super::gamepad::input_gate(&window);
         let (state, window) = (Rc::downgrade(&state), window.downgrade());
         move |pad, repeat| {
+            if !accepts() {
+                return;
+            }
             if let (Some(state), Some(window)) = (state.upgrade(), window.upgrade()) {
                 window.set_focus_visible(true);
                 let playing = state.nav.visible_page().as_ref() == Some(state.page.page());
@@ -121,11 +125,13 @@ pub fn present(app: &adw::Application, player: Player, target: Option<&str>) {
         }
     });
     crate::controller::on_right_stick({
+        let accepts = super::gamepad::input_gate(&window);
         let (state, window) = (Rc::downgrade(&state), window.downgrade());
         move |tilt, _| {
             let (Some(state), Some(window)) = (state.upgrade(), window.upgrade()) else {
                 return;
             };
+            let tilt = if accepts() { tilt } else { 0.0 };
             let playing = state.nav.visible_page().as_ref() == Some(state.page.page());
             if tilt == 0.0
                 || (playing && window.visible_dialog().is_none() && !state.page.menu_open())
@@ -463,6 +469,7 @@ fn play(state: &Rc<State>, media: LocalMedia) {
             }
             Err(e) => {
                 tracing::error!("playback failed: {e:#}");
+                crate::smoke::failed(&format!("{e:#}"));
                 toast(&state, &format!("Couldn't play this: {e}"));
                 if state.nav.visible_page().as_ref() == Some(state.page.page()) {
                     state.nav.pop();

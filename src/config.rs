@@ -297,6 +297,10 @@ pub struct ServerSettings {
     /// The server's version, seen at sign-in (sent in browser mode).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub version: String,
+    /// The server's own id, which tells servers apart (per-title choices
+    /// are kept per server and user). Unset until seen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_id: Option<String>,
 }
 
 impl ServerSettings {

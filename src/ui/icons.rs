@@ -62,6 +62,8 @@ pub const MOVE_UP: &str = "ecp-move-up-symbolic";
 pub const MOVE_DOWN: &str = "ecp-move-down-symbolic";
 pub const REMOVE: &str = "ecp-remove-symbolic";
 pub const COLLAPSE: &str = "ecp-collapse-symbolic";
+pub const SLEEP: &str = "ecp-sleep-symbolic";
+pub const FILTER: &str = "ecp-filter-symbolic";
 
 /// The placeholder for an item that has no artwork.
 pub fn placeholder(item_type: &str) -> &'static str {

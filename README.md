@@ -12,8 +12,8 @@ Icons: [Lucide](https://lucide.dev/) (ISC, `data/icons/LICENSE`), converted for 
 
 ## Features
 
-- **Browsing:** Home follows your Emby library order and visibility; library grids with remembered sort/filter, Suggestions and Collections tabs; series open on the season you're watching; details show original title, air dates, studios, genres, tags and each season's own overview when the server has them; cast, More Like This, Included In, favourites, History, search.
-- **Playback:** direct play or transcode (Original down to 420 kbps), version picker, resume and watched state synced, chapters with seek-bar previews, Skip Intro/Credits, Up Next, aspect/zoom, black-bar blur/glow.
+- **Browsing:** Home follows your Emby library order and visibility; library grids with remembered sort and filters (decade, HD/SD, subtitles, rating, recently added) and an A–Z strip, Suggestions and Collections tabs; series open on the season you're watching; details show original title, air dates, studios, genres, tags and each season's own overview when the server has them; cast, More Like This, Included In, favourites, History, search.
+- **Playback:** direct play or transcode (Original down to 420 kbps), version picker, resume and watched state synced, chapters with seek-bar previews, Skip Intro/Credits, Up Next, sleep timer, aspect/zoom, black-bar blur/glow.
 - **Picture:** quality presets or custom scalers/debanding, deinterlacing, FSR and Anime4K shaders plus your own, per title.
 - **SVP:** attaches when SVP 4 is installed; per-title toggle with a status light; mpv frame blending as an alternative.
 - **Profile:** your Emby account's own settings (languages, subtitle mode, autoplay, intro skipping, hidden watched items, library order), picture, password and PIN; shared with Emby's apps.
@@ -33,6 +33,8 @@ From [Releases](https://github.com/krakerz/EmbyClientPlus/releases):
 | Windows | `embyclientplus-<version>-windows-x86_64.zip` | extract anywhere, run `Emby Client+.exe` |
 | macOS (Apple Silicon) | `embyclientplus-<version>-macos-arm64.zip` | extract, move `Emby Client+.app` to Applications |
 
+The AppImage carries its own GTK, libadwaita and FFmpeg; the tar.gz uses the system's.
+
 macOS: the app isn't notarized; allow it once in System Settings → Privacy & Security → **Open
 Anyway** (or `xattr -dr com.apple.quarantine "/Applications/Emby Client+.app"`).
 
@@ -42,8 +44,9 @@ macOS, SVP also needs VapourSynth from Homebrew (`brew install vapoursynth`), as
 
 ## Building from source
 
-Linux needs Rust, `meson`, `ninja` and the GTK4, libadwaita, FFmpeg, libplacebo, libass and
-VapourSynth dev files:
+Linux needs Rust, `meson`, `ninja` and the dev files of GTK 4.12 or newer, libadwaita 1.6 or
+newer, FFmpeg, libplacebo, libass and VapourSynth (Debian 13, Ubuntu 24.10, Fedora 41, Arch and
+newer have them; Debian 12 doesn't):
 
 ```sh
 scripts/build-libmpv.sh && cargo build --release && target/release/embyclientplus

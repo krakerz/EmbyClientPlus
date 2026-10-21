@@ -22,14 +22,18 @@ const RECOMMENDATION_ITEMS: usize = 12;
 
 /// Sort choices: label, Emby `SortBy`, and whether it defaults to
 /// descending (newest/highest first).
-const SORTS: [(&str, &str, bool); 6] = [
+const SORTS: [(&str, &str, bool); 7] = [
     ("Name", "SortName", false),
     ("Date Added", "DateCreated", true),
+    ("Last Episode Added", LAST_EPISODE_ADDED, true),
     ("Release Date", "PremiereDate", true),
     ("Rating", "CommunityRating", true),
     ("Runtime", "Runtime", false),
     ("Random", "Random", false),
 ];
+
+/// Series only: when a series last got a new episode.
+const LAST_EPISODE_ADDED: &str = "DateLastContentAdded";
 
 /// Filter choices: label and Emby `Filters` value.
 const FILTERS: [(&str, Option<&str>); 5] = [
@@ -39,6 +43,254 @@ const FILTERS: [(&str, Option<&str>); 5] = [
     ("In Progress", Some("IsResumable")),
     ("Favorites", Some("IsFavorite")),
 ];
+
+/// Decade choices: label and first year (0 is everything before 1970).
+const DECADES: [(&str, u16); 7] = [
+    ("2020s", 2020),
+    ("2010s", 2010),
+    ("2000s", 2000),
+    ("1990s", 1990),
+    ("1980s", 1980),
+    ("1970s", 1970),
+    ("Older", 0),
+];
+
+/// "Added" choices: label and how many days back.
+const ADDED: [(&str, u32); 3] = [
+    ("Last 7 days", 7),
+    ("Last 30 days", 30),
+    ("Last 90 days", 90),
+];
+
+/// The grid filters beyond the status dropdown, set from the Filters popover
+/// (Movies and Shows grids only).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Extra {
+    /// First year of the decade, as in `DECADES`.
+    decade: Option<u16>,
+    /// `Some(true)` for HD, `Some(false)` for SD.
+    hd: Option<bool>,
+    subtitles: bool,
+    rating: Option<String>,
+    /// Added within this many days, as in `ADDED`.
+    added_days: Option<u32>,
+}
+
+impl Extra {
+    /// How many filters are on.
+    fn active(&self) -> usize {
+        usize::from(self.decade.is_some())
+            + usize::from(self.hd.is_some())
+            + usize::from(self.subtitles)
+            + usize::from(self.rating.is_some())
+            + usize::from(self.added_days.is_some())
+    }
+
+    /// The saved form, `v1;decade=2010;res=hd;subs=1;rating=PG-13;added=30`
+    /// (None when nothing is on). A rating with a `;` can't be saved, and
+    /// real ones have none.
+    fn encode(&self) -> Option<String> {
+        let mut parts = vec!["v1".to_string()];
+        if let Some(decade) = self.decade {
+            parts.push(format!("decade={decade}"));
+        }
+        if let Some(hd) = self.hd {
+            parts.push(format!("res={}", if hd { "hd" } else { "sd" }));
+        }
+        if self.subtitles {
+            parts.push("subs=1".to_string());
+        }
+        if let Some(rating) = self.rating.as_ref().filter(|r| !r.contains(';')) {
+            parts.push(format!("rating={rating}"));
+        }
+        if let Some(days) = self.added_days {
+            parts.push(format!("added={days}"));
+        }
+        (parts.len() > 1).then(|| parts.join(";"))
+    }
+
+    /// Reads `encode`'s form; anything unknown or invalid is left off.
+    fn decode(text: &str) -> Self {
+        let mut parts = text.split(';');
+        let mut extra = Self::default();
+        if parts.next() != Some("v1") {
+            return extra;
+        }
+        for (key, value) in parts.filter_map(|part| part.split_once('=')) {
+            match key {
+                "decade" => {
+                    extra.decade = value
+                        .parse()
+                        .ok()
+                        .filter(|year| DECADES.iter().any(|(_, y)| y == year));
+                }
+                "res" => {
+                    extra.hd = match value {
+                        "hd" => Some(true),
+                        "sd" => Some(false),
+                        _ => None,
+                    };
+                }
+                "subs" => extra.subtitles = value == "1",
+                "rating" => extra.rating = Some(value.to_string()).filter(|r| !r.is_empty()),
+                "added" => {
+                    extra.added_days = value
+                        .parse()
+                        .ok()
+                        .filter(|days| ADDED.iter().any(|(_, d)| d == days));
+                }
+                _ => {}
+            }
+        }
+        extra
+    }
+
+    /// Every year of the decade starting `decade` (up to `this_year`, for
+    /// the current one), comma-separated for Emby's `Years`; 0 is 1900-1969.
+    fn years(decade: u16, this_year: i64) -> String {
+        let (first, last) = match decade {
+            0 => (1900, 1969),
+            d => (i64::from(d), (i64::from(d) + 9).min(this_year)),
+        };
+        (first..=last)
+            .map(|year| year.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    /// Puts what the server can filter on straight into `query`. Resolution
+    /// and subtitles only mean something for movies: a series has no streams
+    /// of its own, so those go by episodes (see `IdRestriction`).
+    fn apply(&self, query: &mut ItemQuery, series: bool, this_year: i64) {
+        query.years = self.decade.map(|decade| Self::years(decade, this_year));
+        query.official_ratings = self.rating.clone();
+        if !series {
+            query.is_hd = self.hd;
+            query.has_subtitles = self.subtitles.then_some(true);
+        }
+    }
+}
+
+/// UTC date and time of Unix `secs`: year, month, day, hour, minute, second.
+fn civil(secs: i64) -> (i64, u32, u32, u32, u32, u32) {
+    let (days, rest) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Days since 0000-03-01 in 400-year eras (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    (
+        year,
+        month as u32,
+        day as u32,
+        (rest / 3600) as u32,
+        (rest % 3600 / 60) as u32,
+        (rest % 60) as u32,
+    )
+}
+
+/// `secs` as `YYYY-MM-DDTHH:MM:SS` (UTC), which sorts as text like Emby's
+/// `DateCreated`.
+fn iso(secs: i64) -> String {
+    let (y, mo, d, h, mi, s) = civil(secs);
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}")
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0))
+}
+
+/// What the grid is cut down to by a set of item ids the server can't
+/// filter for us (see `restricted_ids`); the sets found are intersected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IdRestriction {
+    series: bool,
+    parent: Option<String>,
+    /// Series started and not finished.
+    in_progress: bool,
+    /// Series with an episode that is HD / has subtitles.
+    episodes: Option<(Option<bool>, Option<bool>)>,
+    /// Added on or after this `iso` time.
+    added_since: Option<String>,
+}
+
+impl IdRestriction {
+    fn new(
+        parent: Option<String>,
+        series: bool,
+        in_progress: bool,
+        extra: &Extra,
+        now: i64,
+    ) -> Self {
+        let wants_episodes = series && (extra.hd.is_some() || extra.subtitles);
+        IdRestriction {
+            series,
+            parent,
+            in_progress,
+            episodes: wants_episodes.then_some((extra.hd, extra.subtitles.then_some(true))),
+            added_since: extra
+                .added_days
+                .map(|days| iso(now - i64::from(days) * 86_400)),
+        }
+    }
+
+    fn is_none(&self) -> bool {
+        !self.in_progress && self.episodes.is_none() && self.added_since.is_none()
+    }
+}
+
+/// The ids every part of `restriction` allows.
+async fn restricted_ids(
+    client: &crate::emby::EmbyClient,
+    user_id: &str,
+    restriction: &IdRestriction,
+) -> anyhow::Result<Vec<String>> {
+    let parent = restriction.parent.as_deref();
+    let mut sets = Vec::new();
+    if restriction.in_progress {
+        sets.push(client.started_series_ids(user_id, parent).await?);
+    }
+    if let Some((hd, subtitles)) = restriction.episodes {
+        sets.push(
+            client
+                .series_ids_with_episodes(user_id, parent, hd, subtitles)
+                .await?,
+        );
+    }
+    if let Some(cutoff) = &restriction.added_since {
+        sets.push(
+            client
+                .added_since_ids(user_id, parent, restriction.series, cutoff)
+                .await?,
+        );
+    }
+    Ok(intersect(sets))
+}
+
+/// The ids in every one of `sets`, in the first one's order.
+fn intersect(mut sets: Vec<Vec<String>>) -> Vec<String> {
+    if sets.is_empty() {
+        return Vec::new();
+    }
+    let first = sets.remove(0);
+    let rest: Vec<HashSet<String>> = sets.into_iter().map(|s| s.into_iter().collect()).collect();
+    first
+        .into_iter()
+        .filter(|id| rest.iter().all(|set| set.contains(id)))
+        .collect()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -449,8 +701,10 @@ fn sortable_grid(ui: &Ui, base: ItemQuery) -> gtk::Box {
     sortable_grid_of(ui, base, Shape::Poster)
 }
 
-fn sortable_grid_of(ui: &Ui, base: ItemQuery, shape: Shape) -> gtk::Box {
+fn sortable_grid_of(ui: &Ui, mut base: ItemQuery, shape: Shape) -> gtk::Box {
     let (grid, store) = library::grid(ui, shape);
+    // The A-Z strip files items by their sort name.
+    base.extra_fields = base.extra_fields.or(Some("SortName"));
     let count = gtk::Label::builder()
         .margin_end(6)
         .css_classes(["dim-label"])
@@ -471,7 +725,15 @@ fn sortable_grid_of(ui: &Ui, base: ItemQuery, shape: Shape) -> gtk::Box {
     let labels: Vec<&str> = filters.iter().map(|(label, _)| *label).collect();
     let filter = gtk::DropDown::from_strings(&labels);
     filter.set_tooltip_text(Some("Filter"));
-    let sort = gtk::DropDown::from_strings(&SORTS.map(|(label, _, _)| label));
+    let only_series = base.include_types == Some("Series");
+    let sorts: Rc<Vec<(&'static str, &'static str, bool)>> = Rc::new(
+        SORTS
+            .into_iter()
+            .filter(|(_, s, _)| only_series || *s != LAST_EPISODE_ADDED)
+            .collect(),
+    );
+    let labels: Vec<&str> = sorts.iter().map(|(label, _, _)| *label).collect();
+    let sort = gtk::DropDown::from_strings(&labels);
     sort.set_tooltip_text(Some("Sort by"));
     let descending = gtk::ToggleButton::builder()
         .icon_name(crate::ui::icons::SORT_ASCENDING)
@@ -496,20 +758,29 @@ fn sortable_grid_of(ui: &Ui, base: ItemQuery, shape: Shape) -> gtk::Box {
         .child(&grid)
         .vexpand(true)
         .build();
+    // The jump-to-letter strip beside the grid, for name order.
+    let strip = library::az_strip(&grid, &store);
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.append(&bar);
-    root.append(&scrolled);
+    root.append(&library::grid_body(&scrolled, &strip));
+
+    // More filters, on Movies and Shows grids only.
+    let item_type = base
+        .include_types
+        .filter(|t| matches!(*t, "Movie" | "Series"));
+    let library_id = base.parent_id.clone();
+    let extra = Rc::new(RefCell::new(Extra::default()));
 
     // The last sort/filter used here, before any handler is connected.
     let key = view_key(&base);
     if let Some(prefs) = crate::db::Db::open_default()
-        .and_then(|db| db.get_view_prefs(&key))
+        .and_then(|db| db.get_view_prefs(&crate::account::scope(), &key))
         .unwrap_or_else(|e| {
             tracing::warn!("couldn't read view settings: {e:#}");
             None
         })
     {
-        if let Some(index) = SORTS.iter().position(|(_, s, _)| *s == prefs.sort_by) {
+        if let Some(index) = sorts.iter().position(|(_, s, _)| *s == prefs.sort_by) {
             sort.set_selected(index as u32);
         }
         if let Some(index) = filters
@@ -524,6 +795,13 @@ fn sortable_grid_of(ui: &Ui, base: ItemQuery, shape: Shape) -> gtk::Box {
         } else {
             crate::ui::icons::SORT_ASCENDING
         });
+        if item_type.is_some() {
+            *extra.borrow_mut() = prefs
+                .extra
+                .as_deref()
+                .map(Extra::decode)
+                .unwrap_or_default();
+        }
     }
     let opened = Rc::new(Cell::new(true));
 
@@ -540,18 +818,27 @@ fn sortable_grid_of(ui: &Ui, base: ItemQuery, shape: Shape) -> gtk::Box {
         sort,
         #[weak]
         descending,
+        #[weak]
+        strip,
         #[strong]
         generation,
+        #[strong]
+        sorts,
+        #[strong]
+        extra,
         #[strong(rename_to = weak_ui)]
         ui.downgrade(),
         move || {
             let choice = Choice {
-                sort: SORTS[sort.selected() as usize].1,
+                sort: sorts[sort.selected() as usize].1,
                 descending: descending.is_active(),
                 filter: filters
                     .get(filter.selected() as usize)
                     .and_then(|(_, f)| *f),
+                extra: extra.borrow().clone(),
             };
+            // Letters only mean something in name order.
+            strip.set_visible(choice.sort == "SortName");
             // Remembered for next time (not the first load: nothing changed).
             if !opened.replace(false) {
                 remember(&key, &choice);
@@ -578,7 +865,7 @@ fn sortable_grid_of(ui: &Ui, base: ItemQuery, shape: Shape) -> gtk::Box {
         reload,
         move |sort| {
             // Each sort has a natural direction; toggling it reloads too.
-            let natural = SORTS[sort.selected() as usize].2;
+            let natural = sorts[sort.selected() as usize].2;
             if descending.is_active() != natural {
                 descending.set_active(natural);
             } else {
@@ -590,14 +877,275 @@ fn sortable_grid_of(ui: &Ui, base: ItemQuery, shape: Shape) -> gtk::Box {
         let reload = reload.clone();
         move |_| reload()
     });
+    if let Some(item_type) = item_type {
+        let changed: Rc<dyn Fn()> = reload.clone();
+        let more = extra_filters(ui, library_id, item_type, &extra, changed);
+        bar.insert_child_after(&more, Some(&filter));
+    }
     reload();
     root
+}
+
+/// What the Filters popover and its button share.
+struct FilterState {
+    extra: Rc<RefCell<Extra>>,
+    /// Set while rows are being set from `extra` (not by the user).
+    syncing: Cell<bool>,
+    button: glib::WeakRef<gtk::MenuButton>,
+    badge: glib::WeakRef<gtk::Label>,
+    changed: Rc<dyn Fn()>,
+}
+
+impl FilterState {
+    /// The button's count and accent, for the filters on.
+    fn refresh(&self) {
+        let active = self.extra.borrow().active();
+        if let Some(badge) = self.badge.upgrade() {
+            badge.set_label(&active.to_string());
+            badge.set_visible(active > 0);
+        }
+        if let Some(button) = self.button.upgrade() {
+            if active > 0 {
+                button.add_css_class("suggested-action");
+            } else {
+                button.remove_css_class("suggested-action");
+            }
+        }
+    }
+
+    /// A change the user made: apply it, then reload the grid.
+    fn edit(&self, set: impl FnOnce(&mut Extra)) {
+        set(&mut self.extra.borrow_mut());
+        self.refresh();
+        (self.changed)();
+    }
+}
+
+/// A label with a drop-down of `options` (the first is "Any").
+fn filter_row(label: &str, options: &[&str]) -> (gtk::Box, gtk::DropDown) {
+    let row = gtk::Box::builder().spacing(18).build();
+    row.append(
+        &gtk::Label::builder()
+            .label(label)
+            .xalign(0.0)
+            .hexpand(true)
+            .build(),
+    );
+    let dropdown = gtk::DropDown::from_strings(options);
+    row.append(&dropdown);
+    (row, dropdown)
+}
+
+/// Runs `set` on the filters when the user picks something in `dropdown`.
+fn wire_row(
+    dropdown: &gtk::DropDown,
+    state: &Rc<FilterState>,
+    set: impl Fn(&mut Extra, u32) + 'static,
+) {
+    let state = state.clone();
+    dropdown.connect_selected_notify(move |dropdown| {
+        if !state.syncing.get() {
+            let picked = dropdown.selected();
+            state.edit(|extra| set(extra, picked));
+        }
+    });
+}
+
+/// The bar's Filters button: a popover with a row per extra filter. Each
+/// change reloads the grid at once and the popover stays open.
+fn extra_filters(
+    ui: &Ui,
+    library_id: Option<String>,
+    item_type: &'static str,
+    extra: &Rc<RefCell<Extra>>,
+    changed: Rc<dyn Fn()>,
+) -> gtk::MenuButton {
+    let badge = gtk::Label::new(None);
+    let face = gtk::Box::builder().spacing(4).build();
+    face.append(&gtk::Image::from_icon_name(crate::ui::icons::FILTER));
+    face.append(&badge);
+    let button = gtk::MenuButton::builder()
+        .child(&face)
+        .tooltip_text("More filters")
+        .build();
+    let state = Rc::new(FilterState {
+        extra: extra.clone(),
+        syncing: Cell::new(false),
+        button: button.downgrade(),
+        badge: badge.downgrade(),
+        changed,
+    });
+
+    let decades: Vec<&str> = std::iter::once("Any")
+        .chain(DECADES.iter().map(|(label, _)| *label))
+        .collect();
+    let (decade_row, decade) = filter_row("Decade", &decades);
+    let (res_row, res) = filter_row("Resolution", &["Any", "HD", "SD"]);
+    let (subs_row, subs) = filter_row("Subtitles", &["Any", "With subtitles"]);
+    let (rating_row, rating) = filter_row("Rating", &["Any"]);
+    // Only once the library's ratings are known.
+    rating_row.set_visible(false);
+    let added: Vec<&str> = std::iter::once("Any")
+        .chain(ADDED.iter().map(|(label, _)| *label))
+        .collect();
+    let (added_row, added) = filter_row("Added", &added);
+
+    // Index 0 is "Any"; the rest follow their table.
+    wire_row(&decade, &state, |extra, picked| {
+        extra.decade = picked
+            .checked_sub(1)
+            .and_then(|i| DECADES.get(i as usize))
+            .map(|(_, year)| *year);
+    });
+    wire_row(&res, &state, |extra, picked| {
+        extra.hd = match picked {
+            1 => Some(true),
+            2 => Some(false),
+            _ => None,
+        };
+    });
+    wire_row(&subs, &state, |extra, picked| extra.subtitles = picked == 1);
+    wire_row(&added, &state, |extra, picked| {
+        extra.added_days = picked
+            .checked_sub(1)
+            .and_then(|i| ADDED.get(i as usize))
+            .map(|(_, days)| *days);
+    });
+    // The rating names are only known once they're fetched.
+    let ratings: Rc<RefCell<Vec<String>>> = Rc::default();
+    wire_row(&rating, &state, {
+        let ratings = ratings.clone();
+        move |extra, picked| {
+            extra.rating = picked
+                .checked_sub(1)
+                .and_then(|i| ratings.borrow().get(i as usize).cloned());
+        }
+    });
+
+    // Rows to match `extra` (saved filters, or cleared).
+    let sync = Rc::new(glib::clone!(
+        #[weak]
+        decade,
+        #[weak]
+        res,
+        #[weak]
+        subs,
+        #[weak]
+        rating,
+        #[weak]
+        added,
+        #[strong]
+        state,
+        #[strong]
+        ratings,
+        move || {
+            state.syncing.set(true);
+            let extra = state.extra.borrow().clone();
+            decade.set_selected(
+                DECADES
+                    .iter()
+                    .position(|(_, year)| Some(*year) == extra.decade)
+                    .map_or(0, |i| i as u32 + 1),
+            );
+            res.set_selected(match extra.hd {
+                Some(true) => 1,
+                Some(false) => 2,
+                None => 0,
+            });
+            subs.set_selected(u32::from(extra.subtitles));
+            rating.set_selected(
+                ratings
+                    .borrow()
+                    .iter()
+                    .position(|r| Some(r) == extra.rating.as_ref())
+                    .map_or(0, |i| i as u32 + 1),
+            );
+            added.set_selected(
+                ADDED
+                    .iter()
+                    .position(|(_, days)| Some(*days) == extra.added_days)
+                    .map_or(0, |i| i as u32 + 1),
+            );
+            state.syncing.set(false);
+            state.refresh();
+        }
+    ));
+    sync();
+
+    let clear = gtk::Button::with_label("Clear filters");
+    clear.connect_clicked({
+        let (state, sync) = (state.clone(), sync.clone());
+        move |_| {
+            if state.extra.borrow().active() > 0 {
+                *state.extra.borrow_mut() = Extra::default();
+                sync();
+                (state.changed)();
+            }
+        }
+    });
+
+    let content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(8)
+        .margin_top(12)
+        .margin_bottom(12)
+        .margin_start(12)
+        .margin_end(12)
+        .build();
+    for row in [&decade_row, &res_row, &subs_row, &rating_row, &added_row] {
+        content.append(row);
+    }
+    content.append(&clear);
+    button.set_popover(Some(&gtk::Popover::builder().child(&content).build()));
+
+    // This library's ratings, for the Rating row; no row without any.
+    let (client, user_id) = (ui.client(), ui.user_id());
+    let (weak_row, weak_rating) = (rating_row.downgrade(), rating.downgrade());
+    glib::spawn_future_local(async move {
+        let found = spawn_tokio(async move {
+            client
+                .official_ratings(&user_id, library_id.as_deref(), item_type)
+                .await
+        })
+        .await;
+        // Failed: keep a saved rating (the count on the button still shows
+        // it, and Clear removes it) rather than lose it to a blip.
+        let found = match found {
+            Ok(found) => found,
+            Err(e) => {
+                tracing::warn!("couldn't load ratings: {e:#}");
+                return;
+            }
+        };
+        let (Some(row), Some(rating)) = (weak_row.upgrade(), weak_rating.upgrade()) else {
+            return;
+        };
+        let saved = state.extra.borrow().rating.clone();
+        if !found.is_empty() {
+            let options: Vec<&str> = std::iter::once("Any")
+                .chain(found.iter().map(String::as_str))
+                .collect();
+            state.syncing.set(true);
+            rating.set_model(Some(&gtk::StringList::new(&options)));
+            state.syncing.set(false);
+            *ratings.borrow_mut() = found;
+            row.set_visible(true);
+        }
+        // A saved rating this library doesn't have (any more) would filter
+        // with no way to see it: drop it.
+        if saved.is_some_and(|saved| !ratings.borrow().contains(&saved)) {
+            state.edit(|extra| extra.rating = None);
+        }
+        sync();
+    });
+    button
 }
 
 struct Choice {
     sort: &'static str,
     descending: bool,
     filter: Option<&'static str>,
+    extra: Extra,
 }
 
 /// Which grid a remembered sort/filter belongs to: the library (or folder)
@@ -615,14 +1163,17 @@ fn remember(key: &str, choice: &Choice) {
         sort_by: choice.sort.to_string(),
         descending: choice.descending,
         filter: choice.filter.map(str::to_string),
+        extra: choice.extra.encode(),
     };
-    if let Err(e) = crate::db::Db::open_default().and_then(|db| db.set_view_prefs(key, &prefs)) {
+    if let Err(e) = crate::db::Db::open_default()
+        .and_then(|db| db.set_view_prefs(&crate::account::scope(), key, &prefs))
+    {
         tracing::warn!("couldn't save view settings: {e:#}");
     }
 }
 
-/// Most series asked for by id in one request; a longer `Ids=` list makes
-/// the address too long for the server.
+/// Most ids asked for in one request; a longer `Ids=` list makes the
+/// address too long for the server.
 const MAX_IDS: usize = 100;
 
 fn reload_grid(
@@ -647,96 +1198,107 @@ fn reload_grid(
     // "In Progress" for series: Emby never calls a series resumable, so
     // it's the series with an episode watched or part-watched, minus the
     // ones watched to the end.
-    if choice.filter == Some("IsResumable")
-        && base.include_types.is_some_and(|t| t.contains("Series"))
-    {
+    let in_progress = choice.filter == Some("IsResumable")
+        && base.include_types.is_some_and(|t| t.contains("Series"));
+    if in_progress {
         query.filters.retain(|f| *f != "IsResumable");
         query.filters.push("IsUnplayed");
-        let (client, user_id, parent) = (ui.client(), ui.user_id(), base.parent_id.clone());
-        let (weak, store, count, generation) = (
-            ui.downgrade(),
-            store.clone(),
-            count.downgrade(),
-            generation.clone(),
-        );
-        glib::spawn_future_local(async move {
-            let ids = crate::runtime::spawn_tokio(async move {
-                client.started_series_ids(&user_id, parent.as_deref()).await
+    }
+    let now = unix_now();
+    let series = base.include_types == Some("Series");
+    choice.extra.apply(&mut query, series, civil(now).0);
+    let restriction = IdRestriction::new(
+        base.parent_id.clone(),
+        series || in_progress,
+        in_progress,
+        &choice.extra,
+        now,
+    );
+    if restriction.is_none() {
+        load_query(&ui, store, count, query, generation, current);
+        return;
+    }
+    // Some filters Emby can't do itself: its ids come from elsewhere, and
+    // the grid shows just those.
+    let (client, user_id) = (ui.client(), ui.user_id());
+    let (weak, store, count, generation) = (
+        ui.downgrade(),
+        store.clone(),
+        count.downgrade(),
+        generation.clone(),
+    );
+    glib::spawn_future_local(async move {
+        let ids =
+            spawn_tokio(async move { restricted_ids(&client, &user_id, &restriction).await }).await;
+        if generation.get() != current {
+            return;
+        }
+        let ids = match ids {
+            Ok(ids) => ids,
+            Err(e) => {
+                // Like a failed page load, not an empty list.
+                if let Some(ui) = weak.upgrade() {
+                    ui.report_error("Could not load items", &e);
+                }
+                return;
+            }
+        };
+        let Some(count) = count.upgrade() else { return };
+        if ids.is_empty() {
+            count.set_label("0 items");
+            return;
+        }
+        if ids.len() <= MAX_IDS {
+            query.ids = Some(ids.join(","));
+            if let Some(ui) = weak.upgrade() {
+                load_query(&ui, &store, &count, query, &generation, current);
+            }
+            return;
+        }
+        // Too many for one address: walk the library in the chosen
+        // order and keep the allowed ones.
+        let allowed: HashSet<String> = ids.into_iter().collect();
+        let Some((client, user_id)) = weak.upgrade().map(|ui| (ui.client(), ui.user_id())) else {
+            return;
+        };
+        let count = count.downgrade();
+        let mut shown = 0;
+        loop {
+            let page = spawn_tokio({
+                let (client, user_id, query) = (client.clone(), user_id.clone(), query.clone());
+                async move { client.items(&user_id, &query).await }
             })
             .await;
             if generation.get() != current {
                 return;
             }
-            let ids = match ids {
-                Ok(ids) => ids,
+            let page = match page {
+                Ok(page) => page,
                 Err(e) => {
-                    // Like a failed page load, not an empty list.
                     if let Some(ui) = weak.upgrade() {
                         ui.report_error("Could not load items", &e);
                     }
                     return;
                 }
             };
-            let Some(count) = count.upgrade() else { return };
-            if ids.is_empty() {
-                count.set_label("0 items");
-                return;
+            let received = page.items.len();
+            let objects: Vec<_> = page
+                .items
+                .into_iter()
+                .filter(|item| allowed.contains(&item.id))
+                .map(glib::BoxedAnyObject::new)
+                .collect();
+            shown += objects.len();
+            store.extend_from_slice(&objects);
+            query.start += received;
+            if received == 0 || query.start >= page.total_record_count {
+                break;
             }
-            if ids.len() <= MAX_IDS {
-                query.ids = Some(ids.join(","));
-                if let Some(ui) = weak.upgrade() {
-                    load_query(&ui, &store, &count, query, &generation, current);
-                }
-                return;
-            }
-            // Too many for one address: walk the library in the chosen
-            // order and keep the started ones.
-            let started: HashSet<String> = ids.into_iter().collect();
-            let Some((client, user_id)) = weak.upgrade().map(|ui| (ui.client(), ui.user_id()))
-            else {
-                return;
-            };
-            let count = count.downgrade();
-            let mut shown = 0;
-            loop {
-                let page = spawn_tokio({
-                    let (client, user_id, query) = (client.clone(), user_id.clone(), query.clone());
-                    async move { client.items(&user_id, &query).await }
-                })
-                .await;
-                if generation.get() != current {
-                    return;
-                }
-                let page = match page {
-                    Ok(page) => page,
-                    Err(e) => {
-                        if let Some(ui) = weak.upgrade() {
-                            ui.report_error("Could not load items", &e);
-                        }
-                        return;
-                    }
-                };
-                let received = page.items.len();
-                let objects: Vec<_> = page
-                    .items
-                    .into_iter()
-                    .filter(|item| started.contains(&item.id))
-                    .map(glib::BoxedAnyObject::new)
-                    .collect();
-                shown += objects.len();
-                store.extend_from_slice(&objects);
-                query.start += received;
-                if received == 0 || query.start >= page.total_record_count {
-                    break;
-                }
-            }
-            if let Some(count) = count.upgrade() {
-                count.set_label(&items_label(shown));
-            }
-        });
-        return;
-    }
-    load_query(&ui, store, count, query, generation, current);
+        }
+        if let Some(count) = count.upgrade() {
+            count.set_label(&items_label(shown));
+        }
+    });
 }
 
 /// Fills `store` with `query`'s pages while it's still the current one.
@@ -1134,7 +1696,8 @@ fn suggestions(ui: &Ui, folder: &BaseItem, kind: Kind) -> gtk::Widget {
 
 #[cfg(test)]
 mod tests {
-    use super::{fresh, top_genres};
+    use super::{Extra, IdRestriction, civil, fresh, intersect, iso, top_genres};
+    use crate::emby::browse::ItemQuery;
     use crate::emby::models::{BaseItem, NameId, UserItemData};
 
     fn series(id: &str, genres: &[&str]) -> BaseItem {
@@ -1184,5 +1747,125 @@ mod tests {
         assert!(fresh(vec![series("x", &[])], true, &mut seen).is_empty());
         // Watched titles stay when the account doesn't hide them.
         assert_eq!(ids(fresh(vec![watched], false, &mut seen)), ["w"]);
+    }
+
+    #[test]
+    fn extra_filters_round_trip_through_their_saved_form() {
+        let extra = Extra {
+            decade: Some(2010),
+            hd: Some(true),
+            subtitles: true,
+            rating: Some("PG-13".into()),
+            added_days: Some(30),
+        };
+        let saved = extra.encode().unwrap();
+        assert_eq!(saved, "v1;decade=2010;res=hd;subs=1;rating=PG-13;added=30");
+        assert_eq!(Extra::decode(&saved), extra);
+        assert_eq!(Extra::default().encode(), None);
+        assert_eq!(extra.active(), 5);
+        assert_eq!(Extra::default().active(), 0);
+    }
+
+    #[test]
+    fn saved_extra_filters_are_read_tolerantly() {
+        // Unknown keys and invalid values are left off; the rest still count.
+        let extra = Extra::decode("v1;future=9;decade=1850;res=4k;subs=1;added=45;rating=R");
+        assert_eq!(
+            extra,
+            Extra {
+                subtitles: true,
+                rating: Some("R".into()),
+                ..Default::default()
+            }
+        );
+        // Another version, or none, is no filters.
+        assert_eq!(Extra::decode("v2;subs=1"), Extra::default());
+        assert_eq!(Extra::decode("subs=1"), Extra::default());
+        assert_eq!(Extra::decode(""), Extra::default());
+        assert_eq!(Extra::decode("v1;;=;rating=").rating, None);
+        assert_eq!(Extra::decode("v1;res=sd").hd, Some(false));
+    }
+
+    #[test]
+    fn decades_list_their_years() {
+        assert_eq!(
+            Extra::years(2010, 2026),
+            "2010,2011,2012,2013,2014,2015,2016,2017,2018,2019"
+        );
+        // The current decade stops at this year.
+        assert_eq!(Extra::years(2020, 2023), "2020,2021,2022,2023");
+        let older = Extra::years(0, 2026);
+        assert!(older.starts_with("1900,1901,"));
+        assert!(older.ends_with(",1968,1969"));
+        assert_eq!(older.split(',').count(), 70);
+    }
+
+    #[test]
+    fn extra_filters_go_into_the_query_by_what_the_server_can_do() {
+        let extra = Extra {
+            decade: Some(2020),
+            hd: Some(false),
+            subtitles: true,
+            rating: Some("TV-MA".into()),
+            added_days: None,
+        };
+        let mut movies = ItemQuery::default();
+        extra.apply(&mut movies, false, 2022);
+        assert_eq!(movies.years.as_deref(), Some("2020,2021,2022"));
+        assert_eq!(movies.official_ratings.as_deref(), Some("TV-MA"));
+        assert_eq!(movies.is_hd, Some(false));
+        assert_eq!(movies.has_subtitles, Some(true));
+        // A series has no streams of its own: those go by its episodes.
+        let mut shows = ItemQuery::default();
+        extra.apply(&mut shows, true, 2022);
+        assert_eq!(shows.years, movies.years);
+        assert_eq!((shows.is_hd, shows.has_subtitles), (None, None));
+        let restriction = IdRestriction::new(None, true, false, &extra, 0);
+        assert_eq!(restriction.episodes, Some((Some(false), Some(true))));
+        let movie_restriction = IdRestriction::new(None, false, false, &extra, 0);
+        assert!(movie_restriction.is_none());
+    }
+
+    #[test]
+    fn restrictions_cover_progress_and_added() {
+        assert!(IdRestriction::new(None, true, false, &Extra::default(), 0).is_none());
+        assert!(!IdRestriction::new(None, true, true, &Extra::default(), 0).is_none());
+        let added = Extra {
+            added_days: Some(7),
+            ..Default::default()
+        };
+        let restriction = IdRestriction::new(Some("lib".into()), false, false, &added, 8 * 86_400);
+        assert_eq!(
+            restriction.added_since.as_deref(),
+            Some("1970-01-02T00:00:00")
+        );
+        assert_eq!(restriction.parent.as_deref(), Some("lib"));
+    }
+
+    #[test]
+    fn id_sets_intersect_in_the_first_ones_order() {
+        let set = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            intersect(vec![set(&["c", "a", "b"]), set(&["b", "c", "z"])]),
+            ["c", "b"]
+        );
+        assert_eq!(
+            intersect(vec![set(&["c", "a"]), set(&["a"]), set(&["a", "c"])]),
+            ["a"]
+        );
+        assert_eq!(intersect(vec![set(&["a"])]), ["a"]);
+        assert!(intersect(vec![set(&["a"]), set(&[])]).is_empty());
+        assert!(intersect(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn utc_dates_come_out_right() {
+        assert_eq!(iso(0), "1970-01-01T00:00:00");
+        assert_eq!(iso(1_700_000_000), "2023-11-14T22:13:20");
+        // A leap day, and the day after.
+        assert_eq!(iso(1_709_164_800), "2024-02-29T00:00:00");
+        assert_eq!(iso(1_709_251_200), "2024-03-01T00:00:00");
+        assert_eq!(civil(1_700_000_000).0, 2023);
+        assert_eq!(civil(-86_400).0, 1969);
     }
 }

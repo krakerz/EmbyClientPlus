@@ -14,13 +14,21 @@ use crate::auth;
 use crate::config::Settings;
 use crate::emby::EmbyClient;
 use crate::player::Player;
-use crate::runtime::spawn_detached;
+use crate::runtime::{block_on_timeout, spawn_detached};
 
 const CSS: &str = "
 .card-button { padding: 0; }
 /* Grid cells: the card plus half the rows' 12px gap on each side. */
 gridview.poster-grid > child {
     padding: 6px 6px 12px 6px;
+}
+/* The A-Z jump strip beside a name-sorted grid: small, tight letters. */
+.az-strip button.az-letter {
+    min-width: 0;
+    min-height: 0;
+    padding: 1px 6px;
+    font-size: 0.75rem;
+    font-weight: bold;
 }
 .player-bar {
     margin: 12px;
@@ -43,6 +51,10 @@ menubutton.osd-button > button {
     min-height: 36px;
     padding: 0;
     border-radius: 999px;
+}
+/* The sleep button showing its time left: a pill instead of a circle. */
+menubutton.osd-button.with-label > button {
+    padding: 0 10px;
 }
 /* The hand-built Shaders menu, laid out like the other player menus. */
 button.menu-row {
@@ -145,6 +157,14 @@ popover.menu modelbutton:focus-visible,
 popover modelbutton:focus-visible {
     background: @accent_bg_color;
     color: @accent_fg_color;
+}
+/* Controller in use: a pointer resting where a menu opened must not tint a
+   row that isn't the one with the focus ring. */
+window.pad-mode popover button.flat:hover:not(:focus-visible),
+window.pad-mode popover modelbutton:hover:not(:focus-visible),
+window.pad-mode button.menu-row:hover:not(:focus-visible) {
+    background: transparent;
+    color: @popover_fg_color;
 }
 .watched-mark {
     background: @success_color;
@@ -386,9 +406,13 @@ pub fn build(app: &adw::Application, player: Player) -> adw::ApplicationWindow {
 
     // Controller presses go to whatever is on screen.
     crate::controller::start({
+        let accepts = super::gamepad::input_gate(&window);
         let state = Rc::downgrade(&state);
         let window = window.downgrade();
         move |pad, repeat| {
+            if !accepts() {
+                return;
+            }
             if let (Some(state), Some(window)) = (state.upgrade(), window.upgrade()) {
                 let ui = state.ui.borrow().clone();
                 // First, so what the press shows (the OSD) knows it.
@@ -402,12 +426,15 @@ pub fn build(app: &adw::Application, player: Player) -> adw::ApplicationWindow {
     // The right stick scrubs in the player and scrolls everywhere else.
     // Whichever isn't in use is told it was let go, so neither keeps running.
     crate::controller::on_right_stick({
+        let accepts = super::gamepad::input_gate(&window);
         let state = Rc::downgrade(&state);
         let window = window.downgrade();
         move |x, y| {
             let (Some(state), Some(window)) = (state.upgrade(), window.upgrade()) else {
                 return;
             };
+            // In the background the stick counts as let go, so nothing keeps running.
+            let (x, y) = if accepts() { (x, y) } else { (0.0, 0.0) };
             let ui = state.ui.borrow().clone();
             let in_player = ui.as_ref().is_some_and(|ui| {
                 ui.player_visible()
@@ -538,7 +565,22 @@ fn stored_session(settings: &Settings) -> Option<Session> {
 fn show_main(state: &Rc<State>, session: Session) {
     // The account's settings apply from now on: its saved copy at once,
     // then the server's.
-    crate::account::sign_in(&session.user_id);
+    let mut server = Settings::load().unwrap_or_default().server;
+    if server.server_id.is_none() && !server.url.is_empty() {
+        // Settings from before the server's id was saved: ask once (briefly,
+        // the server may be offline), else its address stands in.
+        let url = server.url.clone();
+        block_on_timeout(
+            async move { crate::emby::auth::learn_server_version(&url).await },
+            std::time::Duration::from_secs(2),
+        );
+        server = Settings::load().unwrap_or_default().server;
+    }
+    crate::account::sign_in(
+        server.server_id.as_deref().unwrap_or_default(),
+        &server.url,
+        &session.user_id,
+    );
     {
         let (client, user_id) = (session.client.clone(), session.user_id.clone());
         spawn_detached(async move {
@@ -616,6 +658,7 @@ fn on_logged_in(state: &Rc<State>, logged_in: LoggedIn) {
     let user_id = logged_in.user_id.clone();
     if let Err(e) = Settings::update(|settings| {
         settings.server.url = logged_in.server_url;
+        settings.server.server_id = Some(logged_in.server_id).filter(|id| !id.is_empty());
         settings.server.user_id = user_id;
         settings.server.username = logged_in.username;
     }) {

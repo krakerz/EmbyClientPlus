@@ -57,6 +57,15 @@ pub struct ItemQuery {
     pub extra_fields: Option<&'static str>,
     /// Only these items (comma-separated ids).
     pub ids: Option<String>,
+    /// Only these production years (comma-separated).
+    pub years: Option<String>,
+    /// Only HD (`true`) or SD (`false`) items. Series have no streams of
+    /// their own, so this only means something for movies and episodes.
+    pub is_hd: Option<bool>,
+    /// Only items with (`true`) / without subtitles; same caveat as `is_hd`.
+    pub has_subtitles: Option<bool>,
+    /// Only these ratings (`|`-separated, Emby's own delimiter).
+    pub official_ratings: Option<String>,
     pub start: usize,
     pub limit: usize,
 }
@@ -121,6 +130,18 @@ impl ItemQuery {
         if let Some(ids) = &self.ids {
             params.push(("Ids", ids.clone()));
         }
+        if let Some(years) = &self.years {
+            params.push(("Years", years.clone()));
+        }
+        if let Some(is_hd) = self.is_hd {
+            params.push(("IsHD", is_hd.to_string()));
+        }
+        if let Some(has_subtitles) = self.has_subtitles {
+            params.push(("HasSubtitles", has_subtitles.to_string()));
+        }
+        if let Some(ratings) = &self.official_ratings {
+            params.push(("OfficialRatings", ratings.clone()));
+        }
         params
             .iter()
             .map(|(key, value)| format!("{key}={}", encode(value)))
@@ -178,6 +199,127 @@ impl EmbyClient {
             unfinished.extend(page.items.into_iter().map(|s| s.id));
         }
         Ok(unfinished)
+    }
+
+    /// Ids of the movies (or, for `series`, the series with an episode)
+    /// added since `cutoff` (`YYYY-MM-DDTHH:MM:SS`, UTC). Emby has no
+    /// "added since" filter, so this walks the items newest-added first
+    /// and stops at the first one older than that.
+    pub async fn added_since_ids(
+        &self,
+        user_id: &str,
+        parent_id: Option<&str>,
+        series: bool,
+        cutoff: &str,
+    ) -> Result<Vec<String>> {
+        #[derive(serde::Deserialize, Default)]
+        #[serde(rename_all = "PascalCase", default)]
+        struct Added {
+            id: String,
+            series_id: Option<String>,
+            date_created: Option<String>,
+        }
+        const PAGE: usize = 500;
+        let item_type = if series { "Episode" } else { "Movie" };
+        let parent = parent_id.map_or(String::new(), |id| format!("&ParentId={id}"));
+        let mut ids: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut start = 0;
+        loop {
+            let page: QueryResult<Added> = self
+                .get(&format!(
+                    "/emby/Users/{user_id}/Items?Recursive=true&IncludeItemTypes={item_type}\
+                     &SortBy=DateCreated&SortOrder=Descending&Fields=DateCreated,SeriesId\
+                     &EnableImages=false&EnableUserData=false&EnableTotalRecordCount=false\
+                     &StartIndex={start}&Limit={PAGE}{parent}"
+                ))
+                .await?;
+            let received = page.items.len();
+            for item in page.items {
+                // ISO 8601 in UTC sorts as text; a missing date sorts last.
+                if item.date_created.as_deref().is_none_or(|d| d < cutoff) {
+                    return Ok(ids);
+                }
+                let id = if series {
+                    item.series_id
+                } else {
+                    Some(item.id)
+                };
+                if let Some(id) = id.filter(|id| seen.insert(id.clone())) {
+                    ids.push(id);
+                }
+            }
+            if received < PAGE {
+                return Ok(ids);
+            }
+            start += received;
+        }
+    }
+
+    /// Ids of the series with an episode matching `is_hd` / `has_subtitles`:
+    /// those filters don't apply to a series itself.
+    pub async fn series_ids_with_episodes(
+        &self,
+        user_id: &str,
+        parent_id: Option<&str>,
+        is_hd: Option<bool>,
+        has_subtitles: Option<bool>,
+    ) -> Result<Vec<String>> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "PascalCase")]
+        struct Episode {
+            series_id: Option<String>,
+        }
+        const PAGE: usize = 1000;
+        let mut filters = String::new();
+        if let Some(is_hd) = is_hd {
+            filters.push_str(&format!("&IsHD={is_hd}"));
+        }
+        if let Some(has_subtitles) = has_subtitles {
+            filters.push_str(&format!("&HasSubtitles={has_subtitles}"));
+        }
+        let parent = parent_id.map_or(String::new(), |id| format!("&ParentId={id}"));
+        let mut ids: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut start = 0;
+        loop {
+            let page: QueryResult<Episode> = self
+                .get(&format!(
+                    "/emby/Users/{user_id}/Items?Recursive=true&IncludeItemTypes=Episode\
+                     &Fields=SeriesId&EnableImages=false&EnableUserData=false\
+                     &EnableTotalRecordCount=false&StartIndex={start}&Limit={PAGE}\
+                     {filters}{parent}"
+                ))
+                .await?;
+            let received = page.items.len();
+            for id in page.items.into_iter().filter_map(|e| e.series_id) {
+                if seen.insert(id.clone()) {
+                    ids.push(id);
+                }
+            }
+            if received < PAGE {
+                return Ok(ids);
+            }
+            start += received;
+        }
+    }
+
+    /// The official ratings (PG-13, TV-MA, ...) among `item_type` items
+    /// under `parent_id`.
+    pub async fn official_ratings(
+        &self,
+        user_id: &str,
+        parent_id: Option<&str>,
+        item_type: &str,
+    ) -> Result<Vec<String>> {
+        let parent = parent_id.map_or(String::new(), |id| format!("&ParentId={id}"));
+        let value: serde_json::Value = self
+            .get(&format!(
+                "/emby/OfficialRatings?UserId={user_id}&IncludeItemTypes={item_type}\
+                 &Recursive=true{parent}"
+            ))
+            .await?;
+        Ok(parse_official_ratings(&value))
     }
 
     /// The user's top-level libraries.
@@ -446,9 +588,11 @@ impl EmbyClient {
     }
 
     /// Server-relative image path, resized server-side to `max_width`.
+    /// Quality 80: about a third smaller than 90, no visible loss at
+    /// poster sizes; Emby keeps its resized copies, so it encodes each once.
     pub fn image_path(image: &ImageRef, max_width: u32) -> String {
         format!(
-            "/emby/Items/{}/Images/{}?maxWidth={max_width}&tag={}&quality=90",
+            "/emby/Items/{}/Images/{}?maxWidth={max_width}&tag={}&quality=80",
             image.item_id,
             image.kind.path_segment(),
             encode(&image.tag)
@@ -636,6 +780,23 @@ pub(super) fn encode(value: &str) -> String {
     out
 }
 
+/// The ratings in an `/OfficialRatings` reply: `{"Items":[{"Name":"PG"}]}`
+/// (bare names are accepted too). Anything else is no ratings.
+fn parse_official_ratings(value: &serde_json::Value) -> Vec<String> {
+    let items = value.get("Items").unwrap_or(value);
+    let mut ratings: Vec<String> = items
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("Name").unwrap_or(entry).as_str())
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && !name.contains('|'))
+        .map(str::to_string)
+        .collect();
+    ratings.dedup();
+    ratings
+}
+
 /// `items` by last played date, newest first, each once, at most `limit`.
 fn newest_played(mut items: Vec<BaseItem>, limit: usize) -> Vec<BaseItem> {
     let played_at = |item: &BaseItem| {
@@ -708,6 +869,45 @@ mod tests {
         assert!(qs.contains("Filters=IsFavorite,IsUnplayed"));
         assert!(qs.contains("GenreIds=7424"));
         assert!(!qs.contains("TagIds"));
+        for param in ["Years=", "IsHD=", "HasSubtitles=", "OfficialRatings="] {
+            assert!(!qs.contains(param));
+        }
+    }
+
+    #[test]
+    fn query_string_carries_extra_filters() {
+        let query = ItemQuery {
+            years: Some("2010,2011".into()),
+            is_hd: Some(false),
+            has_subtitles: Some(true),
+            official_ratings: Some("PG-13".into()),
+            ..Default::default()
+        };
+        let qs = query.to_query_string();
+        assert!(qs.contains("Years=2010,2011"));
+        assert!(qs.contains("IsHD=false"));
+        assert!(qs.contains("HasSubtitles=true"));
+        assert!(qs.contains("OfficialRatings=PG-13"));
+        let multi = ItemQuery {
+            official_ratings: Some("TV-MA|R".into()),
+            ..Default::default()
+        };
+        assert!(
+            multi
+                .to_query_string()
+                .contains("OfficialRatings=TV-MA%7CR")
+        );
+    }
+
+    #[test]
+    fn official_ratings_reply_is_parsed_defensively() {
+        use serde_json::json;
+        let reply = json!({"Items": [{"Name": "M"}, {"Name": " XXX "}, {"Name": ""}, {"Id": 3}],
+                           "TotalRecordCount": 4});
+        assert_eq!(parse_official_ratings(&reply), ["M", "XXX"]);
+        assert_eq!(parse_official_ratings(&json!(["PG", "R"])), ["PG", "R"]);
+        assert!(parse_official_ratings(&json!({"Items": []})).is_empty());
+        assert!(parse_official_ratings(&json!("nope")).is_empty());
     }
 
     #[test]
@@ -715,7 +915,7 @@ mod tests {
         let path = EmbyClient::image_path(&image("abc", ImageKind::Backdrop, "t1"), 1280);
         assert_eq!(
             path,
-            "/emby/Items/abc/Images/Backdrop?maxWidth=1280&tag=t1&quality=90"
+            "/emby/Items/abc/Images/Backdrop?maxWidth=1280&tag=t1&quality=80"
         );
     }
 

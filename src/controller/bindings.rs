@@ -117,6 +117,7 @@ pub enum Action {
     Search,
     Preferences,
     OpenMusic,
+    JumpLetters,
     // Player.
     PlayPause,
     Leave,
@@ -141,7 +142,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 32] = [
+    pub const ALL: [Action; 33] = [
         Action::Up,
         Action::Down,
         Action::Left,
@@ -155,6 +156,7 @@ impl Action {
         Action::Search,
         Action::Preferences,
         Action::OpenMusic,
+        Action::JumpLetters,
         Action::PlayPause,
         Action::Leave,
         Action::SeekBack,
@@ -216,6 +218,7 @@ impl Action {
             Action::ShowControls => "show_controls",
             Action::Skip => "skip",
             Action::OpenMusic => "open_music",
+            Action::JumpLetters => "letters",
             Action::MusicPlayPause => "music_play_pause",
             Action::MusicPrevious => "music_previous",
             Action::MusicNext => "music_next",
@@ -253,6 +256,7 @@ impl Action {
             Action::ShowControls => "Show controls",
             Action::Skip => "Skip intro/credits",
             Action::OpenMusic => "Open the music player",
+            Action::JumpLetters => "Letters (A–Z)",
             Action::MusicPlayPause => "Play / pause",
             Action::MusicPrevious => "Previous track",
             Action::MusicNext => "Next track",
@@ -281,6 +285,7 @@ impl Action {
             Action::OpenMusic | Action::CloseMusic => &[Pad::LT, Pad::RT],
             Action::PreviousChapter => &[Pad::LT],
             Action::NextChapter => &[Pad::RT],
+            Action::JumpLetters => &[Pad::R3],
             Action::Search | Action::Skip => &[Pad::Select],
             Action::Preferences | Action::ShowControls => &[Pad::Start],
         }
@@ -422,6 +427,12 @@ mod tests {
             bindings.action_for(Pad::A, Context::Player),
             Some(Action::PlayPause)
         );
+        assert_eq!(
+            bindings.action_for(Pad::R3, Context::Browse),
+            Some(Action::JumpLetters)
+        );
+        assert_eq!(Action::JumpLetters.context(), Context::Browse);
+        assert_eq!(bindings.buttons(Action::JumpLetters), [Pad::R3]);
         assert_eq!(
             bindings.action_for(Pad::Left, Context::Player),
             Some(Action::SeekBack)

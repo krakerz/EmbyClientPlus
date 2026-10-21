@@ -13,7 +13,6 @@ pub struct AuthenticateByNameRequest {
 #[serde(rename_all = "PascalCase")]
 pub struct AuthenticateByNameResponse {
     pub access_token: String,
-    #[allow(dead_code)]
     pub server_id: String,
     pub user: EmbyUser,
 }
@@ -338,6 +337,9 @@ pub struct BaseItem {
     /// Single-item fetches: the versions there are (usually one).
     pub media_sources: Vec<MediaSource>,
     pub name: String,
+    /// What Emby sorts by (leading articles dropped); only when asked for
+    /// via `Fields` (the grids' A-Z strip does).
+    pub sort_name: Option<String>,
     #[serde(rename = "Type")]
     pub item_type: String,
     pub collection_type: Option<String>,

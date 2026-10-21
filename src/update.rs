@@ -113,10 +113,25 @@ pub async fn check(kind: &InstallKind) -> Result<Option<Update>> {
         .json()
         .await
         .context("unexpected release data")?;
-    Ok(pick_update(&release, kind, CURRENT))
+    Ok(pick_update(&release, kind, CURRENT, appimage_suffix()))
 }
 
-fn pick_update(release: &ReleaseJson, kind: &InstallKind, current: &str) -> Option<Update> {
+/// The AppImage asset for this flavour. The compat name deliberately doesn't
+/// end in the main one, so builds that predate it never pick it up.
+fn appimage_suffix() -> &'static str {
+    if crate::flavour::is_compat() {
+        "-x86_64-compat.AppImage"
+    } else {
+        "-x86_64.AppImage"
+    }
+}
+
+fn pick_update(
+    release: &ReleaseJson,
+    kind: &InstallKind,
+    current: &str,
+    appimage_suffix: &str,
+) -> Option<Update> {
     let latest = parse_version(&release.tag_name)?;
     if latest <= parse_version(current)? {
         return None;
@@ -124,7 +139,7 @@ fn pick_update(release: &ReleaseJson, kind: &InstallKind, current: &str) -> Opti
     let suffix = match kind {
         InstallKind::Archive(_) => ARCHIVE_SUFFIX,
         InstallKind::MacApp(_) => "-macos-arm64.zip",
-        InstallKind::AppImage(_) => "-x86_64.AppImage",
+        InstallKind::AppImage(_) => appimage_suffix,
         InstallKind::Source => return None,
     };
     let asset = release.assets.iter().find(|a| a.name.ends_with(suffix))?;
@@ -574,6 +589,9 @@ fn spawn_updated(kind: &InstallKind) -> Result<()> {
 mod tests {
     use super::*;
 
+    const MAIN: &str = "-x86_64.AppImage";
+    const COMPAT: &str = "-x86_64-compat.AppImage";
+
     fn release(tag: &str) -> ReleaseJson {
         ReleaseJson {
             tag_name: tag.into(),
@@ -593,6 +611,11 @@ mod tests {
                     browser_download_url: "https://x/appimage".into(),
                     digest: None,
                 },
+                AssetJson {
+                    name: format!("EmbyClientPlus-{tag}-x86_64-compat.AppImage"),
+                    browser_download_url: "https://x/compat".into(),
+                    digest: None,
+                },
             ],
         }
     }
@@ -609,20 +632,34 @@ mod tests {
     fn picks_the_asset_for_the_install_kind() {
         let archive = InstallKind::Archive("/x".into());
         let appimage = InstallKind::AppImage("/x.AppImage".into());
-        let update = pick_update(&release("0.6.0"), &archive, "0.5.0").unwrap();
+        let update = pick_update(&release("0.6.0"), &archive, "0.5.0", MAIN).unwrap();
         assert_eq!(update.version, "0.6.0");
         assert!(update.asset_name.ends_with(ARCHIVE_SUFFIX));
-        let update = pick_update(&release("v0.6.0"), &appimage, "0.5.0").unwrap();
+        let update = pick_update(&release("v0.6.0"), &appimage, "0.5.0", MAIN).unwrap();
         assert!(update.asset_name.ends_with(".AppImage"));
         assert_eq!(update.version, "0.6.0");
     }
 
     #[test]
+    fn each_flavour_picks_its_own_appimage() {
+        let appimage = InstallKind::AppImage("/x.AppImage".into());
+        let pick = |suffix| {
+            pick_update(&release("0.6.0"), &appimage, "0.5.0", suffix)
+                .unwrap()
+                .asset_name
+        };
+        assert_eq!(pick(MAIN), "EmbyClientPlus-0.6.0-x86_64.AppImage");
+        assert_eq!(pick(COMPAT), "EmbyClientPlus-0.6.0-x86_64-compat.AppImage");
+        // The compat name must never match what an old main build looks for.
+        assert!(!"x-x86_64-compat.AppImage".ends_with(MAIN));
+    }
+
+    #[test]
     fn same_or_older_releases_and_source_builds_get_nothing() {
         let archive = InstallKind::Archive("/x".into());
-        assert!(pick_update(&release("0.5.0"), &archive, "0.5.0").is_none());
-        assert!(pick_update(&release("0.4.9"), &archive, "0.5.0").is_none());
-        assert!(pick_update(&release("0.6.0"), &InstallKind::Source, "0.5.0").is_none());
+        assert!(pick_update(&release("0.5.0"), &archive, "0.5.0", MAIN).is_none());
+        assert!(pick_update(&release("0.4.9"), &archive, "0.5.0", MAIN).is_none());
+        assert!(pick_update(&release("0.6.0"), &InstallKind::Source, "0.5.0", MAIN).is_none());
     }
 
     #[test]

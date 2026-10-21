@@ -9,19 +9,10 @@
 here="$(dirname "$(readlink -f "$0")")"
 lib="$here/../lib"
 
-config="${XDG_CONFIG_HOME:-$HOME/.config}/embyclientplus/config.toml"
-svp_dir=""
-if [ -f "$config" ]; then
-    svp_dir="$(sed -n 's/^svp_dir *= *"\(.*\)" *$/\1/p' "$config" | head -n 1)"
-fi
-[ -n "$svp_dir" ] || svp_dir="${SVP_DIR:-$HOME/SVP4}"
-
-if [ -e "$svp_dir/mpv/libvapoursynth-script.so.0" ]; then
-    vs_dir="${XDG_CACHE_HOME:-$HOME/.cache}/embyclientplus/svp-vapoursynth"
-    mkdir -p "$vs_dir"
-    ln -sfn "$svp_dir/mpv/libvapoursynth-script.so.0" "$vs_dir/libvsscript.so"
-    ln -sfn "$svp_dir/mpv/libvapoursynth.so" "$vs_dir/libvapoursynth.so"
-    LD_LIBRARY_PATH="$vs_dir:$svp_dir/python${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# svp_detect (shared with the compat AppImage's hook) finds SVP's folder.
+. "$lib/svp-detect.sh"
+if svp_detect; then
+    LD_LIBRARY_PATH="$SVP_LIB_PATH${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 else
     LD_LIBRARY_PATH="$lib/vapoursynth-fallback${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 fi

@@ -57,7 +57,15 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Command {
 }
 
 pub fn version() -> String {
-    format!("{} {}", crate::APP_NAME, crate::update::current_version())
+    version_line(
+        crate::update::current_version(),
+        crate::flavour::is_compat(),
+    )
+}
+
+fn version_line(version: &str, compat: bool) -> String {
+    let suffix = if compat { " (compat)" } else { "" };
+    format!("{} {version}{suffix}", crate::APP_NAME)
 }
 
 pub fn help() -> String {
@@ -166,6 +174,12 @@ mod tests {
                 target: Some("--".into())
             }
         );
+    }
+
+    #[test]
+    fn version_names_the_compat_flavour() {
+        assert_eq!(version_line("1.2.3", false), "Emby Client+ 1.2.3");
+        assert_eq!(version_line("1.2.3", true), "Emby Client+ 1.2.3 (compat)");
     }
 
     #[test]

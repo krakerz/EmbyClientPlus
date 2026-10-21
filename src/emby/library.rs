@@ -3,7 +3,21 @@ use anyhow::Result;
 use super::EmbyClient;
 use super::models::{BaseItem, QueryResult};
 
+fn hide_from_resume_path(user_id: &str, item_id: &str) -> String {
+    format!("/emby/Users/{user_id}/Items/{item_id}/HideFromResume?Hide=true")
+}
+
 impl EmbyClient {
+    /// Takes an item off the user's Continue Watching rows (its resume
+    /// point stays, so it still resumes from where it was).
+    pub async fn hide_from_resume(&self, user_id: &str, item_id: &str) -> Result<()> {
+        self.post_empty(
+            &hide_from_resume_path(user_id, item_id),
+            &serde_json::json!({}),
+        )
+        .await
+    }
+
     /// Every episode of a series in watch order, for finding the previous
     /// and next episode around the one playing.
     pub async fn series_episodes(&self, series_id: &str, user_id: &str) -> Result<Vec<BaseItem>> {
@@ -48,5 +62,18 @@ impl EmbyClient {
             "/emby/Users/{user_id}/Items/{item_id}?Fields=Chapters,Overview"
         ))
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hide_from_resume_path;
+
+    #[test]
+    fn hide_from_resume_sends_hide_as_a_query_parameter() {
+        assert_eq!(
+            hide_from_resume_path("u1", "i2"),
+            "/emby/Users/u1/Items/i2/HideFromResume?Hide=true"
+        );
     }
 }
