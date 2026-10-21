@@ -78,7 +78,17 @@ pub struct ViewPrefs {
     pub sort_by: String,
     pub descending: bool,
     pub filter: Option<String>,
+    /// Further grid filters, encoded by the library page.
+    pub extra: Option<String>,
 }
+
+/// The `scope` of rows saved before rows were split by server and user.
+const LEGACY_SCOPE: &str = "";
+
+const OVERRIDE_COLUMNS: &str = "emby_item_id, item_type, audio_language, subtitle_language,
+    subtitle_forced_only, frame_gen_backend, frame_gen_multiplier,
+    aspect_mode, zoom, shaders, volume";
+const VIEW_PREFS_COLUMNS: &str = "view_key, sort_by, descending, filter";
 
 pub struct Db {
     conn: Connection,
@@ -107,56 +117,124 @@ impl Db {
         Ok(Db { conn })
     }
 
+    /// Brings the file to the current schema (`PRAGMA user_version`). Version
+    /// 1 scopes every row by server and user; older files are rebuilt, their
+    /// rows kept under [`LEGACY_SCOPE`].
     fn init_schema(conn: &Connection) -> Result<()> {
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS title_overrides (
-                emby_item_id          TEXT PRIMARY KEY,
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version >= 1 {
+            return Ok(());
+        }
+        let tx = conn.unchecked_transaction()?;
+        let has_table = |name: &str| -> Result<bool> {
+            Ok(tx
+                .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1")?
+                .exists([name])?)
+        };
+        if has_table("title_overrides")? {
+            // Columns added after the first release; older databases lack them.
+            for (column, kind) in [
+                ("aspect_mode", "TEXT"),
+                ("zoom", "REAL"),
+                ("shaders", "TEXT"),
+                ("volume", "REAL"),
+            ] {
+                let exists = tx
+                    .prepare("SELECT 1 FROM pragma_table_info('title_overrides') WHERE name = ?1")?
+                    .exists([column])?;
+                if !exists {
+                    tx.execute_batch(&format!(
+                        "ALTER TABLE title_overrides ADD COLUMN {column} {kind};"
+                    ))
+                    .with_context(|| format!("failed to add the {column} column"))?;
+                }
+            }
+            tx.execute_batch("ALTER TABLE title_overrides RENAME TO title_overrides_old;")?;
+        }
+        tx.execute_batch(
+            "CREATE TABLE title_overrides (
+                scope                 TEXT NOT NULL,
+                emby_item_id          TEXT NOT NULL,
                 item_type             TEXT NOT NULL,
                 audio_language        TEXT,
                 subtitle_language     TEXT,
                 subtitle_forced_only  INTEGER,
                 frame_gen_backend     TEXT,
-                frame_gen_multiplier  INTEGER
+                frame_gen_multiplier  INTEGER,
+                aspect_mode           TEXT,
+                zoom                  REAL,
+                shaders               TEXT,
+                volume                REAL,
+                PRIMARY KEY (scope, emby_item_id)
             );",
         )
         .context("failed to initialize title_overrides schema")?;
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS view_prefs (
-                view_key    TEXT PRIMARY KEY,
+        if has_table("title_overrides_old")? {
+            tx.execute_batch(&format!(
+                "INSERT INTO title_overrides (scope, {OVERRIDE_COLUMNS})
+                 SELECT '{LEGACY_SCOPE}', {OVERRIDE_COLUMNS} FROM title_overrides_old;
+                 DROP TABLE title_overrides_old;"
+            ))
+            .context("failed to move title_overrides to the scoped schema")?;
+        }
+
+        if has_table("view_prefs")? {
+            tx.execute_batch("ALTER TABLE view_prefs RENAME TO view_prefs_old;")?;
+        }
+        tx.execute_batch(
+            "CREATE TABLE view_prefs (
+                scope       TEXT NOT NULL,
+                view_key    TEXT NOT NULL,
                 sort_by     TEXT NOT NULL,
                 descending  INTEGER NOT NULL,
-                filter      TEXT
+                filter      TEXT,
+                extra       TEXT,
+                PRIMARY KEY (scope, view_key)
             );",
         )
         .context("failed to initialize view_prefs schema")?;
-        // Columns added after the first release; older databases lack them.
-        for (column, kind) in [
-            ("aspect_mode", "TEXT"),
-            ("zoom", "REAL"),
-            ("shaders", "TEXT"),
-            ("volume", "REAL"),
-        ] {
-            let exists = conn
-                .prepare("SELECT 1 FROM pragma_table_info('title_overrides') WHERE name = ?1")?
-                .exists([column])?;
-            if !exists {
-                conn.execute_batch(&format!(
-                    "ALTER TABLE title_overrides ADD COLUMN {column} {kind};"
-                ))
-                .with_context(|| format!("failed to add the {column} column"))?;
-            }
+        if has_table("view_prefs_old")? {
+            tx.execute_batch(&format!(
+                "INSERT INTO view_prefs (scope, {VIEW_PREFS_COLUMNS})
+                 SELECT '{LEGACY_SCOPE}', {VIEW_PREFS_COLUMNS} FROM view_prefs_old;
+                 DROP TABLE view_prefs_old;"
+            ))
+            .context("failed to move view_prefs to the scoped schema")?;
         }
+        tx.execute_batch("PRAGMA user_version = 1;")?;
+        tx.commit()?;
         Ok(())
     }
 
-    pub fn get_override(&self, emby_item_id: &str) -> Result<Option<TitleOverride>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT emby_item_id, item_type, audio_language, subtitle_language,
-                    subtitle_forced_only, frame_gen_backend, frame_gen_multiplier,
-                    aspect_mode, zoom, shaders, volume
-             FROM title_overrides WHERE emby_item_id = ?1",
-        )?;
-        let mut rows = stmt.query([emby_item_id])?;
+    /// Moves the rows saved before scoping (the only server the app could
+    /// use then) to `scope`; returns how many moved.
+    pub fn adopt_legacy(&self, scope: &str) -> Result<usize> {
+        self.adopt_scope(LEGACY_SCOPE, scope)
+    }
+
+    /// Moves `from`'s rows to `to`; where `to` already has a row, it wins.
+    pub fn adopt_scope(&self, from: &str, to: &str) -> Result<usize> {
+        if from == to {
+            return Ok(0);
+        }
+        let mut moved = 0;
+        for table in ["title_overrides", "view_prefs"] {
+            moved += self.conn.execute(
+                &format!("UPDATE OR IGNORE {table} SET scope = ?2 WHERE scope = ?1"),
+                [from, to],
+            )?;
+            self.conn
+                .execute(&format!("DELETE FROM {table} WHERE scope = ?1"), [from])?;
+        }
+        Ok(moved)
+    }
+
+    pub fn get_override(&self, scope: &str, emby_item_id: &str) -> Result<Option<TitleOverride>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {OVERRIDE_COLUMNS}
+             FROM title_overrides WHERE scope = ?1 AND emby_item_id = ?2"
+        ))?;
+        let mut rows = stmt.query([scope, emby_item_id])?;
         let Some(row) = rows.next()? else {
             return Ok(None);
         };
@@ -182,14 +260,14 @@ impl Db {
         }))
     }
 
-    pub fn upsert_override(&self, entry: &TitleOverride) -> Result<()> {
+    pub fn upsert_override(&self, scope: &str, entry: &TitleOverride) -> Result<()> {
         self.conn.execute(
             "INSERT INTO title_overrides
-                (emby_item_id, item_type, audio_language, subtitle_language,
+                (scope, emby_item_id, item_type, audio_language, subtitle_language,
                  subtitle_forced_only, frame_gen_backend, frame_gen_multiplier,
                  aspect_mode, zoom, shaders, volume)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-             ON CONFLICT(emby_item_id) DO UPDATE SET
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(scope, emby_item_id) DO UPDATE SET
                 item_type = excluded.item_type,
                 audio_language = excluded.audio_language,
                 subtitle_language = excluded.subtitle_language,
@@ -201,6 +279,7 @@ impl Db {
                 shaders = excluded.shaders,
                 volume = excluded.volume",
             rusqlite::params![
+                scope,
                 entry.emby_item_id,
                 entry.item_type.as_str(),
                 entry.audio_language,
@@ -218,49 +297,54 @@ impl Db {
     }
 
     /// A library view's remembered sort and filter, if it was changed.
-    pub fn get_view_prefs(&self, view_key: &str) -> Result<Option<ViewPrefs>> {
-        let mut statement = self
-            .conn
-            .prepare("SELECT sort_by, descending, filter FROM view_prefs WHERE view_key = ?1")?;
-        let mut rows = statement.query([view_key])?;
+    pub fn get_view_prefs(&self, scope: &str, view_key: &str) -> Result<Option<ViewPrefs>> {
+        let mut statement = self.conn.prepare(
+            "SELECT sort_by, descending, filter, extra FROM view_prefs
+             WHERE scope = ?1 AND view_key = ?2",
+        )?;
+        let mut rows = statement.query([scope, view_key])?;
         Ok(match rows.next()? {
             Some(row) => Some(ViewPrefs {
                 sort_by: row.get(0)?,
                 descending: row.get::<_, i64>(1)? != 0,
                 filter: row.get(2)?,
+                extra: row.get(3)?,
             }),
             None => None,
         })
     }
 
-    pub fn set_view_prefs(&self, view_key: &str, prefs: &ViewPrefs) -> Result<()> {
+    pub fn set_view_prefs(&self, scope: &str, view_key: &str, prefs: &ViewPrefs) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO view_prefs (view_key, sort_by, descending, filter)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(view_key) DO UPDATE SET
+            "INSERT INTO view_prefs (scope, view_key, sort_by, descending, filter, extra)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(scope, view_key) DO UPDATE SET
                 sort_by = excluded.sort_by,
                 descending = excluded.descending,
-                filter = excluded.filter",
+                filter = excluded.filter,
+                extra = excluded.extra",
             rusqlite::params![
+                scope,
                 view_key,
                 prefs.sort_by,
                 prefs.descending as i64,
-                prefs.filter
+                prefs.filter,
+                prefs.extra
             ],
         )?;
         Ok(())
     }
 
-    /// Forgets every remembered per-title choice; returns how many.
+    /// Forgets every remembered per-title choice, whoever's; returns how many.
     pub fn clear_overrides(&self) -> Result<usize> {
         Ok(self.conn.execute("DELETE FROM title_overrides", [])?)
     }
 
     #[allow(dead_code)] // no per-title "reset" in the UI yet
-    pub fn delete_override(&self, emby_item_id: &str) -> Result<()> {
+    pub fn delete_override(&self, scope: &str, emby_item_id: &str) -> Result<()> {
         self.conn.execute(
-            "DELETE FROM title_overrides WHERE emby_item_id = ?1",
-            [emby_item_id],
+            "DELETE FROM title_overrides WHERE scope = ?1 AND emby_item_id = ?2",
+            [scope, emby_item_id],
         )?;
         Ok(())
     }
@@ -273,6 +357,8 @@ fn default_db_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const S: &str = "srv|user";
 
     #[test]
     fn round_trips_a_series_override() {
@@ -291,15 +377,15 @@ mod tests {
             volume: None,
         };
 
-        db.upsert_override(&entry).unwrap();
-        let fetched = db.get_override("series-123").unwrap().unwrap();
+        db.upsert_override(S, &entry).unwrap();
+        let fetched = db.get_override(S, "series-123").unwrap().unwrap();
         assert_eq!(fetched, entry);
     }
 
     #[test]
     fn missing_override_returns_none() {
         let db = Db::open_in_memory().unwrap();
-        assert_eq!(db.get_override("does-not-exist").unwrap(), None);
+        assert_eq!(db.get_override(S, "does-not-exist").unwrap(), None);
     }
 
     #[test]
@@ -318,13 +404,13 @@ mod tests {
             shaders: None,
             volume: None,
         };
-        db.upsert_override(&entry).unwrap();
+        db.upsert_override(S, &entry).unwrap();
 
         entry.frame_gen_backend = Some(FrameGenBackend::Svp);
         entry.frame_gen_multiplier = Some(3);
-        db.upsert_override(&entry).unwrap();
+        db.upsert_override(S, &entry).unwrap();
 
-        let fetched = db.get_override("movie-1").unwrap().unwrap();
+        let fetched = db.get_override(S, "movie-1").unwrap().unwrap();
         assert_eq!(fetched.frame_gen_backend, Some(FrameGenBackend::Svp));
         assert_eq!(fetched.frame_gen_multiplier, Some(3));
     }
@@ -334,12 +420,12 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         db.conn
             .execute(
-                "INSERT INTO title_overrides (emby_item_id, item_type, frame_gen_backend)
-                 VALUES ('series-legacy', 'series', 'lsfg_vk')",
+                "INSERT INTO title_overrides (scope, emby_item_id, item_type, frame_gen_backend)
+                 VALUES ('srv|user', 'series-legacy', 'series', 'lsfg_vk')",
                 [],
             )
             .unwrap();
-        let fetched = db.get_override("series-legacy").unwrap().unwrap();
+        let fetched = db.get_override(S, "series-legacy").unwrap().unwrap();
         assert_eq!(fetched.frame_gen_backend, Some(FrameGenBackend::Off));
     }
 
@@ -359,9 +445,9 @@ mod tests {
             shaders: None,
             volume: None,
         };
-        db.upsert_override(&entry).unwrap();
-        db.delete_override("movie-2").unwrap();
-        assert_eq!(db.get_override("movie-2").unwrap(), None);
+        db.upsert_override(S, &entry).unwrap();
+        db.delete_override(S, "movie-2").unwrap();
+        assert_eq!(db.get_override(S, "movie-2").unwrap(), None);
     }
 
     #[test]
@@ -371,23 +457,26 @@ mod tests {
         )
         .unwrap();
         for id in ["a", "b"] {
-            db.upsert_override(&TitleOverride {
-                emby_item_id: id.into(),
-                item_type: ItemType::Movie,
-                audio_language: Some("jpn".into()),
-                subtitle_language: None,
-                subtitle_forced_only: None,
-                frame_gen_backend: None,
-                frame_gen_multiplier: None,
-                aspect_mode: None,
-                zoom: None,
-                shaders: None,
-                volume: None,
-            })
+            db.upsert_override(
+                S,
+                &TitleOverride {
+                    emby_item_id: id.into(),
+                    item_type: ItemType::Movie,
+                    audio_language: Some("jpn".into()),
+                    subtitle_language: None,
+                    subtitle_forced_only: None,
+                    frame_gen_backend: None,
+                    frame_gen_multiplier: None,
+                    aspect_mode: None,
+                    zoom: None,
+                    shaders: None,
+                    volume: None,
+                },
+            )
             .unwrap();
         }
         assert_eq!(db.clear_overrides().unwrap(), 2);
-        assert!(db.get_override("a").unwrap().is_none());
+        assert!(db.get_override(S, "a").unwrap().is_none());
     }
 
     #[test]
@@ -407,34 +496,161 @@ mod tests {
             .unwrap();
         }
         let db = Db::open(&path).unwrap();
-        let old = db.get_override("old").unwrap().unwrap();
+        let old = db.get_override("", "old").unwrap().unwrap();
         assert_eq!(old.audio_language.as_deref(), Some("jpn"));
         assert_eq!(old.aspect_mode, None);
         let mut changed = old.clone();
         changed.aspect_mode = Some("fill".into());
         changed.zoom = Some(0.2);
-        db.upsert_override(&changed).unwrap();
-        assert_eq!(db.get_override("old").unwrap().unwrap().zoom, Some(0.2));
+        db.upsert_override("", &changed).unwrap();
+        assert_eq!(db.get_override("", "old").unwrap().unwrap().zoom, Some(0.2));
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn view_prefs_round_trip_and_update() {
         let db = Db::open_in_memory().unwrap();
-        assert_eq!(db.get_view_prefs("lib|Movie").unwrap(), None);
+        assert_eq!(db.get_view_prefs(S, "lib|Movie").unwrap(), None);
         let prefs = ViewPrefs {
             sort_by: "DateCreated".into(),
             descending: true,
             filter: Some("IsUnplayed".into()),
+            extra: Some("Genres=Drama".into()),
         };
-        db.set_view_prefs("lib|Movie", &prefs).unwrap();
-        assert_eq!(db.get_view_prefs("lib|Movie").unwrap(), Some(prefs));
+        db.set_view_prefs(S, "lib|Movie", &prefs).unwrap();
+        assert_eq!(db.get_view_prefs(S, "lib|Movie").unwrap(), Some(prefs));
         let changed = ViewPrefs {
             sort_by: "SortName".into(),
             descending: false,
             filter: None,
+            extra: None,
         };
-        db.set_view_prefs("lib|Movie", &changed).unwrap();
-        assert_eq!(db.get_view_prefs("lib|Movie").unwrap(), Some(changed));
+        db.set_view_prefs(S, "lib|Movie", &changed).unwrap();
+        assert_eq!(db.get_view_prefs(S, "lib|Movie").unwrap(), Some(changed));
+    }
+
+    fn movie(id: &str, audio: &str) -> TitleOverride {
+        TitleOverride {
+            emby_item_id: id.into(),
+            item_type: ItemType::Movie,
+            audio_language: Some(audio.into()),
+            subtitle_language: None,
+            subtitle_forced_only: None,
+            frame_gen_backend: None,
+            frame_gen_multiplier: None,
+            aspect_mode: None,
+            zoom: None,
+            shaders: None,
+            volume: None,
+        }
+    }
+
+    fn prefs(sort_by: &str) -> ViewPrefs {
+        ViewPrefs {
+            sort_by: sort_by.into(),
+            descending: false,
+            filter: None,
+            extra: None,
+        }
+    }
+
+    fn user_version(db: &Db) -> i64 {
+        db.conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn scopes_do_not_see_each_other() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_override("a|u1", &movie("m", "jpn")).unwrap();
+        db.set_view_prefs("a|u1", "lib|Movie", &prefs("SortName"))
+            .unwrap();
+        for other in ["a|u2", "b|u1", "local"] {
+            assert_eq!(db.get_override(other, "m").unwrap(), None);
+            assert_eq!(db.get_view_prefs(other, "lib|Movie").unwrap(), None);
+        }
+        db.upsert_override("b|u1", &movie("m", "eng")).unwrap();
+        let mine = db.get_override("a|u1", "m").unwrap().unwrap();
+        assert_eq!(mine.audio_language.as_deref(), Some("jpn"));
+        db.delete_override("b|u1", "m").unwrap();
+        assert!(db.get_override("a|u1", "m").unwrap().is_some());
+    }
+
+    #[test]
+    fn view_prefs_extra_round_trips() {
+        let db = Db::open_in_memory().unwrap();
+        let mut with_extra = prefs("SortName");
+        with_extra.extra = Some("Genres=Drama".into());
+        db.set_view_prefs(S, "k", &with_extra).unwrap();
+        assert_eq!(db.get_view_prefs(S, "k").unwrap(), Some(with_extra));
+    }
+
+    /// The schema as of 0.2.x, before scoping and the later columns.
+    fn old_database(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE title_overrides (emby_item_id TEXT PRIMARY KEY, item_type TEXT NOT NULL,
+             audio_language TEXT, subtitle_language TEXT, subtitle_forced_only INTEGER,
+             frame_gen_backend TEXT, frame_gen_multiplier INTEGER, aspect_mode TEXT,
+             zoom REAL, shaders TEXT, volume REAL);
+             INSERT INTO title_overrides (emby_item_id, item_type, audio_language, volume)
+             VALUES ('old', 'movie', 'jpn', 80.0);
+             CREATE TABLE view_prefs (view_key TEXT PRIMARY KEY, sort_by TEXT NOT NULL,
+             descending INTEGER NOT NULL, filter TEXT);
+             INSERT INTO view_prefs VALUES ('lib|Movie', 'DateCreated', 1, 'IsUnplayed');",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn unscoped_databases_upgrade_and_are_adopted() {
+        let path =
+            std::env::temp_dir().join(format!("embyclientplus-scope-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        old_database(&path);
+        let db = Db::open(&path).unwrap();
+        assert_eq!(user_version(&db), 1);
+        let old = db.get_override("", "old").unwrap().unwrap();
+        assert_eq!(old.audio_language.as_deref(), Some("jpn"));
+        assert_eq!(old.volume, Some(80.0));
+        let view = db.get_view_prefs("", "lib|Movie").unwrap().unwrap();
+        assert_eq!(view.sort_by, "DateCreated");
+        assert!(view.descending && view.extra.is_none());
+        // Nothing leaks into a real scope until it adopts them.
+        assert_eq!(db.get_override(S, "old").unwrap(), None);
+
+        assert_eq!(db.adopt_legacy(S).unwrap(), 2);
+        assert!(db.get_override(S, "old").unwrap().is_some());
+        assert!(db.get_view_prefs(S, "lib|Movie").unwrap().is_some());
+        assert_eq!(db.get_override("", "old").unwrap(), None);
+        assert_eq!(db.adopt_legacy("other|user").unwrap(), 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn adopting_keeps_rows_the_scope_already_has() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_override("", &movie("m", "legacy")).unwrap();
+        db.upsert_override("", &movie("n", "legacy")).unwrap();
+        db.upsert_override(S, &movie("m", "mine")).unwrap();
+        db.adopt_legacy(S).unwrap();
+        let kept = db.get_override(S, "m").unwrap().unwrap();
+        assert_eq!(kept.audio_language.as_deref(), Some("mine"));
+        assert!(db.get_override(S, "n").unwrap().is_some());
+        assert_eq!(db.get_override("", "m").unwrap(), None);
+    }
+
+    #[test]
+    fn upgrading_twice_changes_nothing() {
+        let path =
+            std::env::temp_dir().join(format!("embyclientplus-twice-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        old_database(&path);
+        drop(Db::open(&path).unwrap());
+        let db = Db::open(&path).unwrap();
+        assert_eq!(user_version(&db), 1);
+        assert!(db.get_override("", "old").unwrap().is_some());
+        let _ = std::fs::remove_file(&path);
     }
 }

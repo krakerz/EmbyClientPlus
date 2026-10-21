@@ -295,7 +295,8 @@ impl Ui {
     /// Marks `item` watched/unwatched on the server, then refreshes.
     pub fn set_played(&self, item: &BaseItem, played: bool) {
         let (client, user_id, id) = (self.client(), self.user_id(), item.id.clone());
-        self.update_item(
+        self.update_item_refreshing(
+            Some(item.id.clone()),
             async move { client.set_played(&user_id, &id, played).await },
             if played {
                 "Marked as watched"
@@ -307,7 +308,8 @@ impl Ui {
 
     pub fn set_favorite(&self, item: &BaseItem, favorite: bool) {
         let (client, user_id, id) = (self.client(), self.user_id(), item.id.clone());
-        self.update_item(
+        self.update_item_refreshing(
+            Some(item.id.clone()),
             async move { client.set_favorite(&user_id, &id, favorite).await },
             if favorite {
                 "Added to favourites"
@@ -322,12 +324,36 @@ impl Ui {
         request: impl std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
         done: &'static str,
     ) {
+        self.update_item_refreshing(None, request, done);
+    }
+
+    /// Like `update_item`; with `refresh` (an item id) the card of that item
+    /// on screen is redrawn from the server's copy.
+    fn update_item_refreshing(
+        &self,
+        refresh: Option<String>,
+        request: impl std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+        done: &'static str,
+    ) {
         let ui = self.clone();
         glib::spawn_future_local(async move {
             match crate::runtime::spawn_tokio(request).await {
                 Ok(()) => {
                     ui.toast(done);
                     ui.data_changed();
+                    // Cards already on screen show the new state without a
+                    // reload.
+                    if let Some(id) = refresh {
+                        let (client, user_id) = (ui.client(), ui.user_id());
+                        match crate::runtime::spawn_tokio(async move {
+                            client.item(&user_id, &id).await
+                        })
+                        .await
+                        {
+                            Ok(fresh) => library::refresh_item(&ui, &fresh),
+                            Err(e) => tracing::debug!("couldn't refetch the updated item: {e:#}"),
+                        }
+                    }
                 }
                 Err(e) => ui.report_error("Couldn't update the item", &e),
             }

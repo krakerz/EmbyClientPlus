@@ -2,7 +2,7 @@
 //! queries or one-off fetches. Library pages, search and full-row pages
 //! build on these.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::future::Future;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -97,6 +97,13 @@ pub fn grid(ui: &Ui, shape: Shape) -> (gtk::GridView, gio::ListStore) {
         .css_classes(["poster-grid"])
         .build();
     fit_columns(&grid, shape);
+    LIVE_GRIDS.with(|grids| {
+        grids.borrow_mut().push(LiveGrid {
+            grid: grid.downgrade(),
+            store: store.downgrade(),
+            shape,
+        });
+    });
     let weak = ui.downgrade();
     grid.connect_activate(move |grid, position| {
         let (Some(ui), Some(object)) = (
@@ -113,6 +120,61 @@ pub fn grid(ui: &Ui, shape: Shape) -> (gtk::GridView, gio::ListStore) {
     (grid, store)
 }
 
+/// A grid made by `grid()`, kept so a changed item can be redrawn in place.
+struct LiveGrid {
+    grid: glib::WeakRef<gtk::GridView>,
+    store: glib::WeakRef<gio::ListStore>,
+    shape: Shape,
+}
+
+thread_local! {
+    static LIVE_GRIDS: RefCell<Vec<LiveGrid>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Shows `item`'s new state (watched, favourite, unplayed count) on its
+/// card in every live grid. The store is edited in place, not spliced, so
+/// the controller focus and scroll position stay put.
+pub fn refresh_item(ui: &Ui, item: &BaseItem) {
+    // Collected first: binding must not run under the registry borrow.
+    let live: Vec<_> = LIVE_GRIDS.with(|grids| {
+        let mut grids = grids.borrow_mut();
+        grids.retain(|g| g.grid.upgrade().is_some() && g.store.upgrade().is_some());
+        grids
+            .iter()
+            .filter_map(|g| Some((g.grid.upgrade()?, g.store.upgrade()?, g.shape)))
+            .collect()
+    });
+    for (grid, store, shape) in live {
+        let positions: Vec<u32> = (0..store.n_items())
+            .filter(|&position| {
+                store
+                    .item(position)
+                    .and_downcast::<glib::BoxedAnyObject>()
+                    .is_some_and(|object| {
+                        let matches = object.borrow::<BaseItem>().id == item.id;
+                        if matches {
+                            *object.borrow_mut::<BaseItem>() = item.clone();
+                        }
+                        matches
+                    })
+            })
+            .collect();
+        if positions.is_empty() {
+            continue;
+        }
+        // The cells showing those positions (the rest aren't built).
+        let mut cell = grid.first_child();
+        while let Some(current) = cell {
+            cell = current.next_sibling();
+            if let Some(root) = current.first_child().and_downcast::<gtk::Box>()
+                && grid_position(root.upcast_ref()).is_some_and(|p| positions.contains(&p))
+            {
+                Card::from_root(&root).bind(ui, item, shape);
+            }
+        }
+    }
+}
+
 const POSITION_KEY: &str = "embyclientplus-grid-position";
 
 fn set_grid_position(root: &gtk::Box, position: u32) {
@@ -125,10 +187,19 @@ fn grid_position(widget: &gtk::Widget) -> Option<u32> {
     unsafe { widget.data::<u32>(POSITION_KEY).map(|p| *p.as_ref()) }
 }
 
+/// Whether `widget` sits in a popover. Those hang off the widget they were
+/// opened from (a card in the grid), so grid rules would reach out of them.
+fn in_popover(widget: &impl IsA<gtk::Widget>) -> bool {
+    widget.ancestor(gtk::Popover::static_type()).is_some()
+}
+
 /// Moves focus inside a grid by item position (GTK's directional focus
 /// doesn't step through grid cells). Returns false when `focus` isn't in
 /// a grid, or the move would leave it (the caller then moves normally).
 pub fn move_in_grid(focus: &gtk::Widget, direction: gtk::DirectionType) -> bool {
+    if in_popover(focus) {
+        return false;
+    }
     let Some(grid) = focus
         .ancestor(gtk::GridView::static_type())
         .and_downcast::<gtk::GridView>()
@@ -167,15 +238,352 @@ pub fn move_in_grid(focus: &gtk::Widget, direction: gtk::DirectionType) -> bool 
 /// The bar above the grid holding `focus` (count, filter, sort), if the
 /// grid has one: what Up from its top row goes to.
 pub fn grid_header(focus: &gtk::Widget) -> Option<gtk::Widget> {
-    focus
-        .ancestor(gtk::GridView::static_type())?
-        .parent()?
+    if in_popover(focus) {
+        return None;
+    }
+    let scrolled = focus.ancestor(gtk::GridView::static_type())?.parent()?;
+    // A grid with an A-Z strip sits in a body box next to it.
+    let block = scrolled
+        .parent()
+        .filter(|parent| parent.has_css_class(GRID_BODY_CLASS))
+        .unwrap_or(scrolled);
+    block
         .prev_sibling()
         .filter(|bar| bar.is_visible() && bar.has_css_class(GRID_BAR_CLASS))
 }
 
 /// Marks a grid's bar (see `grid_header`).
 pub const GRID_BAR_CLASS: &str = "grid-bar";
+
+/// Marks the box holding a grid's scroller and its A-Z strip.
+pub const GRID_BODY_CLASS: &str = "grid-body";
+
+/// Marks an A-Z strip (see `az_strip`).
+pub const AZ_STRIP_CLASS: &str = "az-strip";
+
+/// Slots in the strip: `#`, then A to Z.
+const AZ_SLOTS: usize = 27;
+
+/// What an item sorts under: Emby's `SortName` when it was asked for.
+fn sort_key(item: &BaseItem) -> &str {
+    item.sort_name
+        .as_deref()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(&item.name)
+}
+
+/// The strip slot a name falls under: 0 is `#` (anything not starting with
+/// A to Z), 1 to 26 are the letters.
+fn az_slot(name: &str) -> usize {
+    match name.chars().next().map(|c| c.to_ascii_uppercase()) {
+        Some(c @ 'A'..='Z') => 1 + usize::from(c as u8 - b'A'),
+        _ => 0,
+    }
+}
+
+fn az_label(slot: usize) -> String {
+    match slot {
+        0 => "#".to_string(),
+        n => char::from(b'A' + (n - 1) as u8).to_string(),
+    }
+}
+
+/// Which strip slots have at least one item in `model`.
+fn az_present(model: &gio::ListModel) -> [bool; AZ_SLOTS] {
+    let mut present = [false; AZ_SLOTS];
+    for position in 0..model.n_items() {
+        if let Some(object) = model.item(position).and_downcast::<glib::BoxedAnyObject>() {
+            present[az_slot(sort_key(&object.borrow::<BaseItem>()))] = true;
+        }
+    }
+    present
+}
+
+/// The first item (in the grid's order, whichever way it runs) under `slot`.
+fn first_in_slot(model: &gio::ListModel, slot: usize) -> Option<u32> {
+    (0..model.n_items()).find(|&position| {
+        model
+            .item(position)
+            .and_downcast::<glib::BoxedAnyObject>()
+            .is_some_and(|object| az_slot(sort_key(&object.borrow::<BaseItem>())) == slot)
+    })
+}
+
+/// A narrow vertical strip of `#`, A-Z buttons for jumping around a
+/// name-sorted `grid`; letters nothing starts with are dimmed. It scrolls
+/// (no scrollbar) when a small window can't fit all 27. Hide it when the
+/// grid isn't name-sorted.
+pub fn az_strip(grid: &gtk::GridView, store: &gio::ListStore) -> gtk::ScrolledWindow {
+    let letters = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    for slot in 0..AZ_SLOTS {
+        let button = gtk::Button::builder()
+            .label(az_label(slot))
+            .css_classes(["flat", "az-letter"])
+            .build();
+        let (grid, store) = (grid.downgrade(), store.downgrade());
+        button.connect_clicked(move |_| {
+            if let (Some(grid), Some(store)) = (grid.upgrade(), store.upgrade())
+                && let Some(position) = first_in_slot(store.upcast_ref(), slot)
+            {
+                focus_cell(&grid, position);
+            }
+        });
+        letters.append(&button);
+    }
+    let refresh = |letters: &gtk::Box, model: &gio::ListModel| {
+        let mut button = letters.first_child();
+        for present in az_present(model) {
+            let Some(current) = button else { break };
+            current.set_sensitive(present);
+            button = current.next_sibling();
+        }
+    };
+    refresh(&letters, store.upcast_ref());
+    let weak = letters.downgrade();
+    store.connect_items_changed(move |store, _, _, _| {
+        if let Some(letters) = weak.upgrade() {
+            refresh(&letters, store.upcast_ref());
+        }
+    });
+    // Our own viewport, so `strip_buttons` knows what's inside.
+    let viewport = gtk::Viewport::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
+    viewport.set_child(Some(&letters));
+    gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vscrollbar_policy(gtk::PolicyType::External)
+        .propagate_natural_height(true)
+        .valign(gtk::Align::Center)
+        .margin_end(6)
+        .css_classes([AZ_STRIP_CLASS])
+        .child(&viewport)
+        .build()
+}
+
+/// A grid and its A-Z strip side by side (see `grid_header`).
+pub fn grid_body(scrolled: &gtk::ScrolledWindow, strip: &gtk::ScrolledWindow) -> gtk::Box {
+    scrolled.set_hexpand(true);
+    let body = gtk::Box::builder()
+        .vexpand(true)
+        .css_classes([GRID_BODY_CLASS])
+        .build();
+    body.append(scrolled);
+    body.append(strip);
+    body
+}
+
+/// The strip next to `grid`, if it has one showing.
+fn az_strip_of(grid: &gtk::GridView) -> Option<gtk::ScrolledWindow> {
+    grid.parent()?
+        .next_sibling()
+        .filter(|strip| strip.is_visible() && strip.has_css_class(AZ_STRIP_CLASS))
+        .and_downcast()
+}
+
+fn strip_buttons(strip: &gtk::ScrolledWindow) -> Vec<gtk::Widget> {
+    let mut buttons = Vec::new();
+    let mut next = strip
+        .child()
+        .and_downcast::<gtk::Viewport>()
+        .and_then(|viewport| viewport.child())
+        .and_then(|letters| letters.first_child());
+    while let Some(button) = next {
+        next = button.next_sibling();
+        buttons.push(button);
+    }
+    buttons
+}
+
+const RETURN_KEY: &str = "embyclientplus-strip-return";
+
+/// The letter nearest `slot` among the `sensitive` ones (the earlier on a tie).
+fn nearest_sensitive(sensitive: &[bool], slot: usize) -> Option<usize> {
+    (0..sensitive.len())
+        .filter(|&index| sensitive[index])
+        .min_by_key(|index| index.abs_diff(slot))
+}
+
+/// The next letter with items after (`forward`) or before `current`; none
+/// at the ends, where the cursor stays.
+fn step_sensitive(sensitive: &[bool], current: usize, forward: bool) -> Option<usize> {
+    if forward {
+        (current + 1..sensitive.len()).find(|&index| sensitive[index])
+    } else {
+        (0..current).rev().find(|&index| sensitive[index])
+    }
+}
+
+fn sensitivity(buttons: &[gtk::Widget]) -> Vec<bool> {
+    buttons.iter().map(|button| button.is_sensitive()).collect()
+}
+
+/// Moves focus into `strip`, onto the letter for `slot` (or the nearest
+/// one with items), remembering the grid `position` to come back to.
+/// False when no letter can take it.
+fn enter_strip(strip: &gtk::ScrolledWindow, position: u32, slot: usize) -> bool {
+    if in_popover(strip) {
+        return false;
+    }
+    let buttons = strip_buttons(strip);
+    let Some(target) = nearest_sensitive(&sensitivity(&buttons), slot).map(|i| &buttons[i]) else {
+        return false;
+    };
+    // SAFETY: this key is only ever stored and read as `u32`.
+    unsafe { strip.set_data(RETURN_KEY, position) };
+    target.grab_focus()
+}
+
+/// The strip holding `focus`, if it's on one of its letters.
+fn strip_of(focus: &gtk::Widget) -> Option<gtk::ScrolledWindow> {
+    if in_popover(focus) {
+        return None;
+    }
+    focus
+        .ancestor(gtk::ScrolledWindow::static_type())
+        .filter(|strip| strip.has_css_class(AZ_STRIP_CLASS))
+        .and_downcast()
+}
+
+/// Puts focus back on the grid card the strip was entered from (or the
+/// first one, if that's gone).
+fn return_to_grid(strip: &gtk::ScrolledWindow) {
+    let Some(grid) = strip
+        .prev_sibling()
+        .and_downcast::<gtk::ScrolledWindow>()
+        .and_then(|scrolled| scrolled.child())
+        .and_downcast::<gtk::GridView>()
+    else {
+        return;
+    };
+    let items = grid.model().map_or(0, |model| model.n_items());
+    if items == 0 {
+        grid.grab_focus();
+        return;
+    }
+    // SAFETY: see `enter_strip`.
+    let back = unsafe { strip.data::<u32>(RETURN_KEY).map(|p| *p.as_ref()) };
+    focus_cell(&grid, back.unwrap_or(0).min(items - 1));
+}
+
+/// Scrolls `grid` to `position` and focuses that cell, from anywhere:
+/// `ListScrollFlags::FOCUS` alone only moves the focus when it's already
+/// inside the grid (otherwise it just marks the cell), and the grid's
+/// own grab_focus then lands on the marked cell.
+fn focus_cell(grid: &gtk::GridView, position: u32) {
+    grid.scroll_to(position, gtk::ListScrollFlags::FOCUS, None);
+    if !grid.state_flags().contains(gtk::StateFlags::FOCUS_WITHIN) {
+        grid.grab_focus();
+    }
+}
+
+/// The grid `focus` belongs to: the one it's a card of, or the one under
+/// the bar it's on.
+fn grid_of_focus(focus: &gtk::Widget) -> Option<gtk::GridView> {
+    if let Some(grid) = focus.ancestor(gtk::GridView::static_type()) {
+        return grid.downcast().ok();
+    }
+    let mut widget = Some(focus.clone());
+    while let Some(current) = widget {
+        if current.has_css_class(GRID_BAR_CLASS) {
+            return current
+                .next_sibling()
+                .filter(|body| body.has_css_class(GRID_BODY_CLASS))
+                .and_then(|body| body.first_child())
+                .and_downcast::<gtk::ScrolledWindow>()
+                .and_then(|scrolled| scrolled.child())
+                .and_downcast();
+        }
+        widget = current.parent();
+    }
+    None
+}
+
+/// Whether the letters action does something with `focus`: it's in the
+/// strip, or on a grid (or its bar) whose strip is showing.
+pub fn letters_available(focus: &gtk::Widget) -> bool {
+    !in_popover(focus)
+        && (strip_of(focus).is_some()
+            || grid_of_focus(focus).is_some_and(|grid| az_strip_of(&grid).is_some()))
+}
+
+/// Whether `focus` is on a letter of an A-Z strip.
+pub fn in_strip(focus: &gtk::Widget) -> bool {
+    strip_of(focus).is_some()
+}
+
+/// The letters action: from a grid (or its bar) into the strip, at the
+/// focused card's letter; from the strip back to the grid. False when
+/// there's no strip to work with.
+pub fn jump_letters(focus: &gtk::Widget) -> bool {
+    if in_popover(focus) {
+        return false;
+    }
+    if let Some(strip) = strip_of(focus) {
+        return_to_grid(&strip);
+        return true;
+    }
+    let Some(grid) = grid_of_focus(focus) else {
+        return false;
+    };
+    let Some(strip) = az_strip_of(&grid) else {
+        return false;
+    };
+    let card = grid_position(focus)
+        .map(|_| focus.clone())
+        .or_else(|| focus.first_child());
+    // On the bar: the first card's letter, and back to the first card.
+    let (position, slot) = card
+        .and_then(|card| grid_position(&card))
+        .and_then(|position| {
+            let item = grid
+                .model()?
+                .item(position)
+                .and_downcast::<glib::BoxedAnyObject>()?;
+            Some((position, az_slot(sort_key(&item.borrow::<BaseItem>()))))
+        })
+        .unwrap_or((0, 0));
+    enter_strip(&strip, position, slot)
+}
+
+/// B in the strip: back to the grid, not a page back. False when `focus`
+/// isn't in a strip.
+pub fn leave_strip(focus: &gtk::Widget) -> bool {
+    let Some(strip) = strip_of(focus) else {
+        return false;
+    };
+    return_to_grid(&strip);
+    true
+}
+
+/// Moves focus inside an A-Z strip: Up/Down step between letters that
+/// have items (and stop at the ends), Left goes back to the grid (to where
+/// it left from), Right does nothing: focus never leaves any other way.
+/// Returns false when `focus` isn't in a strip.
+pub fn move_in_strip(focus: &gtk::Widget, direction: gtk::DirectionType) -> bool {
+    let Some(strip) = strip_of(focus) else {
+        return false;
+    };
+    let buttons = strip_buttons(&strip);
+    let Some(current) = buttons.iter().position(|button| button == focus) else {
+        return false;
+    };
+    let step = |forward| step_sensitive(&sensitivity(&buttons), current, forward);
+    match direction {
+        gtk::DirectionType::Up => {
+            if let Some(next) = step(false) {
+                buttons[next].grab_focus();
+            }
+        }
+        gtk::DirectionType::Down => {
+            if let Some(next) = step(true) {
+                buttons[next].grab_focus();
+            }
+        }
+        gtk::DirectionType::Left => return_to_grid(&strip),
+        // Nowhere to go; stay put rather than jump out of the strip.
+        _ => {}
+    }
+    true
+}
 
 /// Appends pages of `query` to `store` until `max_items` are in, stopping
 /// early if the grid went away (page popped) or `still_wanted` says the
@@ -321,5 +729,48 @@ fn refit(grid: &gtk::GridView, shape: Shape, last: &Cell<(i32, u32)>) {
         grid.set_margin_end(side);
         grid.set_min_columns(columns.min(2) as u32);
         grid.set_max_columns(columns as u32);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_fall_under_their_first_letter() {
+        assert_eq!(az_slot("Akira"), 1);
+        assert_eq!(az_slot("zodiac"), 26);
+        assert_eq!(az_slot("12 Angry Men"), 0);
+        assert_eq!(az_slot("[REC]"), 0);
+        assert_eq!(az_slot("Émile"), 0);
+        assert_eq!(az_slot(""), 0);
+        assert_eq!(az_label(0), "#");
+        assert_eq!(az_label(1), "A");
+        assert_eq!(az_label(26), "Z");
+    }
+
+    #[test]
+    fn sort_name_wins_over_name() {
+        let item = |name: &str, sort: Option<&str>| BaseItem {
+            name: name.into(),
+            sort_name: sort.map(Into::into),
+            ..Default::default()
+        };
+        assert_eq!(sort_key(&item("The Matrix", Some("matrix"))), "matrix");
+        assert_eq!(sort_key(&item("The Matrix", None)), "The Matrix");
+        assert_eq!(sort_key(&item("The Matrix", Some(""))), "The Matrix");
+    }
+
+    #[test]
+    fn letters_step_over_empty_ones_and_stop_at_the_ends() {
+        let sensitive = [false, true, false, false, true, true, false];
+        assert_eq!(nearest_sensitive(&sensitive, 0), Some(1));
+        assert_eq!(nearest_sensitive(&sensitive, 3), Some(4));
+        assert_eq!(nearest_sensitive(&sensitive, 6), Some(5));
+        assert_eq!(nearest_sensitive(&[false, false], 1), None);
+        assert_eq!(step_sensitive(&sensitive, 1, true), Some(4));
+        assert_eq!(step_sensitive(&sensitive, 5, false), Some(4));
+        assert_eq!(step_sensitive(&sensitive, 5, true), None);
+        assert_eq!(step_sensitive(&sensitive, 1, false), None);
     }
 }

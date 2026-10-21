@@ -139,9 +139,20 @@ impl Legend {
                 .as_ref()
                 .is_some_and(|page| page.tag().as_deref() == Some("home"));
             let can_go_back = ui.nav().navigation_stack().n_items() > 1;
+            let focus = gtk::prelude::GtkWindowExt::focus(window);
+            let in_strip = focus.as_ref().is_some_and(super::library::in_strip);
             hints.push((bindings.buttons(Action::Activate), "Select"));
-            if can_go_back {
+            if in_strip {
+                hints.push((bindings.buttons(Action::Back), "Back to list"));
+            } else if can_go_back {
                 hints.push((bindings.buttons(Action::Back), "Back"));
+            }
+            if focus
+                .as_ref()
+                .is_some_and(super::library::letters_available)
+                && !in_strip
+            {
+                hints.push((bindings.buttons(Action::JumpLetters), "Letters"));
             }
             hints.push((bindings.buttons(Action::ContextMenu), "Options"));
             if let Some(label) = tabs {

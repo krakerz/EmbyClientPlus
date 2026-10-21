@@ -8,23 +8,36 @@ use super::models::{AuthenticateByNameRequest, AuthenticateByNameResponse};
 struct PublicSystemInfo {
     #[serde(default)]
     version: String,
+    #[serde(default)]
+    id: String,
 }
 
-/// Uses (and saves) the server's version for browser mode's identity.
-fn remember_server_version(version: &str) {
-    if version.is_empty() {
+/// Uses (and saves) the server's version for browser mode's identity, and
+/// its id for telling servers apart.
+fn remember_server_info(info: PublicSystemInfo) {
+    if info.version.is_empty() && info.id.is_empty() {
         return;
     }
-    super::set_server_version(version);
-    tracing::info!("server version {version}");
-    let version = version.to_string();
-    if let Err(e) = crate::config::Settings::update(|s| s.server.version = version) {
-        tracing::warn!("couldn't save the server version: {e:#}");
+    if !info.version.is_empty() {
+        super::set_server_version(&info.version);
+        tracing::info!("server version {}", info.version);
+    }
+    let result = crate::config::Settings::update(|s| {
+        if !info.version.is_empty() {
+            s.server.version = info.version;
+        }
+        if !info.id.is_empty() {
+            s.server.server_id = Some(info.id);
+        }
+    });
+    if let Err(e) = result {
+        tracing::warn!("couldn't save the server's version and id: {e:#}");
     }
 }
 
-/// Asks the server at `base_url` for its version (no sign-in needed), at
-/// startup: the saved one may be missing or out of date after an upgrade.
+/// Asks the server at `base_url` for its version and id (no sign-in
+/// needed), at startup: the saved ones may be missing or out of date after
+/// an upgrade.
 pub async fn learn_server_version(base_url: &str) {
     let url = format!("{}/emby/System/Info/Public", base_url.trim_end_matches('/'));
     let info = async {
@@ -37,7 +50,7 @@ pub async fn learn_server_version(base_url: &str) {
             .await
     };
     match info.await {
-        Ok(info) => remember_server_version(&info.version),
+        Ok(info) => remember_server_info(info),
         Err(e) => tracing::info!("couldn't ask the server for its version: {e}"),
     }
 }
@@ -55,7 +68,7 @@ impl EmbyClient {
             .get::<PublicSystemInfo>("/emby/System/Info/Public")
             .await
         {
-            remember_server_version(&info.version);
+            remember_server_info(info);
         }
         let request = AuthenticateByNameRequest {
             username: username.to_string(),

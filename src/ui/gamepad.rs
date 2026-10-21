@@ -1,7 +1,8 @@
 //! Turns controller presses into UI actions: focus movement and
 //! activation while browsing, playback control on the player page.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::glib;
@@ -9,12 +10,35 @@ use gtk::glib;
 use super::{Ui, library, open_card_menu, preferences};
 use crate::controller::{self, Action, Context, Pad};
 
+/// Whether controller input should reach `window` now: not while another
+/// app or game is in front, which gets the same presses. A window that has
+/// never reported itself active keeps taking them, in case a compositor
+/// (gamescope) never says.
+pub fn input_gate(window: &impl IsA<gtk::Window>) -> impl Fn() -> bool + 'static {
+    let seen_active = Rc::new(Cell::new(window.is_active()));
+    window.connect_is_active_notify({
+        let seen_active = seen_active.clone();
+        move |window| {
+            if window.is_active() {
+                seen_active.set(true);
+            }
+        }
+    });
+    let window = window.as_ref().downgrade();
+    move || {
+        window
+            .upgrade()
+            .is_some_and(|window| window.is_active() || !seen_active.get())
+    }
+}
+
 /// Handles one press for `window`; `ui` is the logged-in UI, if any (the
 /// login form only needs focus movement and activation). `repeat`: a held
 /// direction repeating rather than a fresh press.
 pub fn handle(window: &adw::ApplicationWindow, ui: Option<&Ui>, pad: Pad, repeat: bool) {
     // Controller use means focus rings matter, like keyboard use.
     window.set_focus_visible(true);
+    enter_pad_mode(window, ui.is_none_or(|ui| !ui.player_visible()));
     end_tab_switch();
 
     // The right stick scrolled the cursor out of view: a direction or A
@@ -145,6 +169,11 @@ pub fn handle(window: &adw::ApplicationWindow, ui: Option<&Ui>, pad: Pad, repeat
                 panel.open();
             }
         }
+        Action::JumpLetters if page_free => {
+            if let Some(focus) = gtk::prelude::GtkWindowExt::focus(window) {
+                library::jump_letters(&focus);
+            }
+        }
         _ => {}
     }
 }
@@ -197,6 +226,69 @@ pub fn player_press(
     }
 }
 
+const PAD_MODE_CLASS: &str = "pad-mode";
+
+/// The controller is driving: the window gets `pad-mode` (CSS drops hover
+/// tints under a resting pointer) and, outside the player, hides the
+/// pointer. Real pointer movement ends it (see `watch_pointer`).
+fn enter_pad_mode(window: &adw::ApplicationWindow, hide_pointer: bool) {
+    watch_pointer(window.upcast_ref());
+    if let Some(popover) = gtk::prelude::GtkWindowExt::focus(window)
+        .and_then(|f| f.ancestor(gtk::Popover::static_type()))
+    {
+        watch_pointer(&popover);
+    }
+    window.add_css_class(PAD_MODE_CLASS);
+    // The window's own cursor only: the player page sets its own.
+    if hide_pointer {
+        window.set_cursor_from_name(Some("none"));
+    }
+}
+
+fn leave_pad_mode(window: &gtk::Window) {
+    if window.has_css_class(PAD_MODE_CLASS) {
+        window.remove_css_class(PAD_MODE_CLASS);
+        window.set_cursor(None::<&gtk::gdk::Cursor>);
+    }
+}
+
+const POINTER_WATCH_KEY: &str = "embyclientplus-pointer-watch";
+
+/// Ends pad mode when the pointer really moves over `widget` (the window,
+/// or a popover: those have their own surface and don't pass events on).
+/// GTK also sends motion when a widget appears under a resting pointer, so
+/// the first event only records a position and small jitters are ignored.
+fn watch_pointer(widget: &gtk::Widget) {
+    // SAFETY: this key is only ever stored and read as `()`.
+    if unsafe { widget.data::<()>(POINTER_WATCH_KEY) }.is_some() {
+        return;
+    }
+    // SAFETY: see above.
+    unsafe { widget.set_data(POINTER_WATCH_KEY, ()) };
+    let last: Cell<Option<(f64, f64)>> = Cell::new(None);
+    let moved = move |controller: &gtk::EventControllerMotion, x: f64, y: f64| {
+        let previous = last.replace(Some((x, y)));
+        let real = previous.is_some_and(|(px, py)| (x - px).abs() > 2.0 || (y - py).abs() > 2.0);
+        if real
+            && let Some(window) = controller
+                .widget()
+                .and_then(|w| w.root())
+                .and_downcast::<gtk::Window>()
+        {
+            leave_pad_mode(&window);
+        }
+    };
+    let motion = gtk::EventControllerMotion::new();
+    motion.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let moved = Rc::new(moved);
+    motion.connect_motion({
+        let moved = moved.clone();
+        move |controller, x, y| moved(controller, x, y)
+    });
+    motion.connect_enter(move |controller, x, y| moved(controller, x, y));
+    widget.add_controller(motion);
+}
+
 const LAST_FOCUS_KEY: &str = "embyclientplus-last-focus";
 
 /// Remembers, per page, the widget last focused there, for
@@ -207,6 +299,14 @@ pub fn track_focus(window: &adw::ApplicationWindow) {
         let focus = gtk::prelude::GtkWindowExt::focus(window);
         if debug {
             tracing::info!("focus: {}", describe(focus.as_ref()));
+        }
+        // A popover that took the focus (opened by mouse or pad) needs its
+        // own pointer watch.
+        if let Some(popover) = focus
+            .as_ref()
+            .and_then(|f| f.ancestor(gtk::Popover::static_type()))
+        {
+            watch_pointer(&popover);
         }
         if TAB_SWITCH.get() == 0 {
             focus_changed(window);
@@ -663,21 +763,29 @@ fn focus_page(ui: &Ui) -> bool {
 /// it (the window, an open popover, or a dialog).
 fn move_focus(window: &adw::ApplicationWindow, direction: gtk::DirectionType) {
     let focus = gtk::prelude::GtkWindowExt::focus(window);
-    if let Some(focus) = &focus
-        && library::move_in_grid(focus, direction)
-    {
-        return;
-    }
-    // Up from a grid's top row: its bar (filter, sort), which sits centred
-    // and so isn't straight above most cards for GTK's own focus move.
-    if direction == gtk::DirectionType::Up
-        && let Some(focus) = &focus
-        && let Some(bar) = library::grid_header(focus)
-        && let Some(target) =
-            nearest_in_direction(&bar, focus, direction).or_else(|| first_focusable(&bar))
-    {
-        target.grab_focus();
-        return;
+    // A popover hangs off a widget inside the grid (the card), so the grid's
+    // own rules would walk out of it: inside one, only its entries count.
+    let in_popover = focus
+        .as_ref()
+        .is_some_and(|f| f.ancestor(gtk::Popover::static_type()).is_some());
+    if !in_popover {
+        if let Some(focus) = &focus
+            && (library::move_in_grid(focus, direction) || library::move_in_strip(focus, direction))
+        {
+            return;
+        }
+        // Up from a grid's top row: its bar (filter, sort), which sits
+        // centred and so isn't straight above most cards for GTK's own
+        // focus move.
+        if direction == gtk::DirectionType::Up
+            && let Some(focus) = &focus
+            && let Some(bar) = library::grid_header(focus)
+            && let Some(target) =
+                nearest_in_direction(&bar, focus, direction).or_else(|| first_focusable(&bar))
+        {
+            target.grab_focus();
+            return;
+        }
     }
     let mut scope: gtk::Widget = focus
         .as_ref()
@@ -696,6 +804,16 @@ fn move_focus(window: &adw::ApplicationWindow, direction: gtk::DirectionType) {
         return;
     };
     let moved = scope.child_focus(direction);
+    // Inside a popover, stop at its ends: no wrapping round, no stepping to
+    // another row on Left/Right.
+    if in_popover
+        && let Some(now) = gtk::prelude::GtkWindowExt::focus(window)
+        && now != focus
+        && wanders(&scope, &focus, &now, direction)
+    {
+        focus.grab_focus();
+        return;
+    }
     // Some widgets keep the focus at their edge (a list's first row going
     // up, for one): then take the nearest item on screen that way.
     if gtk::prelude::GtkWindowExt::focus(window).as_ref() == Some(&focus) {
@@ -709,6 +827,28 @@ fn move_focus(window: &adw::ApplicationWindow, direction: gtk::DirectionType) {
         if let Some(target) = target {
             target.grab_focus();
         }
+    }
+}
+
+/// Whether focus moving from `from` to `to` went against `direction`, or
+/// (Left/Right) onto another row.
+fn wanders(
+    scope: &gtk::Widget,
+    from: &gtk::Widget,
+    to: &gtk::Widget,
+    direction: gtk::DirectionType,
+) -> bool {
+    let (Some(a), Some(b)) = (from.compute_bounds(scope), to.compute_bounds(scope)) else {
+        return false;
+    };
+    let (ax, ay) = (a.x() + a.width() / 2.0, a.y() + a.height() / 2.0);
+    let (bx, by) = (b.x() + b.width() / 2.0, b.y() + b.height() / 2.0);
+    match direction {
+        gtk::DirectionType::Up => by > ay + 1.0,
+        gtk::DirectionType::Down => by < ay - 1.0,
+        gtk::DirectionType::Left => bx > ax + 1.0 || (by - ay).abs() > a.height() / 2.0,
+        gtk::DirectionType::Right => bx < ax - 1.0 || (by - ay).abs() > a.height() / 2.0,
+        _ => false,
     }
 }
 
@@ -970,8 +1110,15 @@ fn activate_focus(window: &adw::ApplicationWindow) {
     }
 }
 
-/// Closes the innermost thing open: a popover, a dialog, then a page.
+/// Closes the innermost thing open: the A-Z strip, a popover, a dialog, then
+/// a page.
 fn back(window: &adw::ApplicationWindow, ui: Option<&Ui>) {
+    // In the A-Z strip: back to the list, not out of the page.
+    if let Some(focus) = gtk::prelude::GtkWindowExt::focus(window)
+        && library::leave_strip(&focus)
+    {
+        return;
+    }
     if close_popover(window) {
         return;
     }

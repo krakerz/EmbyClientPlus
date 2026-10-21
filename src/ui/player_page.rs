@@ -70,6 +70,69 @@ enum UpNext {
     Cancelled,
 }
 
+/// What the sleep menu offers.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SleepChoice {
+    Off,
+    After(u32),
+    EndOfVideo,
+}
+
+const SLEEP_CHOICES: [SleepChoice; 7] = [
+    SleepChoice::Off,
+    SleepChoice::After(15),
+    SleepChoice::After(30),
+    SleepChoice::After(45),
+    SleepChoice::After(60),
+    SleepChoice::After(90),
+    SleepChoice::EndOfVideo,
+];
+
+impl SleepChoice {
+    /// The action's target string.
+    fn name(self) -> String {
+        match self {
+            SleepChoice::Off => "off".into(),
+            SleepChoice::After(minutes) => minutes.to_string(),
+            SleepChoice::EndOfVideo => "end".into(),
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        SLEEP_CHOICES.into_iter().find(|c| c.name() == name)
+    }
+
+    fn label(self, episode: bool) -> String {
+        match self {
+            SleepChoice::Off => "Off".into(),
+            SleepChoice::After(60) => "1 hour".into(),
+            SleepChoice::After(minutes) => format!("{minutes} minutes"),
+            SleepChoice::EndOfVideo if episode => "End of this episode".into(),
+            SleepChoice::EndOfVideo => "End of this video".into(),
+        }
+    }
+}
+
+/// The sleep timer's running state.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Sleep {
+    Off,
+    /// Leave the page at this instant.
+    At(Instant),
+    /// Leave when the current video (and any after a manual Next) ends.
+    EndOfVideo,
+}
+
+/// Time left on the sleep timer, rounded up to whole minutes ("23m", "1h05m").
+fn sleep_remaining(left: Duration) -> String {
+    let minutes = left.as_secs().div_ceil(60).max(1);
+    if minutes >= 60 {
+        format!("{}h{:02}m", minutes / 60, minutes % 60)
+    } else {
+        format!("{minutes}m")
+    }
+}
+
 #[derive(Clone)]
 pub struct PlayerPage {
     inner: Rc<Inner>,
@@ -129,6 +192,10 @@ struct Inner {
     svp_warned: Cell<bool>,
     /// Held while a video plays, so the screen stays on.
     screen_inhibit: RefCell<Option<(gtk::Application, u32)>>,
+    /// Kept across autoplay/Next; cleared when the page is left.
+    sleep: Cell<Sleep>,
+    /// Fires the timed sleep. Taken (not removed) when it fires.
+    sleep_timer: RefCell<Option<glib::SourceId>>,
 }
 
 struct Osd {
@@ -153,6 +220,9 @@ struct Osd {
     quality: gtk::MenuButton,
     picture: gtk::MenuButton,
     shaders: gtk::MenuButton,
+    /// Moon icon, plus the time left (or "End") while a sleep timer runs.
+    sleep: gtk::MenuButton,
+    sleep_label: gtk::Label,
     svp: gtk::ToggleButton,
     fullscreen: gtk::Button,
     mute: gtk::Button,
@@ -215,6 +285,8 @@ impl PlayerPage {
             svp_checked_at: Cell::new(None),
             svp_warned: Cell::new(false),
             screen_inhibit: RefCell::new(None),
+            sleep: Cell::new(Sleep::Off),
+            sleep_timer: RefCell::new(None),
         });
         CURRENT.with(|current| *current.borrow_mut() = Rc::downgrade(&inner));
         inner.connect(&overlay);
@@ -424,6 +496,10 @@ impl PlayerPage {
         }
         inner.osd.previous.set_sensitive(session.previous.is_some());
         inner.osd.next.set_sensitive(session.next.is_some());
+        inner
+            .osd
+            .sleep
+            .set_menu_model(Some(&sleep_menu(session.item.item_type == "Episode")));
         inner.osd.svp.set_active(session.svp_enabled());
         if session.hdr && !session.svp_enabled() {
             let first_time =
@@ -588,6 +664,19 @@ impl Osd {
         let picture = menu_button(crate::ui::icons::PICTURE, "Picture");
         picture.set_menu_model(Some(&picture_menu()));
         let shaders = menu_button(crate::ui::icons::SHADERS, "Shaders");
+        let sleep = menu_button(crate::ui::icons::SLEEP, "Sleep timer");
+        sleep.set_menu_model(Some(&sleep_menu(true)));
+        let sleep_label = gtk::Label::builder()
+            .css_classes(["numeric", "caption-heading"])
+            .visible(false)
+            .build();
+        let sleep_content = gtk::Box::builder()
+            .spacing(4)
+            .halign(gtk::Align::Center)
+            .build();
+        sleep_content.append(&gtk::Image::from_icon_name(crate::ui::icons::SLEEP));
+        sleep_content.append(&sleep_label);
+        sleep.set_child(Some(&sleep_content));
         let svp = gtk::ToggleButton::builder()
             // An icon, not a label: text carries the font's line spacing and
             // never sits quite centred in the circle.
@@ -616,6 +705,7 @@ impl Osd {
         end.append(&quality);
         end.append(&picture);
         end.append(&shaders);
+        end.append(&sleep);
         end.append(&svp);
         end.append(&fullscreen);
         buttons.set_start_widget(Some(&start));
@@ -761,6 +851,8 @@ impl Osd {
             quality,
             picture,
             shaders,
+            sleep,
+            sleep_label,
             svp,
             fullscreen,
             mute,
@@ -788,6 +880,7 @@ impl Osd {
             &self.quality,
             &self.picture,
             &self.shaders,
+            &self.sleep,
         ]
         .iter()
         .any(|button| button.is_active())
@@ -886,6 +979,28 @@ impl Inner {
             }
         ));
         self.actions.add_action(&quality);
+        let sleep = gio::SimpleAction::new_stateful(
+            "sleep",
+            Some(glib::VariantTy::STRING),
+            &SleepChoice::Off.name().to_variant(),
+        );
+        sleep.connect_activate(glib::clone!(
+            #[strong]
+            weak,
+            move |action, value| {
+                let (Some(inner), Some(choice)) = (
+                    weak.upgrade(),
+                    value
+                        .and_then(|v| v.get::<String>())
+                        .and_then(|name| SleepChoice::from_name(&name)),
+                ) else {
+                    return;
+                };
+                action.set_state(&choice.name().to_variant());
+                inner.set_sleep(choice);
+            }
+        ));
+        self.actions.add_action(&sleep);
 
         // Picture: bar fill (global), aspect and zoom (per title).
         let fill_names = ["off", "blur", "glow"];
@@ -1174,6 +1289,12 @@ impl Inner {
                     tick.remove();
                 }
                 inner.stop_stick();
+                inner.set_sleep(SleepChoice::Off);
+                set_state(
+                    &inner.actions,
+                    "sleep",
+                    SleepChoice::Off.name().to_variant(),
+                );
                 inner.set_fullscreen(false);
                 inner.keep_screen_on(false);
                 #[cfg(target_os = "linux")]
@@ -1250,11 +1371,70 @@ impl Inner {
         };
         session.mark_ended();
         let has_next = session.next.is_some();
-        if has_next && self.autoplay_next.get() && self.up_next.get() != UpNext::Cancelled {
+        if self.sleep.get() == Sleep::EndOfVideo {
+            self.sleep_expired();
+        } else if has_next && self.autoplay_next.get() && self.up_next.get() != UpNext::Cancelled {
             self.play_neighbour(true);
         } else {
             self.pop();
         }
+    }
+
+    /// Sets (or, with Off, clears) the sleep timer. A timed one counts from
+    /// now, in wall-clock time, whatever the video does meanwhile.
+    fn set_sleep(self: &Rc<Self>, choice: SleepChoice) {
+        if let Some(timer) = self.sleep_timer.take() {
+            timer.remove();
+        }
+        self.sleep.set(match choice {
+            SleepChoice::Off => Sleep::Off,
+            SleepChoice::EndOfVideo => Sleep::EndOfVideo,
+            SleepChoice::After(minutes) => {
+                let after = Duration::from_secs(u64::from(minutes) * 60);
+                let weak = Rc::downgrade(self);
+                let timer = glib::timeout_add_local_once(after, move || {
+                    if let Some(inner) = weak.upgrade() {
+                        // Fired: the id is spent, removing it would warn.
+                        inner.sleep_timer.take();
+                        inner.sleep_expired();
+                    }
+                });
+                self.sleep_timer.replace(Some(timer));
+                Sleep::At(Instant::now() + after)
+            }
+        });
+        self.refresh_sleep();
+    }
+
+    /// Time's up: leave like Back, so the stop is reported and the screen
+    /// can sleep.
+    fn sleep_expired(&self) {
+        self.sleep.set(Sleep::Off);
+        if let Some(handlers) = self.handlers() {
+            (handlers.toast)("Sleep timer: playback stopped");
+        }
+        self.pop();
+    }
+
+    /// The sleep button's label and tooltip; cheap enough for every tick.
+    fn refresh_sleep(&self) {
+        let (label, tooltip) = match self.sleep.get() {
+            Sleep::Off => (None, "Sleep timer".to_string()),
+            Sleep::EndOfVideo => (Some("End".to_string()), "Sleep at the end".to_string()),
+            Sleep::At(at) => {
+                let left = sleep_remaining(at.saturating_duration_since(Instant::now()));
+                (Some(left.clone()), format!("Sleep in {left}"))
+            }
+        };
+        let osd = &self.osd;
+        osd.sleep_label.set_visible(label.is_some());
+        if label.is_some() {
+            osd.sleep.add_css_class("with-label");
+        } else {
+            osd.sleep.remove_css_class("with-label");
+        }
+        osd.sleep_label.set_label(label.as_deref().unwrap_or(""));
+        osd.sleep.set_tooltip_text(Some(&tooltip));
     }
 
     fn play_neighbour(&self, forward: bool) {
@@ -1535,6 +1715,9 @@ impl Inner {
 
     /// Position-driven updates: seek bar, time labels, skip button, Up Next.
     fn on_tick(self: &Rc<Self>) {
+        if matches!(self.sleep.get(), Sleep::At(_)) {
+            self.refresh_sleep();
+        }
         let (Some(position), Some(duration)) = (self.player.position(), self.player.duration())
         else {
             return;
@@ -1576,6 +1759,8 @@ impl Inner {
         let left_in_file = duration - position;
         let up_next_due = session.next.is_some()
             && self.autoplay_next.get()
+            // The video ending is the sleep timer's cue, not an episode change.
+            && self.sleep.get() != Sleep::EndOfVideo
             && !session.item.is_audio()
             && duration > 0.0
             && left_in_file <= self.up_next_seconds.get() + 1.0;
@@ -2221,6 +2406,16 @@ fn picture_menu() -> gio::Menu {
     menu
 }
 
+fn sleep_menu(episode: bool) -> gio::Menu {
+    let menu = gio::Menu::new();
+    for choice in SLEEP_CHOICES {
+        let item = gio::MenuItem::new(Some(&choice.label(episode)), None);
+        item.set_action_and_target_value(Some("player.sleep"), Some(&choice.name().to_variant()));
+        menu.append_item(&item);
+    }
+    menu
+}
+
 pub fn bar_fill_from_name(name: &str) -> BarFill {
     match name {
         "blur" => BarFill::Blur,
@@ -2370,5 +2565,29 @@ mod tests {
         assert_eq!(scrub_rate(1.0, 600.0), 60.0);
         // A light touch is slow.
         assert_eq!(scrub_rate(0.25, 600.0), 3.75);
+    }
+
+    #[test]
+    fn sleep_choices_round_trip_and_read_well() {
+        for choice in SLEEP_CHOICES {
+            assert_eq!(SleepChoice::from_name(&choice.name()), Some(choice));
+        }
+        assert_eq!(SleepChoice::from_name("bogus"), None);
+        assert_eq!(SleepChoice::After(45).label(true), "45 minutes");
+        assert_eq!(SleepChoice::After(60).label(true), "1 hour");
+        assert_eq!(SleepChoice::EndOfVideo.label(true), "End of this episode");
+        assert_eq!(SleepChoice::EndOfVideo.label(false), "End of this video");
+    }
+
+    #[test]
+    fn sleep_remaining_rounds_up() {
+        let secs = Duration::from_secs;
+        assert_eq!(sleep_remaining(secs(0)), "1m");
+        assert_eq!(sleep_remaining(secs(1)), "1m");
+        assert_eq!(sleep_remaining(secs(60)), "1m");
+        assert_eq!(sleep_remaining(secs(61)), "2m");
+        assert_eq!(sleep_remaining(secs(23 * 60)), "23m");
+        assert_eq!(sleep_remaining(secs(60 * 60)), "1h00m");
+        assert_eq!(sleep_remaining(secs(90 * 60 - 1)), "1h30m");
     }
 }
