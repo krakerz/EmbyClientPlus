@@ -70,8 +70,16 @@ elif ! grep -qF '(compat)' <<<"$out"; then echo "RESULT: FAIL: --version has no 
 else echo "RESULT: ok: --version"; fi
 
 echo "== smoke test ($SMOKE_URL)"
-out="$(cd /tmp && LIBGL_ALWAYS_SOFTWARE=1 EMBYCLIENTPLUS_SMOKE_TEST=1 timeout 90 \
-    xvfb-run -a -s '-screen 0 1280x720x24' "$app" --player "$SMOKE_URL" 2>&1)"; code=$?
+# Xvfb is started by hand: xvfb-run can report 0 when the app was killed by a
+# signal (a segfault looked like a pass with no output).
+[ -s /etc/machine-id ] || tr -d - </proc/sys/kernel/random/uuid >/etc/machine-id
+Xvfb :77 -screen 0 1280x720x24 >/tmp/xvfb.log 2>&1 &
+xvfb_pid=$!
+sleep 2
+out="$(cd /tmp && DISPLAY=:77 GTK_A11Y=none LIBGL_ALWAYS_SOFTWARE=1 EMBYCLIENTPLUS_SMOKE_TEST=1 \
+    timeout 90 "$app" --player "$SMOKE_URL" 2>&1)"; code=$?
+kill "$xvfb_pid" 2>/dev/null
+[ $code -lt 124 ] || echo "(smoke test exit code $code: 124 = timeout, 128+n = signal n)"
 echo "$out"; all="$all
 $out"
 if ! grep -q '^smoke:' <<<"$out"; then echo "RESULT: FAIL: no 'smoke:' lines (exit $code)"
