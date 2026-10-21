@@ -235,7 +235,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: ["debian:11", "debian:12", "ubuntu:20.04", "ubuntu:22.04", "ubuntu:24.04"]
+        # The latest stable releases only (the tags follow new releases).
+        image: ["debian:stable", "ubuntu:latest"]
     steps:
       - uses: actions/checkout@v4
 

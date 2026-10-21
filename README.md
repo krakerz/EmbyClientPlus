@@ -28,12 +28,18 @@ From [Releases](https://github.com/krakerz/EmbyClientPlus/releases):
 
 | System | File | Install |
 |---|---|---|
-| Linux, SteamOS | `EmbyClientPlus-<version>-x86_64.AppImage` | `chmod +x`, then run it |
+| Linux (rolling: Arch, CachyOS, …) | `EmbyClientPlus-<version>-x86_64.AppImage` | `chmod +x`, then run it |
+| Linux (older or fixed-release: Debian, Ubuntu LTS, …) | `EmbyClientPlus-<version>-x86_64-compat.AppImage` | `chmod +x`, then run it |
 | Linux | `embyclientplus-<version>-linux-x86_64.tar.gz` | extract, `./install.sh` (`./uninstall.sh` removes it); needs GTK 4.12+, libadwaita 1.6+, FFmpeg, libplacebo |
 | Windows | `embyclientplus-<version>-windows-x86_64.zip` | extract anywhere, run `Emby Client+.exe` |
 | macOS (Apple Silicon) | `embyclientplus-<version>-macos-arm64.zip` | extract, move `Emby Client+.app` to Applications |
 
-The AppImage carries its own GTK, libadwaita and FFmpeg; the tar.gz uses the system's.
+Which AppImage? Both carry their own GTK, libadwaita and FFmpeg. The plain one uses the system's
+glibc, so it needs a current one; if it stops with `GLIBC_2.xx not found`, use the compat one,
+which brings its own; it's tested on the latest Debian stable and Ubuntu LTS (Debian 13, Ubuntu
+26.04). SVP inside the compat one
+needs a system with glibc 2.38 or later (SVP's own requirement). The tar.gz uses the system's
+libraries.
 
 macOS: the app isn't notarized; allow it once in System Settings → Privacy & Security → **Open
 Anyway** (or `xattr -dr com.apple.quarantine "/Applications/Emby Client+.app"`).

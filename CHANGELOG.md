@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.23.1] — 2026-10-21
+
+### Added
+- A compatibility AppImage (`EmbyClientPlus-<version>-x86_64-compat.AppImage`) for fixed-release distros such as Debian 13 and Ubuntu 26.04 LTS, whose glibc is older than the main AppImage needs; it updates itself to the next compat build.
+
 ## [1.23.0] — 2026-10-21
 
 ### Added
@@ -12,7 +17,6 @@
 - Season buttons on a series page have the item menu (X, right-click or long-press) to mark a whole season watched or unwatched.
 - "Remove from Continue Watching" in the item menu of anything in progress.
 - Steam Deck Game Mode: Steam's on-screen keyboard opens for search (Select) and when pressing A on a text field.
-
 ### Changed
 - The image cache on disk can grow to 2 GB (was 512 MB).
 - Artwork is downloaded at a slightly lower quality, about a third smaller; cached images are fetched once more after updating.
