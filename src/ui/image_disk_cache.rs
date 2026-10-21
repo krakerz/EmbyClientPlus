@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 /// Oldest-used files are deleted past this total size.
-const MAX_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Tags already catch changed images; this just re-fetches anything older
 /// so a bad or odd copy can't live forever.

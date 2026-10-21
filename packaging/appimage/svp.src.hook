@@ -1,0 +1,35 @@
+# Sourced by the compat AppImage's AppRun (installed as bin/05-svp.hook by
+# make-compat-appimage.sh), with `set -e` on: nothing here may fail.
+
+# SVP: its VapourSynth R73 (as libvsscript.so) and Python 3.12 must win over
+# the stand-in bundled for libmpv. SHARUN_EXTRA_LIBRARY_PATH is the highest
+# priority part of sharun's library path; the Python folder also goes on
+# LD_LIBRARY_PATH, as in the archive launcher (packaging/embyclientplus.sh).
+# SVP's own libraries need glibc 2.38+ on the host; without SVP (or on an
+# older host) this does nothing and the bundled stand-in is used.
+if [ -f "$APPDIR/share/embyclientplus/svp-detect.sh" ] \
+    && . "$APPDIR/share/embyclientplus/svp-detect.sh" && svp_detect; then
+    SHARUN_EXTRA_LIBRARY_PATH="$SVP_LIB_PATH${SHARUN_EXTRA_LIBRARY_PATH:+:$SHARUN_EXTRA_LIBRARY_PATH}"
+    LD_LIBRARY_PATH="${svp_dir}/python${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export SHARUN_EXTRA_LIBRARY_PATH LD_LIBRARY_PATH
+fi
+
+# VA-API: the host's driver (*_drv_video.so) is loaded through
+# cross-libc-dlopen, but the bundled libva only looks in the directory it was
+# built with (Arch's /usr/lib/dri), which is elsewhere on other distros.
+# quick-sharun doesn't set LIBVA_DRIVERS_PATH when the drivers stay on the
+# host, so probe the usual places (a colon-separated list is accepted).
+if [ -z "${LIBVA_DRIVERS_PATH:-}" ] && [ ! -d "$APPDIR/shared/lib/dri" ]; then
+    _va_dirs=""
+    for _va_dir in /usr/lib/x86_64-linux-gnu/dri /usr/lib64/dri /usr/lib/dri \
+        /run/opengl-driver/lib/dri; do
+        for _va_drv in "$_va_dir"/*_drv_video.so; do
+            if [ -e "$_va_drv" ]; then
+                _va_dirs="${_va_dirs:+$_va_dirs:}$_va_dir"
+                break
+            fi
+        done
+    done
+    [ -z "$_va_dirs" ] || export LIBVA_DRIVERS_PATH="$_va_dirs"
+    unset _va_dirs _va_dir _va_drv
+fi

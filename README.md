@@ -33,6 +33,8 @@ From [Releases](https://github.com/krakerz/EmbyClientPlus/releases):
 | Windows | `embyclientplus-<version>-windows-x86_64.zip` | extract anywhere, run `Emby Client+.exe` |
 | macOS (Apple Silicon) | `embyclientplus-<version>-macos-arm64.zip` | extract, move `Emby Client+.app` to Applications |
 
+The AppImage carries its own GTK, libadwaita and FFmpeg; the tar.gz uses the system's.
+
 macOS: the app isn't notarized; allow it once in System Settings → Privacy & Security → **Open
 Anyway** (or `xattr -dr com.apple.quarantine "/Applications/Emby Client+.app"`).
 
@@ -42,8 +44,9 @@ macOS, SVP also needs VapourSynth from Homebrew (`brew install vapoursynth`), as
 
 ## Building from source
 
-Linux needs Rust, `meson`, `ninja` and the GTK4, libadwaita, FFmpeg, libplacebo, libass and
-VapourSynth dev files:
+Linux needs Rust, `meson`, `ninja` and the dev files of GTK 4.12 or newer, libadwaita 1.6 or
+newer, FFmpeg, libplacebo, libass and VapourSynth (Debian 13, Ubuntu 24.10, Fedora 41, Arch and
+newer have them; Debian 12 doesn't):
 
 ```sh
 scripts/build-libmpv.sh && cargo build --release && target/release/embyclientplus

@@ -1,0 +1,9 @@
+# quick-sharun (pkgforge-dev/Anylinux-AppImages, useful-tools/quick-sharun.sh)
+# pinned for the compat AppImage (packaging/appimage/make-compat-appimage.sh).
+# quick-sharun pins and checksums everything it downloads itself (sharun,
+# appimagetool, cross-libc-dlopen) in its own source, so pinning the script
+# pins the whole toolchain. To bump: pick a commit, download the file at that
+# commit, update both values, and run scripts/dev-appimage.sh --compat plus
+# scripts/test-appimage-compat.sh. Also the CI cache key for packaging/tools.
+QUICK_SHARUN_COMMIT=48137dfbe0f1279aad007d63975d1035350f4cdf
+QUICK_SHARUN_SHA256=238a5c2a1d8833ab4a94fe9c91b8ff5eb92b0c35119fa8c2e9f5b25cdb71e979

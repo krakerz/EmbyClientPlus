@@ -11,8 +11,11 @@
 - Player sleep timer: stop after 15–90 minutes or at the end of the episode.
 - Season buttons on a series page have the item menu (X, right-click or long-press) to mark a whole season watched or unwatched.
 - "Remove from Continue Watching" in the item menu of anything in progress.
+- Steam Deck Game Mode: Steam's on-screen keyboard opens for search (Select) and when pressing A on a text field.
 
 ### Changed
+- The image cache on disk can grow to 2 GB (was 512 MB).
+- Artwork is downloaded at a slightly lower quality, about a third smaller; cached images are fetched once more after updating.
 - Per-title choices (audio, subtitles, SVP, picture) and library sort/filter choices are kept per server and user; existing ones carry over to your current account.
 
 ### Fixed

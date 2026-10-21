@@ -42,7 +42,8 @@ jobs:
             gtk4 libadwaita ffmpeg libplacebo libass vapoursynth zimg lcms2 uchardet \
             wayland wayland-protocols libxkbcommon libxpresent libxss libxv libxrandr \
             libdrm mesa vulkan-headers vulkan-icd-loader libva libvdpau libdisplay-info \
-            pipewire libpulse alsa-lib systemd-libs desktop-file-utils
+            pipewire libpulse alsa-lib systemd-libs desktop-file-utils \
+            xorg-server-xvfb xorg-xauth strace nss-mdns
 
       - uses: actions/checkout@v4
         with:
@@ -111,6 +112,27 @@ jobs:
         run: |
           packaging/package.sh
           cp release-notes.md dist/
+
+      # The pinned quick-sharun (packaging/appimage/quick-sharun.pin) for the
+      # compat AppImage; the pin file is the cache key.
+      - name: Cache quick-sharun
+        uses: actions/cache@v4
+        with:
+          path: packaging/tools/quick-sharun-*.sh
+          key: quick-sharun-${{ hashFiles('packaging/appimage/quick-sharun.pin') }}
+
+      # Same binary and libmpv as the main AppImage, packed with its own
+      # glibc for old distros. Its own step and allowed to fail: without it
+      # the release simply goes out without the compat file (see compat-test
+      # and the release job).
+      - name: Compat AppImage
+        id: compat
+        continue-on-error: true
+        run: packaging/appimage/make-compat-appimage.sh
+
+      - name: Compat AppImage failed
+        if: steps.compat.outcome == 'failure'
+        run: echo "::warning::the compat AppImage failed to build; the release goes out without it"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -203,10 +225,60 @@ jobs:
           name: macos
           path: dist/*-macos-arm64.zip
 
+  # Runs the compat AppImage on old distros (docker on the hosted runner).
+  # Never blocks the release: if any image fails, the release job drops the
+  # compat file and publishes the rest.
+  compat-test:
+    needs: build
+    if: needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["debian:11", "debian:12", "ubuntu:20.04", "ubuntu:22.04", "ubuntu:24.04"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux
+          path: artifacts
+
+      - name: Find the compat AppImage
+        id: find
+        run: |
+          file="$(ls artifacts/*-x86_64-compat.AppImage 2>/dev/null | head -n 1 || true)"
+          if [ -z "$file" ]; then
+            echo "::warning::no compat AppImage in the build; nothing to test"
+          fi
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+
+      - name: Test on ${{ matrix.image }}
+        if: steps.find.outputs.file != ''
+        env:
+          LOG_DIR: ${{ runner.temp }}/compat-logs
+        run: scripts/test-appimage-compat.sh "${{ steps.find.outputs.file }}" "${{ matrix.image }}"
+
+      - name: Logs
+        if: failure()
+        run: |
+          for log in "${{ runner.temp }}"/compat-logs/*.log; do
+            echo "::group::$log"
+            cat "$log"
+            echo "::endgroup::"
+          done
+
   release:
-    needs: [build, windows, macos]
+    needs: [build, windows, macos, compat-test]
     # Only full runs publish (a push, or a manual run of everything, checked).
-    if: github.event_name == 'push' || (inputs.platform == 'all' && !inputs.quick)
+    # compat-test may fail (or be skipped) without stopping the release, so
+    # the other jobs are checked by hand.
+    if: >-
+      ${{ !cancelled()
+      && needs.build.result == 'success'
+      && needs.windows.result == 'success'
+      && needs.macos.result == 'success'
+      && (github.event_name == 'push' || (inputs.platform == 'all' && !inputs.quick)) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -232,6 +304,34 @@ jobs:
           else
             echo "released=false" >> "$GITHUB_OUTPUT"
           fi
+
+      # The compat AppImage ships only when it was built and passed on every
+      # old distro; otherwise it is dropped, also from a draft an earlier
+      # push of this version already put it in.
+      - name: Compat AppImage gate
+        if: steps.gate.outputs.released == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          result="${{ needs.compat-test.result }}"
+          shopt -s nullglob
+          files=(artifacts/*-x86_64-compat.AppImage)
+          if [ ${#files[@]} -gt 0 ] && [ "$result" = success ]; then
+            exit 0
+          fi
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::warning::no compat AppImage was built; releasing without it"
+          else
+            rm -f "${files[@]}"
+            echo "::warning::compat AppImage tests ended as '$result'; releasing without it"
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+            --jq ".[] | select(.draft and .tag_name == \"$version\") | .assets[] | select(.name | endswith(\"-x86_64-compat.AppImage\")) | .id" |
+            while read -r id; do
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$id" ||
+                echo "::warning::couldn't delete the earlier compat asset $id from the draft"
+            done
 
       - name: Draft release
         if: steps.gate.outputs.released == 'false'

@@ -159,6 +159,22 @@ pub fn handle(window: &adw::ApplicationWindow, ui: Option<&Ui>, pad: Pad, repeat
         Action::Search if page_free => {
             if let Some(ui) = ui {
                 ui.start_search();
+                if crate::osk::available() {
+                    // The field slides in (a revealer): its rect is only
+                    // right once that's done.
+                    let window = window.downgrade();
+                    glib::timeout_add_local_once(
+                        std::time::Duration::from_millis(300),
+                        move || {
+                            if let Some(window) = window.upgrade()
+                                && let Some(text) = gtk::prelude::GtkWindowExt::focus(&window)
+                                    .and_downcast::<gtk::Text>()
+                            {
+                                open_keyboard(&text);
+                            }
+                        },
+                    );
+                }
             }
         }
         Action::Preferences if ui.is_some() && page_free => {
@@ -308,10 +324,98 @@ pub fn track_focus(window: &adw::ApplicationWindow) {
         {
             watch_pointer(&popover);
         }
+        keyboard_follow_focus(focus.as_ref());
         if TAB_SWITCH.get() == 0 {
             focus_changed(window);
         }
     });
+}
+
+/// The keyboard we opened (Game Mode), so we only close one of ours.
+struct Keyboard {
+    /// The whole field (an Entry and its inner Text, an EntryRow...).
+    field: glib::WeakRef<gtk::Widget>,
+    text: glib::WeakRef<gtk::Text>,
+    on_activate: glib::SignalHandlerId,
+}
+
+thread_local! {
+    static KEYBOARD: RefCell<Option<Keyboard>> = const { RefCell::new(None) };
+}
+
+/// Opens Steam's keyboard for the field holding `text`.
+fn open_keyboard(text: &gtk::Text) {
+    forget_keyboard();
+    // The outermost editable around the text is the whole field.
+    let mut field: gtk::Widget = text.clone().upcast();
+    while let Some(parent) = field.parent().filter(|p| p.is::<gtk::Editable>()) {
+        field = parent;
+    }
+    crate::osk::open(field_rect(&field));
+    // Enter on Steam's keyboard submits and dismisses it there.
+    let on_activate = text.connect_activate(|_| {
+        forget_keyboard();
+    });
+    KEYBOARD.with(|k| {
+        k.replace(Some(Keyboard {
+            field: field.downgrade(),
+            text: text.downgrade(),
+            on_activate,
+        }))
+    });
+}
+
+/// Drops the record of an open keyboard without telling Steam (it's gone
+/// already, or about to be reopened). True if there was one.
+fn forget_keyboard() -> bool {
+    let Some(keyboard) = KEYBOARD.with(|k| k.take()) else {
+        return false;
+    };
+    if let Some(text) = keyboard.text.upgrade() {
+        text.disconnect(keyboard.on_activate);
+    }
+    true
+}
+
+/// Closes the keyboard, if it's one we opened.
+fn close_keyboard() {
+    if forget_keyboard() {
+        crate::osk::close();
+    }
+}
+
+/// Focus moved: the keyboard goes unless it stayed in the same field (a
+/// suggestion popover inside the Entry keeps it).
+fn keyboard_follow_focus(focus: Option<&gtk::Widget>) {
+    let stays = KEYBOARD.with(|k| {
+        k.borrow()
+            .as_ref()
+            .map(|k| match (k.field.upgrade(), focus) {
+                (Some(field), Some(f)) => *f == field || f.is_ancestor(&field),
+                _ => false,
+            })
+    });
+    if stays == Some(false) {
+        close_keyboard();
+    }
+}
+
+/// The field's rect in physical pixels, relative to the window, as SDL
+/// reports it to Steam.
+fn field_rect(field: &gtk::Widget) -> Option<[i32; 4]> {
+    let root = field.root()?;
+    let bounds = field.compute_bounds(&root)?;
+    let scale = f64::from(field.native()?.surface()?.scale_factor());
+    if bounds.width() <= 0.0 || bounds.height() <= 0.0 {
+        return None;
+    }
+    let px = |v: f32| (f64::from(v) * scale).round() as i32;
+    Some([
+        px(bounds.x()),
+        px(bounds.y()),
+        px(bounds.width()),
+        px(bounds.height()),
+    ])
 }
 
 /// Remembers where the cursor now is, or recovers it when it's lost.
@@ -1065,6 +1169,14 @@ fn activate_focus(window: &adw::ApplicationWindow) {
     let Some(focus) = gtk::prelude::GtkWindowExt::focus(window) else {
         return;
     };
+    // A, on a text field, brings up Steam's keyboard (Game Mode); Enter
+    // there submits.
+    if crate::osk::available()
+        && let Some(text) = focus.downcast_ref::<gtk::Text>()
+    {
+        open_keyboard(text);
+        return;
+    }
     // A, on a combo row, steps to its next option (wrapping), rather than
     // opening a drop-down list that's awkward to drive with a controller.
     if let Some(combo) = focus
@@ -1113,6 +1225,7 @@ fn activate_focus(window: &adw::ApplicationWindow) {
 /// Closes the innermost thing open: the A-Z strip, a popover, a dialog, then
 /// a page.
 fn back(window: &adw::ApplicationWindow, ui: Option<&Ui>) {
+    close_keyboard();
     // In the A-Z strip: back to the list, not out of the page.
     if let Some(focus) = gtk::prelude::GtkWindowExt::focus(window)
         && library::leave_strip(&focus)

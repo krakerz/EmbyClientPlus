@@ -153,6 +153,9 @@ pub fn new(player: Player) -> gtk::GLArea {
                         }
                     }
                 }
+                if crate::smoke::pending() {
+                    crate::smoke::frame(player, gl_info);
+                }
             }
             glib::Propagation::Stop
         }
@@ -181,6 +184,36 @@ fn fit(player: Player, width: i32, height: i32) {
     {
         tracing::warn!("{e:#}");
     }
+}
+
+/// (GL_RENDERER, GL_VERSION) of the current context, for the smoke test.
+fn gl_info() -> (String, String) {
+    type GetStringFn = unsafe extern "C" fn(u32) -> *const c_char;
+    const GL_RENDERER: u32 = 0x1F01;
+    const GL_VERSION: u32 = 0x1F02;
+    let unknown = || "unknown".to_string();
+    let Ok(loader) = GlLoader::load() else {
+        return (unknown(), unknown());
+    };
+    let get_string = loader.proc_address("glGetString");
+    if get_string.is_null() {
+        return (unknown(), unknown());
+    }
+    // SAFETY: non-null pointer to glGetString, whose signature this matches.
+    let get_string: GetStringFn = unsafe { std::mem::transmute(get_string) };
+    let read = |name| {
+        // SAFETY: GTK made the context current; glGetString returns a static
+        // NUL-terminated string or null.
+        let text = unsafe { get_string(name) };
+        if text.is_null() {
+            unknown()
+        } else {
+            unsafe { std::ffi::CStr::from_ptr(text) }
+                .to_string_lossy()
+                .into_owned()
+        }
+    };
+    (read(GL_RENDERER), read(GL_VERSION))
 }
 
 fn create_compositor(area: &gtk::GLArea) -> Result<Compositor> {

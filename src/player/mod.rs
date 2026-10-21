@@ -857,6 +857,9 @@ fn spawn_event_thread(mpv: &'static Mpv) {
                 }
                 Some(Ok(Event::EndFile(reason))) => {
                     tracing::info!("playback ended (reason {reason})");
+                    if reason == END_FILE_REASON_ERROR {
+                        crate::smoke::failed("mpv reported an error");
+                    }
                     Some(PlayerEvent::Finished(reason))
                 }
                 Some(Ok(Event::PropertyChange { name, change, .. })) => {
@@ -864,6 +867,8 @@ fn spawn_event_thread(mpv: &'static Mpv) {
                 }
                 Some(Err(e)) => {
                     tracing::warn!("mpv event error: {e:?}");
+                    // A failed load arrives here, not as an end-file event.
+                    crate::smoke::failed(&format!("{e:?}"));
                     None
                 }
                 _ => None,

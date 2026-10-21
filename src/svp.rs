@@ -193,6 +193,10 @@ const NOT_FOUND_VAR: &str = "EMBYCLIENTPLUS_VSSCRIPT_SEARCHED";
 /// (SVP attaches but can't interpolate without one). Linux builds link
 /// SVP's own copy, so there it's never missing at run time.
 pub fn vapoursynth_hint() -> Option<&'static str> {
+    #[cfg(target_os = "linux")]
+    if MANAGER_EXITED_AT_ONCE.load(std::sync::atomic::Ordering::Relaxed) {
+        return Some(COMPAT_GLIBC_HINT);
+    }
     #[cfg(not(target_os = "linux"))]
     if std::env::var_os("EMBYCLIENTPLUS_VSSCRIPT").is_none() {
         return Some(if cfg!(target_os = "macos") {
@@ -301,6 +305,49 @@ const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 /// The SVP Manager this app started, if any; only that one gets stopped.
 static STARTED: Mutex<Option<Child>> = Mutex::new(None);
 
+/// The compat AppImage bundles its own glibc, but SVP's libraries come from
+/// the host and need 2.38+; on older systems the Manager dies right away.
+#[cfg(target_os = "linux")]
+const COMPAT_GLIBC_HINT: &str =
+    "SVP needs a newer system (glibc 2.38 or later) in the compatibility AppImage";
+
+/// Set when, in the compat flavour, the Manager we started exited within
+/// [`EARLY_EXIT_WINDOW`]; `vapoursynth_hint` then surfaces the toast.
+#[cfg(target_os = "linux")]
+static MANAGER_EXITED_AT_ONCE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_os = "linux")]
+const EARLY_EXIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Compat only: watches the Manager we just started for a quick exit.
+#[cfg(target_os = "linux")]
+fn watch_for_early_exit() {
+    use std::sync::atomic::Ordering;
+    MANAGER_EXITED_AT_ONCE.store(false, Ordering::Relaxed);
+    std::thread::spawn(|| {
+        let deadline = std::time::Instant::now() + EARLY_EXIT_WINDOW;
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            let Ok(mut started) = STARTED.lock() else {
+                return;
+            };
+            // Taken by `stop_started`: we're quitting.
+            let Some(child) = started.as_mut() else {
+                return;
+            };
+            if let Ok(Some(status)) = child.try_wait() {
+                // A launcher that hands over to a surviving process is fine.
+                if !manager_running() {
+                    tracing::warn!("SVP Manager exited at once ({status}); {COMPAT_GLIBC_HINT}");
+                    MANAGER_EXITED_AT_ONCE.store(true, Ordering::Relaxed);
+                }
+                return;
+            }
+        }
+    });
+}
+
 /// Starts SVP Manager if it isn't running: at app launch (when auto-start
 /// is on), so it's ready before any video, and again at playback if it
 /// was closed. On the desktop it sits in the tray. In Game Mode it shares
@@ -347,6 +394,10 @@ pub fn ensure_running() {
             tracing::info!("started SVP Manager (pid {})", child.id());
             if let Ok(mut started) = STARTED.lock() {
                 *started = Some(child);
+            }
+            #[cfg(target_os = "linux")]
+            if crate::flavour::is_compat() {
+                watch_for_early_exit();
             }
         }
         Err(e) => tracing::warn!("couldn't start SVP Manager: {e}"),

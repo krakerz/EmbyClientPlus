@@ -588,9 +588,11 @@ impl EmbyClient {
     }
 
     /// Server-relative image path, resized server-side to `max_width`.
+    /// Quality 80: about a third smaller than 90, no visible loss at
+    /// poster sizes; Emby keeps its resized copies, so it encodes each once.
     pub fn image_path(image: &ImageRef, max_width: u32) -> String {
         format!(
-            "/emby/Items/{}/Images/{}?maxWidth={max_width}&tag={}&quality=90",
+            "/emby/Items/{}/Images/{}?maxWidth={max_width}&tag={}&quality=80",
             image.item_id,
             image.kind.path_segment(),
             encode(&image.tag)
@@ -913,7 +915,7 @@ mod tests {
         let path = EmbyClient::image_path(&image("abc", ImageKind::Backdrop, "t1"), 1280);
         assert_eq!(
             path,
-            "/emby/Items/abc/Images/Backdrop?maxWidth=1280&tag=t1&quality=90"
+            "/emby/Items/abc/Images/Backdrop?maxWidth=1280&tag=t1&quality=80"
         );
     }
 

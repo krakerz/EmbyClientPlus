@@ -2,6 +2,9 @@
 # Builds the release archive and AppImage into dist/ from an already built
 # portable binary (EMBYCLIENTPLUS_PORTABLE=1 cargo build --release) and the
 # libmpv from scripts/build-libmpv.sh. Used by CI and for local checks.
+# With COMPAT_APPIMAGE=1 it also builds the compat AppImage at the end
+# (packaging/appimage/make-compat-appimage.sh; CI runs that as a step of its
+# own, so a failure there leaves the rest of the release intact).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -11,7 +14,7 @@ APP_ID="io.github.krakerz.EmbyClientPlus"
 # Overridable for builds in another target dir (scripts/dev-appimage.sh).
 BIN="${BIN:-target/release/embyclientplus}"
 LIBMPV="third_party/mpv-prefix/lib/libmpv.so.2"
-DIST="dist"
+DIST="${DIST:-dist}"
 TOOLS="packaging/tools"
 
 [ -x "$BIN" ] || { echo "missing $BIN (build with EMBYCLIENTPLUS_PORTABLE=1)" >&2; exit 1; }
@@ -35,6 +38,7 @@ stage() {
     install -Dm755 "$BIN" "$root/bin/embyclientplus-bin"
     install -Dm755 packaging/embyclientplus.sh "$root/bin/embyclientplus"
     install -Dm755 "$fallback_vs" "$root/lib/vapoursynth-fallback/libvsscript.so"
+    install -Dm755 packaging/svp-detect.sh "$root/lib/svp-detect.sh"
 }
 
 # 1. Plain-binary archive with install/uninstall scripts.
@@ -49,6 +53,33 @@ install -Dm755 packaging/install.sh "$archive_root/install.sh"
 install -Dm755 packaging/uninstall.sh "$archive_root/uninstall.sh"
 cp -r packaging/steam-library "$archive_root/steam-library"
 tar -C "$DIST" -czf "$DIST/embyclientplus-$VERSION-linux-x86_64.tar.gz" "$bundle"
+
+# The main AppImage runs on the host's glibc: report when any of its ELF files
+# needs a newer one than MAX_GLIBC (2.41 by default). A warning unless
+# STRICT_GLIBC=1, since Arch's own libraries move past it (2.44 in 2026-10)
+# and failing would stop every Linux release; hosts older than that use the
+# compat AppImage, which brings its own glibc.
+check_glibc() {
+    local root="$1" max="${MAX_GLIBC:-2.41}" bad=0 file need
+    while IFS= read -r -d '' file; do
+        [ "$(head -c 4 "$file" 2>/dev/null)" = $'\177ELF' ] || continue
+        need="$(objdump -T "$file" 2>/dev/null | grep -o 'GLIBC_[0-9][0-9.]*' |
+            sed 's/^GLIBC_//' | sort -Vu | tail -n 1 || true)"
+        [ -n "$need" ] || continue
+        if [ "$(printf '%s\n%s\n' "$need" "$max" | sort -V | tail -n 1)" != "$max" ]; then
+            echo "glibc guard: ${file#"$root"/} needs GLIBC_$need (> $max)" >&2
+            bad=1
+        fi
+    done < <(find "$root" -type f -print0)
+    if [ "$bad" = 1 ]; then
+        echo "the AppImage needs glibc newer than $max" >&2
+        [ -n "${GITHUB_ACTIONS:-}" ] &&
+            echo "::warning::main AppImage needs glibc newer than $max; older hosts need the compat AppImage"
+        [ "${STRICT_GLIBC:-0}" = 1 ] && return 1
+        return 0
+    fi
+    echo "glibc guard: every ELF in $root needs glibc <= $max"
+}
 
 # 2. AppImage, bundling GTK4/libadwaita/FFmpeg so it runs on SteamOS too.
 fetch() {
@@ -93,8 +124,14 @@ export PATH="$REPO_ROOT/$TOOLS:$PATH"
     --exclude-library 'libvsscript*' \
     --exclude-library 'libvapoursynth*' \
     --output appimage
+check_glibc "$appdir"
 rm -rf "$appdir" "$archive_root"
 
 # 3. Steam library artwork on its own, for AppImage users.
 bsdtar -a -cf "$DIST/EmbyClientPlus-$VERSION-steam-library.zip" -C packaging steam-library
+
+# 4. Compat AppImage, for hosts older than the main one's glibc (opt in).
+if [ "${COMPAT_APPIMAGE:-0}" = 1 ]; then
+    packaging/appimage/make-compat-appimage.sh
+fi
 ls -l "$DIST"

@@ -469,6 +469,7 @@ fn play(state: &Rc<State>, media: LocalMedia) {
             }
             Err(e) => {
                 tracing::error!("playback failed: {e:#}");
+                crate::smoke::failed(&format!("{e:#}"));
                 toast(&state, &format!("Couldn't play this: {e}"));
                 if state.nav.visible_page().as_ref() == Some(state.page.page()) {
                     state.nav.pop();
