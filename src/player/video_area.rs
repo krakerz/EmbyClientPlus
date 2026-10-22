@@ -227,6 +227,50 @@ fn create_compositor(area: &gtk::GLArea) -> Result<Compositor> {
     Compositor::new(gl, es).map_err(|e| anyhow!(e))
 }
 
+/// mpv draws with GL; GTK's Vulkan renderer (the default on Linux since
+/// 4.16) hands every video frame from GL over to Vulkan, which cost ~25% of
+/// a core at 1080p24. One the user set wins. Call before GTK init.
+pub fn prefer_gl_renderer() {
+    if std::env::var_os("GSK_RENDERER").is_none() {
+        // SAFETY: called first thing in main, while single-threaded.
+        unsafe { std::env::set_var("GSK_RENDERER", "ngl") };
+    }
+}
+
+/// GDK's Wayland or X11 display, which mpv's VA-API interop needs for
+/// zero-copy decoding (without it only vaapi-copy works). Looked up at run
+/// time: GTK may be built without either backend.
+#[cfg(target_os = "linux")]
+fn native_display<C>(display: &gtk::gdk::Display) -> Option<RenderParam<C>> {
+    let (getter, wayland) = match display.type_().name() {
+        "GdkWaylandDisplay" => (c"gdk_wayland_display_get_wl_display", true),
+        "GdkX11Display" => (c"gdk_x11_display_get_xdisplay", false),
+        _ => return None,
+    };
+    // SAFETY: looks up a symbol of the already loaded GTK library.
+    let getter = unsafe { libc::dlsym(libc::RTLD_DEFAULT, getter.as_ptr()) };
+    if getter.is_null() {
+        return None;
+    }
+    // SAFETY: both getters take a GdkDisplay of their backend (checked
+    // above) and return its native handle, valid as long as the display.
+    let native = unsafe {
+        let getter: unsafe extern "C" fn(*mut c_void) -> *mut c_void = std::mem::transmute(getter);
+        getter(display.as_ptr().cast())
+    };
+    match (native.is_null(), wayland) {
+        (true, _) => None,
+        (false, true) => Some(RenderParam::WaylandDisplay(native)),
+        (false, false) => Some(RenderParam::X11Display(native)),
+    }
+}
+
+/// Windows/macOS interop finds its device through the GL context itself.
+#[cfg(not(target_os = "linux"))]
+fn native_display<C>(_: &gtk::gdk::Display) -> Option<RenderParam<C>> {
+    None
+}
+
 fn create_render_context(
     player: Player,
     area: &gtk::GLArea,
@@ -239,15 +283,17 @@ fn create_render_context(
     // SAFETY: non-null pointer to glGetIntegerv, whose signature this matches.
     let get_integerv: GetIntegervFn = unsafe { std::mem::transmute(get_integerv) };
 
+    let mut params = vec![
+        RenderParam::ApiType(RenderParamApiType::OpenGl),
+        RenderParam::InitParams(OpenGLInitParams {
+            get_proc_address,
+            ctx: loader,
+        }),
+    ];
+    params.extend(native_display(&area.display()));
     let mut context = player
         .mpv()
-        .create_render_context([
-            RenderParam::ApiType(RenderParamApiType::OpenGl),
-            RenderParam::InitParams(OpenGLInitParams {
-                get_proc_address,
-                ctx: loader,
-            }),
-        ])
+        .create_render_context(params)
         .map_err(|e| anyhow!("{e:?}"))?;
 
     // Fires on an mpv thread whenever a new frame is ready.
