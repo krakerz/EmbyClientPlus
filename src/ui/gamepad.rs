@@ -82,6 +82,17 @@ pub fn handle(window: &adw::ApplicationWindow, ui: Option<&Ui>, pad: Pad, repeat
         }
     }
 
+    // A notification the cursor was taken to with LT/RT.
+    if let Some(ui) = ui
+        && !ui.player_visible()
+        && window.visible_dialog().is_none()
+        && let Some(focus) = gtk::prelude::GtkWindowExt::focus(window)
+        && let Some(toast) = toast_of(&focus)
+        && toast_press(ui, &toast, &focus, pad)
+    {
+        return;
+    }
+
     // The focused widget went away (a page reloaded, a grid rebuilt): put
     // the cursor back before acting, or the press lands on nothing.
     if let Some(ui) = ui
@@ -180,8 +191,12 @@ pub fn handle(window: &adw::ApplicationWindow, ui: Option<&Ui>, pad: Pad, repeat
         Action::Preferences if ui.is_some() && page_free => {
             preferences::show(window);
         }
+        // LT/RT step through the page, a notification, the music panel.
         Action::OpenMusic if page_free => {
-            if let Some(panel) = ui.and_then(Ui::music_panel) {
+            if let Some(ui) = ui
+                && !focus_toast(ui)
+                && let Some(panel) = ui.music_panel()
+            {
                 panel.open();
             }
         }
@@ -429,6 +444,11 @@ fn focus_changed(window: &adw::ApplicationWindow) {
         recover_focus(window, container);
         return;
     };
+    // Not a spot to come back to: when the notification goes, the cursor
+    // returns to the page.
+    if toast_of(&focus).is_some() {
+        return;
+    }
     let anchor: gtk::Widget = focus
         .ancestor(adw::NavigationPage::static_type())
         .unwrap_or_else(|| window.clone().upcast());
@@ -1068,6 +1088,100 @@ fn music_panel_press(
         focus_page(ui);
     }
     true
+}
+
+/// A press while the cursor is on a notification: ←/→ between its buttons,
+/// A presses one, B goes back to the page and LT/RT on to the music panel.
+/// False for anything else, which then acts on the page.
+fn toast_press(ui: &Ui, toast: &gtk::Widget, focus: &gtk::Widget, pad: Pad) -> bool {
+    match controller::action_for(pad, Context::Browse) {
+        Some(direction @ (Action::Left | Action::Right)) => {
+            let buttons = toast_buttons(toast);
+            let next = buttons.iter().position(|b| b == focus).and_then(|at| {
+                if direction == Action::Right {
+                    buttons.get(at + 1)
+                } else {
+                    at.checked_sub(1).and_then(|at| buttons.get(at))
+                }
+            });
+            if let Some(next) = next {
+                next.grab_focus();
+            }
+        }
+        Some(Action::Up | Action::Down) => {}
+        Some(Action::Activate) => {
+            // A pressed toast goes away; the cursor mustn't go with it.
+            focus_page(ui);
+            focus.activate();
+        }
+        Some(Action::Back) => {
+            focus_page(ui);
+        }
+        Some(Action::OpenMusic) => {
+            if !ui.music_panel().is_some_and(|panel| panel.open()) {
+                focus_page(ui);
+            }
+        }
+        _ => {
+            focus_page(ui);
+            return false;
+        }
+    }
+    true
+}
+
+/// Puts the cursor on the notification showing, if any: its button, else
+/// its close button.
+fn focus_toast(ui: &Ui) -> bool {
+    shown_toast(ui.toast_overlay())
+        .and_then(|toast| toast_buttons(&toast).into_iter().next())
+        .is_some_and(|button| button.grab_focus())
+}
+
+/// libadwaita doesn't expose a toast's widget: it's the overlay's child
+/// styled `toast`. The newest comes last (an older one may be fading out).
+fn shown_toast(overlay: &adw::ToastOverlay) -> Option<gtk::Widget> {
+    let mut shown = None;
+    let mut child = overlay.first_child();
+    while let Some(current) = child {
+        if current.css_name() == "toast" && current.is_mapped() {
+            shown = Some(current.clone());
+        }
+        child = current.next_sibling();
+    }
+    shown
+}
+
+/// The notification `widget` is in, if any.
+fn toast_of(widget: &gtk::Widget) -> Option<gtk::Widget> {
+    let mut current = widget.parent();
+    while let Some(parent) = current {
+        if parent.css_name() == "toast" {
+            return Some(parent);
+        }
+        current = parent.parent();
+    }
+    None
+}
+
+/// A toast's buttons, left to right: its own (Update, Restart), then close.
+fn toast_buttons(toast: &gtk::Widget) -> Vec<gtk::Widget> {
+    fn collect(widget: &gtk::Widget, buttons: &mut Vec<gtk::Widget>) {
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            if current.is::<gtk::Button>() {
+                if usable(&current) {
+                    buttons.push(current.clone());
+                }
+            } else {
+                collect(&current, buttons);
+            }
+            child = current.next_sibling();
+        }
+    }
+    let mut buttons = Vec::new();
+    collect(toast, &mut buttons);
+    buttons
 }
 
 /// Directions, select, back and item menu, as while browsing.

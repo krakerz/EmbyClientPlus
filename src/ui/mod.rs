@@ -182,6 +182,10 @@ impl Ui {
         self.inner.session.user_id.clone()
     }
 
+    pub fn toast_overlay(&self) -> &adw::ToastOverlay {
+        &self.inner.toasts
+    }
+
     pub fn toast(&self, message: &str) {
         self.inner.toasts.add_toast(
             adw::Toast::builder()

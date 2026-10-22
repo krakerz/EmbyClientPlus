@@ -93,7 +93,7 @@ current screen's buttons.
 | ↑ / ↓ | Volume ±5 | X | Item menu | Audio menu |
 | M | Mute | Y | Home | Subtitle menu |
 | , / . | Previous/next episode | LB / RB | Previous/next tab or season | Previous/next episode |
-| PgUp / PgDn | Previous/next chapter | LT / RT | Music panel | Previous/next chapter |
+| PgUp / PgDn | Previous/next chapter | LT / RT | Notification (if one is showing), then music panel | Previous/next chapter |
 | F / F11 | Fullscreen | Select | Search | Skip intro/credits |
 | Q | Skip intro/credits | Start | Preferences | On-screen controls |
 | Esc | Leave fullscreen, then the player | D-pad | Move | Seek (←/→), volume (↑/↓) |
