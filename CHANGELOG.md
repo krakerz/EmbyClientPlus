@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.26.0] — 2026-10-22
+
+### Added
+- Controller: LT/RT move the cursor to the notification at the bottom (Update, Restart, close) before the music player; B returns to the page.
+
 ## [1.25.0] — 2026-10-22
 
 ### Fixed

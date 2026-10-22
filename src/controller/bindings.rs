@@ -255,7 +255,7 @@ impl Action {
             Action::SubtitleMenu => "Subtitle menu",
             Action::ShowControls => "Show controls",
             Action::Skip => "Skip intro/credits",
-            Action::OpenMusic => "Open the music player",
+            Action::OpenMusic => "Notification, then the music player",
             Action::JumpLetters => "Letters (A–Z)",
             Action::MusicPlayPause => "Play / pause",
             Action::MusicPrevious => "Previous track",
