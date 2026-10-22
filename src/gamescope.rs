@@ -35,6 +35,38 @@ pub fn prepare_environment() {
     unsafe { std::env::set_var("ENABLE_GAMESCOPE_WSI", "0") };
 }
 
+/// Puts the device to sleep through logind, as the power menu does. Steam's
+/// idle sleep doesn't follow a stopped video, so the sleep timer asks for it.
+/// Polkit allows this without a password for the active local session.
+#[cfg(target_os = "linux")]
+pub fn suspend() {
+    use gtk::gio;
+    use gtk::glib::prelude::*;
+
+    gio::bus_get(gio::BusType::System, gio::Cancellable::NONE, |bus| {
+        let bus = match bus {
+            Ok(bus) => bus,
+            Err(e) => return tracing::warn!("no system bus to suspend through: {e}"),
+        };
+        bus.call(
+            Some("org.freedesktop.login1"),
+            "/org/freedesktop/login1",
+            "org.freedesktop.login1.Manager",
+            "Suspend",
+            // Not interactive: there's nobody awake to answer a prompt.
+            Some(&(false,).to_variant()),
+            None,
+            gio::DBusCallFlags::NONE,
+            10_000,
+            gio::Cancellable::NONE,
+            |result| match result {
+                Ok(_) => tracing::info!("sleep timer: suspending"),
+                Err(e) => tracing::warn!("sleep timer: suspend refused: {e}"),
+            },
+        );
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::detected_in;
