@@ -224,6 +224,7 @@ impl Ui {
         match item.item_type.as_str() {
             "Series" => series::page(self, item),
             "Person" => library_page::person(self, item),
+            "Genre" | "Tag" => library_page::category(self, item),
             "MusicAlbum" => album::page(self, item),
             "MusicArtist" => library_page::artist(self, item),
             "Playlist" => playlists::page(self, item),

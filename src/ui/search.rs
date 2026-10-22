@@ -1,5 +1,5 @@
 //! Search across all libraries, with results in tabs by kind (Top
-//! Results, Movies, Shows, Episodes, People, ...). Tabs without matches
+//! Results, Movies, Shows, Episodes, People, Genres, ...). Tabs without matches
 //! stay hidden.
 
 use std::cell::{Cell, RefCell};
@@ -22,10 +22,12 @@ enum Source {
     Items(&'static str),
     People,
     Artists,
+    Genres,
+    Tags,
 }
 
 /// (name, title, icon, card shape, source), in tab order.
-const TABS: [(&str, &str, &str, Shape, Source); 9] = [
+const TABS: [(&str, &str, &str, Shape, Source); 11] = [
     (
         "top",
         "Top Results",
@@ -69,6 +71,14 @@ const TABS: [(&str, &str, &str, Shape, Source); 9] = [
         Source::Items("BoxSet"),
     ),
     (
+        "genres",
+        "Genres",
+        icons::GENRES,
+        Shape::Landscape,
+        Source::Genres,
+    ),
+    ("tags", "Tags", icons::TAGS, Shape::Landscape, Source::Tags),
+    (
         "albums",
         "Albums",
         icons::ALBUMS,
@@ -95,12 +105,14 @@ struct Tab {
     page: adw::ViewStackPage,
     grid: gtk::GridView,
     store: gio::ListStore,
+    /// Genres and tags show as category tiles instead of the grid.
+    tiles: Option<gtk::FlowBox>,
     source: Source,
 }
 
 pub fn page(ui: &Ui, term: &str) -> adw::NavigationPage {
     let entry = gtk::SearchEntry::builder()
-        .placeholder_text("Movies, shows, episodes, people, music")
+        .placeholder_text("Movies, shows, episodes, people, genres, tags, music")
         .search_delay(300)
         .hexpand(true)
         .build();
@@ -119,17 +131,28 @@ pub fn page(ui: &Ui, term: &str) -> adw::NavigationPage {
         TABS.iter()
             .map(|&(name, title, icon, shape, source)| {
                 let (grid, store) = grid(ui, shape);
+                let tiles = matches!(source, Source::Genres | Source::Tags)
+                    .then(|| super::category_tile::flow(ui));
                 let scrolled = gtk::ScrolledWindow::builder()
                     .hscrollbar_policy(gtk::PolicyType::Never)
-                    .child(&grid)
                     .vexpand(true)
                     .build();
+                match &tiles {
+                    Some(tiles) => {
+                        // Same layout as the library's Genres/Tags tabs.
+                        let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                        content.append(tiles);
+                        scrolled.set_child(Some(&content));
+                    }
+                    None => scrolled.set_child(Some(&grid)),
+                }
                 let page = results.add_titled_with_icon(&scrolled, Some(name), title, icon);
                 page.set_visible(false);
                 Tab {
                     page,
                     grid,
                     store,
+                    tiles,
                     source,
                 }
             })
@@ -187,6 +210,11 @@ pub fn page(ui: &Ui, term: &str) -> adw::NavigationPage {
             let term = entry.text().trim().to_string();
             for tab in tabs.iter() {
                 tab.store.remove_all();
+                if let Some(tiles) = &tab.tiles {
+                    while let Some(child) = tiles.first_child() {
+                        tiles.remove(&child);
+                    }
+                }
                 tab.page.set_visible(false);
             }
             switcher.set_visible(false);
@@ -247,12 +275,18 @@ pub fn page(ui: &Ui, term: &str) -> adw::NavigationPage {
 /// new search).
 fn show_tab(tab: &Tab, results: &adw::ViewStack, entry: &gtk::SearchEntry) {
     results.set_visible_child(&tab.page.child());
-    let typing = tab
-        .grid
+    let typing = entry
         .root()
         .and_then(|root| root.focus())
         .is_some_and(|focus| focus.is_ancestor(entry));
     if typing {
+        return;
+    }
+    if let Some(tiles) = &tab.tiles {
+        // Tiles are in before the count is reported.
+        if let Some(first) = tiles.child_at_index(0) {
+            first.grab_focus();
+        }
         return;
     }
     if tab.store.n_items() > 0 {
@@ -298,10 +332,22 @@ fn load_tab(
         source => {
             let (client, user_id, term) = (ui.client(), ui.user_id(), term.to_string());
             let store = tab.store.downgrade();
+            let tiles = tab.tiles.as_ref().map(|t| t.downgrade());
+            let weak = ui.downgrade();
             glib::spawn_future_local(async move {
                 let result = spawn_tokio(async move {
                     match source {
                         Source::People => client.search_people(&user_id, &term, RESULT_LIMIT).await,
+                        Source::Genres => {
+                            client
+                                .search_categories("Genres", &user_id, &term, RESULT_LIMIT)
+                                .await
+                        }
+                        Source::Tags => {
+                            client
+                                .search_categories("Tags", &user_id, &term, RESULT_LIMIT)
+                                .await
+                        }
                         _ => client.search_artists(&user_id, &term, RESULT_LIMIT).await,
                     }
                 })
@@ -309,10 +355,31 @@ fn load_tab(
                 if !still_wanted() {
                     return;
                 }
-                let items = result.map(|r| r.items).unwrap_or_else(|e| {
+                let mut items = result.map(|r| r.items).unwrap_or_else(|e| {
                     tracing::warn!("search failed: {e:#}");
                     Vec::new()
                 });
+                // Emby doesn't type tags as "Tag", so opening one would
+                // treat it as a folder; the endpoint says what they are.
+                let category = match source {
+                    Source::Genres => Some("Genre"),
+                    Source::Tags => Some("Tag"),
+                    _ => None,
+                };
+                if let Some(category) = category {
+                    for item in &mut items {
+                        item.item_type = category.into();
+                    }
+                }
+                if let (Some(tiles), Some(ui)) = (tiles.and_then(|t| t.upgrade()), weak.upgrade()) {
+                    for item in &items {
+                        let query = super::library_page::category_query(item);
+                        tiles.append(&super::category_tile::tile(&ui, &item.name, query));
+                    }
+                    super::category_tile::fit(&tiles, items.len());
+                    found(items.len());
+                    return;
+                }
                 found(items.len());
                 if let Some(store) = store.upgrade() {
                     let objects: Vec<_> =

@@ -16,6 +16,7 @@ use crate::runtime::spawn_tokio;
 const WIDTH: i32 = 300;
 const HEIGHT: i32 = 169;
 const COVERS: usize = 10;
+const MAX_PER_LINE: u32 = 8;
 const CYCLE: Duration = Duration::from_secs(2);
 const TARGET_KEY: &str = "embyclientplus-category-target";
 
@@ -131,6 +132,40 @@ pub fn tile(ui: &Ui, name: &str, query: ItemQuery) -> gtk::FlowBoxChild {
 
     load_covers(ui, &tile, &count, query);
     child
+}
+
+/// A box for tiles; activating one opens its grid.
+pub fn flow(ui: &Ui) -> gtk::FlowBox {
+    let flow = gtk::FlowBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .activate_on_single_click(true)
+        .halign(gtk::Align::Center)
+        .homogeneous(true)
+        .min_children_per_line(1)
+        .max_children_per_line(MAX_PER_LINE)
+        .row_spacing(16)
+        .column_spacing(16)
+        .margin_top(18)
+        .margin_bottom(18)
+        .margin_start(18)
+        .margin_end(18)
+        .valign(gtk::Align::Start)
+        .build();
+    let weak = ui.downgrade();
+    flow.connect_child_activated(move |_, child| {
+        let Some(ui) = weak.upgrade() else { return };
+        if let Some((name, query)) = target(child) {
+            ui.push(&super::library_page::grid_page(&ui, &name, query));
+        }
+    });
+    flow
+}
+
+/// Caps the row length at the tile count: a homogeneous FlowBox asks for
+/// room for a full row, so a few tiles would sit at the left instead of
+/// being centred.
+pub fn fit(flow: &gtk::FlowBox, tiles: usize) {
+    flow.set_max_children_per_line(tiles.clamp(1, MAX_PER_LINE as usize) as u32);
 }
 
 /// The name and grid query of an activated tile.
