@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.24.0] — 2026-10-22
+
+### Added
+- TV libraries have an Upcoming tab listing episodes that haven't aired yet, grouped by air day.
+- Search results include Genres and Tags tabs; opening one lists its movies and shows from all libraries.
+
 ## [1.23.1] — 2026-10-21
 
 ### Added

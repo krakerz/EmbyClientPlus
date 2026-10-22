@@ -377,6 +377,22 @@ impl EmbyClient {
         Ok(result.items)
     }
 
+    /// Episodes that haven't aired yet, soonest first.
+    pub async fn upcoming(
+        &self,
+        user_id: &str,
+        parent_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<BaseItem>> {
+        let result: QueryResult<BaseItem> = self
+            .get(&format!(
+                "/emby/Shows/Upcoming?UserId={user_id}&Limit={limit}&Fields={FIELDS}&EnableTotalRecordCount=false{}",
+                parent_param(parent_id)
+            ))
+            .await?;
+        Ok(result.items)
+    }
+
     /// Genres used in a library.
     pub async fn genres(
         &self,
@@ -534,6 +550,22 @@ impl EmbyClient {
     ) -> Result<QueryResult<BaseItem>> {
         self.get(&format!(
             "/emby/Persons?UserId={user_id}&SearchTerm={}&Limit={limit}&EnableTotalRecordCount=true&Fields={FIELDS}",
+            encode(term)
+        ))
+        .await
+    }
+
+    /// Movie and show genres or tags (`endpoint` is "Genres" or "Tags")
+    /// whose name matches `term`.
+    pub async fn search_categories(
+        &self,
+        endpoint: &str,
+        user_id: &str,
+        term: &str,
+        limit: usize,
+    ) -> Result<QueryResult<BaseItem>> {
+        self.get(&format!(
+            "/emby/{endpoint}?UserId={user_id}&SearchTerm={}&IncludeItemTypes=Movie,Series&Recursive=true&Limit={limit}&EnableTotalRecordCount=true&Fields={FIELDS}",
             encode(term)
         ))
         .await

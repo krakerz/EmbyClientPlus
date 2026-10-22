@@ -64,6 +64,7 @@ pub const REMOVE: &str = "ecp-remove-symbolic";
 pub const COLLAPSE: &str = "ecp-collapse-symbolic";
 pub const SLEEP: &str = "ecp-sleep-symbolic";
 pub const FILTER: &str = "ecp-filter-symbolic";
+pub const UPCOMING: &str = "ecp-upcoming-symbolic";
 
 /// The placeholder for an item that has no artwork.
 pub fn placeholder(item_type: &str) -> &'static str {
@@ -75,6 +76,8 @@ pub fn placeholder(item_type: &str) -> &'static str {
         "Folder" | "CollectionFolder" | "BoxSet" | "UserView" => FOLDER,
         "MusicArtist" => ARTISTS,
         "Person" => PERSON,
+        "Genre" => GENRES,
+        "Tag" => TAGS,
         "Playlist" => PLAYLIST,
         _ => IMAGE,
     }

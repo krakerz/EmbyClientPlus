@@ -114,8 +114,8 @@ fn played_at(item: &BaseItem) -> Option<glib::DateTime> {
         .ok()
 }
 
-/// "Today", "Yesterday", else "Friday, 3 Oct 2026".
-fn day_label(time: &glib::DateTime, today: Option<&glib::DateTime>) -> String {
+/// "Today", "Yesterday", "Tomorrow", else "Friday, 3 Oct 2026".
+pub(super) fn day_label(time: &glib::DateTime, today: Option<&glib::DateTime>) -> String {
     let same_day = |a: &glib::DateTime, b: &glib::DateTime| {
         a.year() == b.year() && a.day_of_year() == b.day_of_year()
     };
@@ -123,10 +123,12 @@ fn day_label(time: &glib::DateTime, today: Option<&glib::DateTime>) -> String {
         if same_day(time, today) {
             return "Today".into();
         }
-        if let Ok(yesterday) = today.add_days(-1)
-            && same_day(time, &yesterday)
-        {
-            return "Yesterday".into();
+        for (offset, label) in [(-1, "Yesterday"), (1, "Tomorrow")] {
+            if let Ok(day) = today.add_days(offset)
+                && same_day(time, &day)
+            {
+                return label.into();
+            }
         }
     }
     time.format("%A, %-d %b %Y")

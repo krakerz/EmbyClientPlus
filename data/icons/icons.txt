@@ -72,3 +72,4 @@ ecp-download-symbolic           download
 ecp-history-symbolic            clock
 ecp-sleep-symbolic              moon
 ecp-filter-symbolic             funnel
+ecp-upcoming-symbolic           calendar-clock

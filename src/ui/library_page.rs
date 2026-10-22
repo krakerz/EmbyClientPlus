@@ -346,6 +346,26 @@ pub fn person(ui: &Ui, person: &BaseItem) -> adw::NavigationPage {
     )
 }
 
+/// The movies and shows in a genre or tag, across all libraries.
+pub fn category(ui: &Ui, category: &BaseItem) -> adw::NavigationPage {
+    grid_page(ui, &category.name, category_query(category))
+}
+
+/// The movies and shows in a genre or tag (by its `item_type`).
+pub fn category_query(category: &BaseItem) -> ItemQuery {
+    let mut query = ItemQuery {
+        include_types: Some("Movie,Series"),
+        recursive: true,
+        ..Default::default()
+    };
+    if category.item_type == "Tag" {
+        query.tag_id = Some(category.id.clone());
+    } else {
+        query.genre_id = Some(category.id.clone());
+    }
+    query
+}
+
 fn plain(ui: &Ui, folder: &BaseItem) -> adw::NavigationPage {
     let include_types = match folder.collection_type.as_deref() {
         Some("boxsets") => Some("BoxSet"),
@@ -421,6 +441,15 @@ fn tabbed(ui: &Ui, folder: &BaseItem, kind: Kind) -> adw::NavigationPage {
         crate::ui::icons::SUGGESTIONS,
         Box::new(move |ui| suggestions(ui, &suggestions_folder, kind)),
     ));
+    if kind == Kind::Shows {
+        let upcoming_library = library_id.clone();
+        tabs.push((
+            "upcoming",
+            "Upcoming",
+            crate::ui::icons::UPCOMING,
+            Box::new(move |ui| upcoming(ui, &upcoming_library)),
+        ));
+    }
     // Shown only once the library turns out to have any (see `tab_page`).
     let collections = in_library(Some("BoxSet"), true);
     tabs.push((
@@ -1335,21 +1364,7 @@ fn items_label(total: usize) -> String {
 
 /// Genre or tag tiles; each opens a sortable grid of that genre/tag.
 fn chips(ui: &Ui, library_id: &str, item_type: &'static str, kind: Chips) -> gtk::Widget {
-    let flow = gtk::FlowBox::builder()
-        .selection_mode(gtk::SelectionMode::None)
-        .activate_on_single_click(true)
-        .halign(gtk::Align::Center)
-        .homogeneous(true)
-        .min_children_per_line(1)
-        .max_children_per_line(8)
-        .row_spacing(16)
-        .column_spacing(16)
-        .margin_top(18)
-        .margin_bottom(18)
-        .margin_start(18)
-        .margin_end(18)
-        .valign(gtk::Align::Start)
-        .build();
+    let flow = super::category_tile::flow(ui);
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.append(&loading());
     let scrolled = gtk::ScrolledWindow::builder()
@@ -1409,17 +1424,8 @@ fn chips(ui: &Ui, library_id: &str, item_type: &'static str, kind: Chips) -> gtk
             }
             flow.append(&super::category_tile::tile(&ui, &entry.name, query));
         }
+        super::category_tile::fit(&flow, flow.observe_children().n_items() as usize);
         content.append(&flow);
-    });
-    flow.connect_child_activated({
-        let weak = ui.downgrade();
-        move |_, child| {
-            let Some(ui) = weak.upgrade() else { return };
-            if let Some((name, query)) = super::category_tile::target(child) {
-                let grid = sortable_grid(&ui, query);
-                ui.push(&toolbar_page(&name, &adw::HeaderBar::new(), &grid));
-            }
-        }
     });
     scrolled.upcast()
 }
@@ -1692,6 +1698,97 @@ fn suggestions(ui: &Ui, folder: &BaseItem, kind: Kind) -> gtk::Widget {
         }
     });
     scrolled.upcast()
+}
+
+const UPCOMING_LIMIT: usize = 100;
+
+/// Episodes that haven't aired yet, one row per air day.
+fn upcoming(ui: &Ui, library_id: &str) -> gtk::Widget {
+    let content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(24)
+        .margin_top(12)
+        .margin_bottom(24)
+        .build();
+    content.append(&loading());
+    let scrolled = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .child(&content)
+        .vexpand(true)
+        .build();
+
+    let client = ui.client();
+    let user_id = ui.user_id();
+    let library_id = library_id.to_string();
+    let weak = ui.downgrade();
+    glib::spawn_future_local(async move {
+        let result = spawn_tokio(async move {
+            client
+                .upcoming(&user_id, Some(&library_id), UPCOMING_LIMIT)
+                .await
+        })
+        .await;
+        let Some(ui) = weak.upgrade() else { return };
+        clear(&content);
+        let items = match result {
+            Ok(items) => items,
+            Err(e) => {
+                ui.report_error("Could not load upcoming episodes", &e);
+                return;
+            }
+        };
+        if items.is_empty() {
+            content.append(
+                &adw::StatusPage::builder()
+                    .icon_name(crate::ui::icons::UPCOMING)
+                    .title("Nothing upcoming")
+                    .description("New episodes of your shows appear here before they air")
+                    .vexpand(true)
+                    .build(),
+            );
+            return;
+        }
+        let today = glib::DateTime::now_local().ok();
+        let mut days: Vec<(String, Vec<BaseItem>)> = Vec::new();
+        for item in items {
+            let day = air_date(&item)
+                .map(|date| super::history::day_label(&date, today.as_ref()))
+                .unwrap_or_else(|| "Date unknown".into());
+            match days.last_mut() {
+                Some((last, group)) if *last == day => group.push(item),
+                _ => days.push((day, vec![item])),
+            }
+        }
+        for (day, group) in days {
+            content.append(&row(
+                &ui,
+                &day,
+                &group,
+                Shape::for_episodes(),
+                Click::Open,
+                More::None,
+            ));
+        }
+    });
+    scrolled.upcast()
+}
+
+/// The day an episode airs. Emby stores air dates as midnight UTC, so the
+/// date is taken as is: converting to local time would move it a day back
+/// west of UTC.
+fn air_date(item: &BaseItem) -> Option<glib::DateTime> {
+    let text = item.premiere_date.as_deref()?;
+    let utc = glib::DateTime::from_iso8601(text, Some(&glib::TimeZone::utc())).ok()?;
+    glib::DateTime::new(
+        &glib::TimeZone::local(),
+        utc.year(),
+        utc.month(),
+        utc.day_of_month(),
+        0,
+        0,
+        0.0,
+    )
+    .ok()
 }
 
 #[cfg(test)]
