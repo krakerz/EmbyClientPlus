@@ -485,6 +485,7 @@ impl Player {
     /// filter SVP already added; turning it on lets SVP Manager find us.
     pub fn set_svp(self, socket: &str, enabled: bool) -> Result<()> {
         SVP_ON.store(enabled, std::sync::atomic::Ordering::Relaxed);
+        self.update_video_sync()?;
         if enabled {
             self.switch_hwdec(HWDEC_DIRECT, HWDEC_COPY);
             self.set("input-ipc-server", socket)
@@ -582,17 +583,29 @@ impl Player {
     /// plain playback, though not real interpolation like SVP.
     pub fn set_smooth_motion(self, enabled: bool) -> Result<()> {
         SMOOTH_MOTION.store(enabled, std::sync::atomic::Ordering::Relaxed);
-        let (interpolation, video_sync) = if enabled {
-            ("yes", "display-resample")
-        } else {
-            ("no", "audio")
-        };
-        self.set("interpolation", interpolation)?;
-        self.set("video-sync", video_sync)?;
+        self.set("interpolation", flag(enabled))?;
+        self.update_video_sync()?;
         if enabled {
             self.set("tscale", "oversample")?;
         }
         Ok(())
+    }
+
+    /// Times frames to the display's refresh (see `set_display_fps`) for
+    /// smooth motion and for SVP, whose ~120 fps output otherwise drops
+    /// frames against a 120 Hz display; mpv stretches audio slightly to match.
+    fn update_video_sync(self) -> Result<()> {
+        let display = self.smooth_motion() || SVP_ON.load(std::sync::atomic::Ordering::Relaxed);
+        self.set(
+            "video-sync",
+            if display { "display-resample" } else { "audio" },
+        )
+    }
+
+    /// The refresh rate of the monitor showing the video: libmpv can't
+    /// detect it, and display-synced timing needs it.
+    pub fn set_display_fps(self, fps: f64) -> Result<()> {
+        self.set("display-fps-override", fps)
     }
 
     /// Scaling and processing per Preferences (`video`). Auto puts back
