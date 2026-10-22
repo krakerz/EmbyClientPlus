@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.28.0] — 2026-10-23
+
+### Changed
+- With SVP on, video is timed to the monitor's refresh rate, and SVP can see that rate (for its "to screen refresh rate" target).
+
 ## [1.27.0] — 2026-10-22
 
 ### Fixed

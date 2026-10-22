@@ -82,6 +82,8 @@ struct RenderState {
     get_integerv: Cell<Option<GetIntegervFn>>,
     /// Draws the bar fill; `None` if its shaders couldn't be built.
     compositor: RefCell<Option<Compositor>>,
+    /// mpv drew a frame GTK hasn't presented yet (see `report_swap`).
+    rendered: Cell<bool>,
 }
 
 /// A GLArea that libmpv draws video frames into via its OpenGL render API.
@@ -114,6 +116,20 @@ pub fn new(player: Player) -> gtk::GLArea {
                     state.compositor.replace(Some(compositor));
                 }
                 Err(e) => tracing::warn!("bar fill unavailable: {e:#}"),
+            }
+            track_display_fps(player, area);
+            // Tells mpv when each frame it drew went out, so display-synced
+            // timing follows the real refresh. Once per drawn frame only:
+            // mpv expects it consistently.
+            if let Some(clock) = area.frame_clock() {
+                let state = state.clone();
+                clock.connect_after_paint(move |_| {
+                    if state.rendered.replace(false)
+                        && let Some(context) = state.context.borrow().as_ref()
+                    {
+                        context.report_swap();
+                    }
+                });
             }
         }
     });
@@ -153,6 +169,7 @@ pub fn new(player: Player) -> gtk::GLArea {
                         }
                     }
                 }
+                state.rendered.set(true);
                 if crate::smoke::pending() {
                     crate::smoke::frame(player, gl_info);
                 }
@@ -170,6 +187,26 @@ pub fn new(player: Player) -> gtk::GLArea {
     });
 
     area
+}
+
+/// Keeps mpv's display rate at the refresh rate of the monitor the window
+/// is on, following it to other monitors.
+fn track_display_fps(player: Player, area: &gtk::GLArea) {
+    fn apply(player: Player, monitor: &gtk::gdk::Monitor) {
+        let millihertz = monitor.refresh_rate();
+        if millihertz > 0
+            && let Err(e) = player.set_display_fps(f64::from(millihertz) / 1000.0)
+        {
+            tracing::warn!("{e:#}");
+        }
+    }
+    let Some(surface) = area.native().and_then(|native| native.surface()) else {
+        return;
+    };
+    if let Some(monitor) = area.display().monitor_at_surface(&surface) {
+        apply(player, &monitor);
+    }
+    surface.connect_enter_monitor(move |_, monitor| apply(player, monitor));
 }
 
 /// Re-applies the SVP padding fit after the video's geometry changed.
