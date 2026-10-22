@@ -72,6 +72,7 @@ fn main() -> glib::ExitCode {
             return glib::ExitCode::from(2);
         }
     };
+    player::video_area::prefer_gl_renderer();
     gamescope::prepare_environment();
     svp::expose_vapoursynth();
     logging::init();

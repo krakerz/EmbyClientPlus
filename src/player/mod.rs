@@ -158,16 +158,27 @@ pub struct Track {
 /// Smallest and largest subtitle size the menu allows.
 pub const SUB_SCALE_RANGE: (f64, f64) = (0.5, 3.0);
 
-/// Hardware decoders, in order (copy-back: SVP needs frames in RAM).
-/// Windows: D3D11, which every GPU there has; macOS: VideoToolbox; Linux:
-/// VA-API (see below).
-const HWDEC: &str = if cfg!(windows) {
+/// Hardware decoders, in order, while SVP is on (copy-back: SVP needs
+/// frames in RAM). Windows: D3D11, which every GPU there has; macOS:
+/// VideoToolbox; Linux: VA-API (see below).
+const HWDEC_COPY: &str = if cfg!(windows) {
     "d3d11va-copy,auto-copy"
 } else if cfg!(target_os = "macos") {
     "videotoolbox-copy,auto-copy"
 } else {
     "vaapi-copy,auto-copy"
 };
+/// Without SVP: frames stay on the GPU. mpv skips the first entry when
+/// the render context has no interop for it (Windows: GTK's WGL has none).
+const HWDEC_DIRECT: &str = if cfg!(windows) {
+    "d3d11va,d3d11va-copy,auto-copy"
+} else if cfg!(target_os = "macos") {
+    "videotoolbox,videotoolbox-copy,auto-copy"
+} else {
+    "vaapi,vaapi-copy,auto-copy"
+};
+/// Whether SVP's socket is open, i.e. which of the two above applies.
+static SVP_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Options Preferences → Video sets, and their values when mpv started
 /// (mpv's defaults or the user's mpv.conf), for the Auto quality.
@@ -223,7 +234,7 @@ impl Player {
             // VA-API first: mpv's auto order now tries Vulkan video first,
             // whose decoder faults on some AMD cards (RDNA4, 10-bit), and
             // with SVP's ROCm OpenCL loaded a GPU fault aborts the app.
-            init.set_property("hwdec", HWDEC)?;
+            init.set_property("hwdec", HWDEC_COPY)?;
             init.set_property("hr-seek-framedrop", "no")?;
             // We pick tracks ourselves once the file is loaded.
             init.set_property("sub-auto", "no")?;
@@ -473,7 +484,9 @@ impl Player {
     /// (its default is /tmp/mpvsocket). Turning it off also drops the
     /// filter SVP already added; turning it on lets SVP Manager find us.
     pub fn set_svp(self, socket: &str, enabled: bool) -> Result<()> {
+        SVP_ON.store(enabled, std::sync::atomic::Ordering::Relaxed);
         if enabled {
+            self.switch_hwdec(HWDEC_DIRECT, HWDEC_COPY);
             self.set("input-ipc-server", socket)
         } else {
             // Clearing the option only closes the listening socket; mpv
@@ -484,8 +497,23 @@ impl Player {
             if dropped > 0 {
                 tracing::info!("disconnected {dropped} SVP client(s)");
             }
+            // Before the filter goes: mpv restarts the decoder with a seek to
+            // the current frame, which it skips while the filter chain is
+            // being rebuilt; AV1 then fails until the next keyframe and
+            // drops to software decoding.
+            self.switch_hwdec(HWDEC_COPY, HWDEC_DIRECT);
             self.remove_svp_filter();
             Ok(())
+        }
+    }
+
+    /// Takes effect at once (mpv reinits the decoder). Software decoding and
+    /// a user's own hwdec are left alone.
+    fn switch_hwdec(self, from: &str, to: &str) {
+        if self.mpv.get_property::<String>("hwdec").ok().as_deref() == Some(from)
+            && let Err(e) = self.set("hwdec", to)
+        {
+            tracing::warn!("{e:#}");
         }
     }
 
@@ -635,7 +663,15 @@ impl Player {
         };
         let hwdec = if video.software_decoding {
             "no".into()
+        } else if [HWDEC_COPY, HWDEC_DIRECT].contains(&initial("hwdec").as_str()) {
+            // Ours (`set_svp` may have switched it before this first ran).
+            if SVP_ON.load(std::sync::atomic::Ordering::Relaxed) {
+                HWDEC_COPY.into()
+            } else {
+                HWDEC_DIRECT.into()
+            }
         } else {
+            // The user's mpv.conf.
             initial("hwdec")
         };
         let values = [

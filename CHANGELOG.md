@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.27.0] — 2026-10-22
+
+### Fixed
+- Linux: with SVP off, video now decodes straight to the GPU instead of copying every frame through system memory, lowering CPU use and smoothing playback.
+- Video playback uses far less CPU on recent GTK versions (about 30% of a core down to a few percent at 1080p).
+
 ## [1.26.0] — 2026-10-22
 
 ### Added
