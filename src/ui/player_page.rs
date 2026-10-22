@@ -1414,6 +1414,12 @@ impl Inner {
             (handlers.toast)("Sleep timer: playback stopped");
         }
         self.pop();
+        // Game Mode never idles into sleep on its own; the delay lets the
+        // stop report reach the server first.
+        #[cfg(target_os = "linux")]
+        if crate::gamescope::detected() {
+            glib::timeout_add_seconds_local_once(5, crate::gamescope::suspend);
+        }
     }
 
     /// The sleep button's label and tooltip; cheap enough for every tick.
@@ -2218,7 +2224,6 @@ impl Inner {
                 .unwrap_or_default()
                 .playback
                 .keep_screen_on;
-        #[cfg(any(windows, target_os = "macos"))]
         crate::awake::set(wanted);
         let mut held = self.screen_inhibit.borrow_mut();
         if wanted == held.is_some() {

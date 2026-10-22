@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.25.0] — 2026-10-22
+
+### Fixed
+- Steam Deck Game Mode: "Keep the screen on" now stops Steam dimming the screen and sleeping the device mid-video.
+- Steam Deck Game Mode: the sleep timer now puts the device to sleep once playback stops.
+
 ## [1.24.0] — 2026-10-22
 
 ### Added
