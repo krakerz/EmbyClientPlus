@@ -1,5 +1,5 @@
-# Shared by packaging/embyclientplus.sh (archive, main AppImage) and
-# packaging/appimage/svp.src.hook (compat AppImage). Sourced, POSIX sh.
+# Used by packaging/appimage/svp.src.hook: the compat AppImage has no
+# VapourSynth stand-in, so libmpv loads SVP's library directly. Sourced, POSIX sh.
 #
 # svp_detect: succeeds when SVP is installed and sets
 #   SVP_LIB_PATH  SVP's VapourSynth (as libvsscript.so) and its Python 3.12

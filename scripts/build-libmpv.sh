@@ -103,17 +103,7 @@ if ! grep -q vapoursynth <<<"$vf_list"; then
 fi
 echo "libmpv with vapoursynth installed to $PREFIX"
 
-# SVP's svpflow plugins use VapourSynth API 3, which system VapourSynth R74+
-# dropped — so at runtime our libmpv must load SVP's bundled R73 instead.
-# libmpv links against the soname libvsscript.so (the system stub's), so
-# expose SVP's library under that name; build.rs puts this dir on the rpath.
-SVP_DIR="${SVP_DIR:-$HOME/SVP4}"
-SVP_VS_DIR="$THIRD_PARTY/svp-vapoursynth"
-if [ -e "$SVP_DIR/mpv/libvapoursynth-script.so.0" ]; then
-    mkdir -p "$SVP_VS_DIR"
-    ln -sfn "$SVP_DIR/mpv/libvapoursynth-script.so.0" "$SVP_VS_DIR/libvsscript.so"
-    ln -sfn "$SVP_DIR/mpv/libvapoursynth.so" "$SVP_VS_DIR/libvapoursynth.so"
-    echo "linked SVP's VapourSynth from $SVP_DIR into $SVP_VS_DIR"
-else
-    echo "warning: SVP not found at $SVP_DIR — SVP interpolation won't work" >&2
-fi
+# At run time libmpv's libvsscript.so is our stand-in (packaging/vsshim,
+# compiled by build.rs): it loads SVP's VapourSynth R73, which SVP's
+# svpflow plugins need (API 3, dropped in R74+), or with the app's "System"
+# preference the system's.

@@ -115,6 +115,205 @@ pub fn manager_running() -> bool {
     })
 }
 
+/// What the VapourSynth stand-in (packaging/vsshim) reads: the VSScript
+/// library to load, and one to load instead if that one fails.
+const VSSCRIPT_VAR: &str = "EMBYCLIENTPLUS_VSSCRIPT";
+#[cfg(not(target_os = "macos"))]
+const FALLBACK_VAR: &str = "EMBYCLIENTPLUS_VSSCRIPT_FALLBACK";
+
+/// SVP's VSScript library on Linux.
+#[cfg(target_os = "linux")]
+fn svp_vsscript() -> Option<PathBuf> {
+    install_dir()
+        .map(|dir| dir.join("mpv/libvapoursynth-script.so.0"))
+        .filter(|path| path.is_file())
+}
+
+/// Where an installed (non-SVP) VapourSynth's VSScript library may be:
+/// distro packages (pip style, or the classic soname), then
+/// `pip install --user`.
+#[cfg(target_os = "linux")]
+fn system_vsscript_candidates() -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = [
+        "/usr/lib/libvsscript.so",
+        "/usr/lib64/libvsscript.so",
+        "/usr/local/lib/libvsscript.so",
+        "/usr/lib/x86_64-linux-gnu/libvsscript.so",
+        "/usr/lib/libvapoursynth-script.so.0",
+        "/usr/lib64/libvapoursynth-script.so.0",
+        "/usr/local/lib/libvapoursynth-script.so.0",
+        "/usr/lib/x86_64-linux-gnu/libvapoursynth-script.so.0",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .collect();
+    if let Some(lib) = directories::BaseDirs::new().map(|dirs| dirs.home_dir().join(".local/lib"))
+        && let Ok(entries) = std::fs::read_dir(lib)
+    {
+        candidates.extend(entries.filter_map(Result::ok).map(|entry| {
+            entry
+                .path()
+                .join("site-packages/vapoursynth/libvsscript.so")
+        }));
+    }
+    candidates
+}
+
+/// Where a separately installed VapourSynth's VSScript.dll may be: the
+/// VapourSynth installer's folder, then pip installs into python.org's
+/// Pythons (per user, all users, `pip install --user`).
+#[cfg(windows)]
+fn system_vsscript_candidates() -> Vec<PathBuf> {
+    let env_dir = |var: &str| std::env::var_os(var).map(PathBuf::from);
+    let pythons = |root: Option<PathBuf>, inner: &str| -> Vec<PathBuf> {
+        root.and_then(|root| std::fs::read_dir(root).ok())
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+                    .starts_with("python")
+            })
+            .map(|entry| entry.path().join(inner))
+            .collect()
+    };
+    let mut candidates = Vec::new();
+    if let Some(dir) = env_dir("ProgramFiles") {
+        candidates.push(dir.join(r"VapourSynth\core\VSScript.dll"));
+        candidates.push(dir.join(r"VapourSynth\VSScript.dll"));
+    }
+    let site = r"Lib\site-packages\vapoursynth\VSScript.dll";
+    candidates.extend(pythons(
+        env_dir("LOCALAPPDATA").map(|d| d.join(r"Programs\Python")),
+        site,
+    ));
+    candidates.extend(pythons(env_dir("ProgramFiles"), site));
+    candidates.extend(pythons(
+        env_dir("APPDATA").map(|d| d.join("Python")),
+        r"site-packages\vapoursynth\VSScript.dll",
+    ));
+    candidates
+}
+
+/// The installed (non-SVP) VapourSynth's VSScript library. On Linux it is
+/// resolved to its real path, because pip-style VapourSynth looks itself
+/// up in vapoursynth.toml by the path it was loaded from and repairs a
+/// stale entry only for that one.
+#[cfg(not(target_os = "macos"))]
+pub fn system_vapoursynth() -> Option<PathBuf> {
+    let svp = install_dir();
+    #[cfg(target_os = "linux")]
+    let svp = svp.and_then(|dir| dir.canonicalize().ok());
+    system_vsscript_candidates()
+        .into_iter()
+        .filter_map(|path| {
+            #[cfg(target_os = "linux")]
+            let path = path.canonicalize().ok()?;
+            path.is_file().then_some(path)
+        })
+        .find(|path| svp.as_ref().is_none_or(|svp| !path.starts_with(svp)))
+}
+
+/// Why the System VapourSynth choice can't be used here, if it can't.
+#[cfg(not(target_os = "macos"))]
+pub fn system_vapoursynth_unavailable() -> Option<&'static str> {
+    #[cfg(target_os = "linux")]
+    if !shim_present() {
+        return Some("This build loads SVP's VapourSynth directly");
+    }
+    if system_vapoursynth().is_none() {
+        return Some(if cfg!(windows) {
+            "No VapourSynth found besides SVP's"
+        } else {
+            "No system VapourSynth found (install your distribution's vapoursynth package)"
+        });
+    }
+    None
+}
+
+/// The library the System preference picks at startup, when it's set and usable.
+#[cfg(not(target_os = "macos"))]
+fn system_vapoursynth_choice() -> Option<PathBuf> {
+    let source = Settings::load().unwrap_or_default().frame_gen.vapoursynth;
+    if source != crate::config::VapourSynthSource::System {
+        return None;
+    }
+    #[cfg(target_os = "linux")]
+    if !shim_present() {
+        return None;
+    }
+    system_vapoursynth()
+}
+
+#[cfg(target_os = "linux")]
+type LoadedFn = unsafe extern "C" fn() -> *const libc::c_char;
+
+/// The stand-in's report function, when libmpv got the stand-in. The
+/// compat AppImage hands libmpv SVP's library directly.
+#[cfg(target_os = "linux")]
+fn shim_loaded_fn() -> Option<LoadedFn> {
+    // SAFETY: a NUL-terminated name, looked up in the global scope.
+    let symbol =
+        unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"embyclientplus_vsshim_loaded".as_ptr()) };
+    // SAFETY: packaging/vsshim defines it as `const char *(void)`.
+    (!symbol.is_null())
+        .then(|| unsafe { std::mem::transmute::<*mut libc::c_void, LoadedFn>(symbol) })
+}
+
+#[cfg(target_os = "linux")]
+fn shim_present() -> bool {
+    shim_loaded_fn().is_some()
+}
+
+/// The VSScript library the stand-in loaded, once SVP's filter has run in
+/// this session, for Preferences.
+#[cfg(target_os = "linux")]
+pub fn active_vapoursynth() -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let loaded = shim_loaded_fn()?;
+    // SAFETY: NULL, or a NUL-terminated string the stand-in never changes
+    // after publishing it.
+    let path = unsafe { loaded() };
+    if path.is_null() {
+        return None;
+    }
+    // SAFETY: checked non-NULL above.
+    let bytes = unsafe { std::ffi::CStr::from_ptr(path) }.to_bytes();
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
+}
+
+#[cfg(windows)]
+pub fn active_vapoursynth() -> Option<PathBuf> {
+    None
+}
+
+/// Linux: SVP's VSScript library, or with the System preference the
+/// installed one, with SVP's as the stand-in's fallback.
+#[cfg(target_os = "linux")]
+fn expose_vapoursynth_linux() {
+    if std::env::var_os(VSSCRIPT_VAR).is_some() {
+        return;
+    }
+    let svp = svp_vsscript();
+    // SAFETY (all): called first thing in main, while single-threaded.
+    match system_vapoursynth_choice() {
+        Some(system) => unsafe {
+            std::env::set_var(VSSCRIPT_VAR, system);
+            if let Some(svp) = svp {
+                std::env::set_var(FALLBACK_VAR, svp);
+            }
+        },
+        None => {
+            if let Some(svp) = svp {
+                unsafe { std::env::set_var(VSSCRIPT_VAR, svp) };
+            }
+        }
+    }
+}
+
 /// VapourSynth's scripting library as SVP ships it.
 #[cfg(windows)]
 const VSSCRIPT_NAMES: &[&str] = &["VSScript.dll"];
@@ -126,15 +325,17 @@ const VSSCRIPT_NAMES: &[&str] = &[
     "libvsscript.dylib",
 ];
 
-/// Tells the bundled VapourSynth stand-in (packaging/vsshim) where SVP's
-/// own VSScript library is, so libmpv's vapoursynth filter uses it. Linux
-/// builds link SVP's copy directly (build.rs, the launcher script).
+/// Tells the bundled VapourSynth stand-in (packaging/vsshim) which VSScript
+/// library libmpv's vapoursynth filter uses: SVP's own, or with the System
+/// preference (Linux, Windows) the installed one, with SVP's as the fallback.
 ///
 /// Must run before libmpv initialises and before any other thread starts.
 pub fn expose_vapoursynth() {
+    #[cfg(target_os = "linux")]
+    expose_vapoursynth_linux();
     #[cfg(not(target_os = "linux"))]
     {
-        const VAR: &str = "EMBYCLIENTPLUS_VSSCRIPT";
+        const VAR: &str = VSSCRIPT_VAR;
         // mpv builds with VapourSynth 74+ support (Homebrew's) load VSScript
         // at run time from VSSCRIPT_PATH, not through the stand-in; one the
         // user set wins.
@@ -142,6 +343,8 @@ pub fn expose_vapoursynth() {
         if std::env::var_os(VAR).is_some() {
             return;
         }
+        #[cfg(windows)]
+        let system = system_vapoursynth_choice();
         let user_set = std::env::var_os(MPV_VAR)
             .map(PathBuf::from)
             .filter(|path| path.is_file());
@@ -153,9 +356,14 @@ pub fn expose_vapoursynth() {
             Some(library) => {
                 // SVP's VapourSynth (pip style) finds Python by searching
                 // for python.exe on the program's folder, then PATH; SVP's
-                // own mpv sits beside it, we don't. So its folder goes on PATH.
+                // own mpv sits beside it, we don't. So its folder goes on PATH,
+                // unless the installed VapourSynth comes first: then that one
+                // must find its own Python, and the stand-in adds SVP's folder
+                // only if it falls back.
                 #[cfg(windows)]
-                if let Some(dir) = library.parent() {
+                if system.is_none()
+                    && let Some(dir) = library.parent()
+                {
                     let mut paths = vec![dir.to_path_buf()];
                     paths.extend(std::env::split_paths(
                         &std::env::var_os("PATH").unwrap_or_default(),
@@ -169,10 +377,24 @@ pub fn expose_vapoursynth() {
                 // SAFETY: called first thing in main, while single-threaded.
                 unsafe {
                     std::env::set_var(MPV_VAR, &library);
-                    std::env::set_var(VAR, library);
+                    std::env::set_var(VAR, &library);
+                }
+                #[cfg(windows)]
+                if let Some(system) = system {
+                    // SAFETY: as above.
+                    unsafe {
+                        std::env::set_var(VAR, system);
+                        std::env::set_var(FALLBACK_VAR, &library);
+                    }
                 }
             }
             None => {
+                #[cfg(windows)]
+                if let Some(system) = system {
+                    // SAFETY: as above.
+                    unsafe { std::env::set_var(VAR, system) };
+                    return;
+                }
                 let looked = dirs
                     .iter()
                     .map(|d| d.display().to_string())
@@ -190,8 +412,8 @@ pub fn expose_vapoursynth() {
 const NOT_FOUND_VAR: &str = "EMBYCLIENTPLUS_VSSCRIPT_SEARCHED";
 
 /// When no VapourSynth was found for SVP at startup, what to do about it
-/// (SVP attaches but can't interpolate without one). Linux builds link
-/// SVP's own copy, so there it's never missing at run time.
+/// (SVP attaches but can't interpolate without one). On Linux SVP not
+/// being installed is reported elsewhere.
 pub fn vapoursynth_hint() -> Option<&'static str> {
     #[cfg(target_os = "linux")]
     if MANAGER_EXITED_AT_ONCE.load(std::sync::atomic::Ordering::Relaxed) {
@@ -211,23 +433,41 @@ pub fn vapoursynth_hint() -> Option<&'static str> {
 /// Says in the log which VapourSynth SVP will get (once logging is up),
 /// and points the VapourSynth stand-in's own log next to ours.
 pub fn log_vapoursynth() {
-    #[cfg(not(target_os = "linux"))]
-    {
-        if let Some(dir) = crate::logging::log_dir() {
-            let path = dir.join("vapoursynth.log");
-            let _ = std::fs::remove_file(&path);
-            // SAFETY: still at startup, before libmpv or any other thread
-            // reads the environment.
-            unsafe { std::env::set_var("EMBYCLIENTPLUS_VSSHIM_LOG", path) };
-        }
-        if let Some(library) = std::env::var_os("EMBYCLIENTPLUS_VSSCRIPT") {
-            tracing::info!("VapourSynth for SVP: {}", PathBuf::from(library).display());
-        } else if let Some(searched) = std::env::var_os(NOT_FOUND_VAR) {
+    #[cfg(target_os = "linux")]
+    if !shim_present() {
+        tracing::info!("VapourSynth for SVP: SVP's, linked directly (no stand-in in this build)");
+        return;
+    }
+    if let Some(dir) = crate::logging::log_dir() {
+        let path = dir.join("vapoursynth.log");
+        let _ = std::fs::remove_file(&path);
+        // SAFETY: still at startup, before libmpv or any other thread
+        // reads the environment.
+        unsafe { std::env::set_var("EMBYCLIENTPLUS_VSSHIM_LOG", path) };
+    }
+    #[cfg(not(target_os = "macos"))]
+    if let Some(fallback) = std::env::var_os(FALLBACK_VAR) {
+        tracing::info!(
+            "VapourSynth for SVP: the system's, {} (SVP's {} if it fails; see vapoursynth.log)",
+            PathBuf::from(std::env::var_os(VSSCRIPT_VAR).unwrap_or_default()).display(),
+            PathBuf::from(fallback).display()
+        );
+        return;
+    }
+    if let Some(library) = std::env::var_os(VSSCRIPT_VAR) {
+        tracing::info!("VapourSynth for SVP: {}", PathBuf::from(library).display());
+    } else {
+        #[cfg(not(target_os = "linux"))]
+        if let Some(searched) = std::env::var_os(NOT_FOUND_VAR) {
             tracing::warn!(
                 "no VapourSynth for SVP (VSScript library not found in {}); SVP can't interpolate",
                 searched.to_string_lossy()
             );
         }
+        #[cfg(target_os = "linux")]
+        tracing::warn!(
+            "no VapourSynth for SVP (SVP's VSScript library not found); SVP can't interpolate"
+        );
     }
 }
 

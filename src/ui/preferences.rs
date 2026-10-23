@@ -4,6 +4,8 @@
 use adw::prelude::*;
 use gtk::{gio, glib};
 
+#[cfg(not(target_os = "macos"))]
+use crate::config::VapourSynthSource;
 use crate::config::{
     DEFAULT_SVP_SOCKET, EpisodeArt, FrameGenBackend, FullscreenMode, Settings, Theme,
     TrailerQuality, VideoQuality,
@@ -96,6 +98,8 @@ fn show_with(parent: &impl IsA<gtk::Widget>, server: bool) {
     playback.add(&smooth);
     playback.add(&svp_folder_row(parent.upcast_ref()));
     playback.add(&svp_socket_row(&settings));
+    #[cfg(not(target_os = "macos"))]
+    playback.add(&vapoursynth_row(&settings));
 
     let labels: Vec<String> = QUALITIES.iter().map(|q| q.label()).collect();
     let quality = adw::ComboRow::builder()
@@ -1359,6 +1363,40 @@ fn svp_socket_row(settings: &Settings) -> adw::EntryRow {
     row.connect_apply(|row| {
         let socket = row.text().trim().to_string();
         save(|s| s.frame_gen.svp_socket = socket);
+    });
+    row
+}
+
+/// Which VapourSynth SVP's filter runs on. Read once at startup (a running
+/// app can't swap its Python), so a change waits for a restart.
+#[cfg(not(target_os = "macos"))]
+fn vapoursynth_row(settings: &Settings) -> adw::ComboRow {
+    const CHOICES: [VapourSynthSource; 2] = [VapourSynthSource::Builtin, VapourSynthSource::System];
+    let current = settings.frame_gen.vapoursynth;
+    let row = choice_row(
+        "VapourSynth",
+        &["SVP's (built in)", "System"],
+        CHOICES.iter().position(|c| *c == current).unwrap_or(0),
+    );
+    // Paths in the subtitle aren't markup.
+    row.set_use_markup(false);
+    let mut subtitle = match crate::svp::system_vapoursynth_unavailable() {
+        Some(reason) => {
+            row.set_sensitive(false);
+            format!("{reason}; SVP's is used")
+        }
+        None => "System uses the installed VapourSynth, or SVP's if that one fails. \
+                 Takes effect after restarting the app"
+            .to_string(),
+    };
+    if let Some(active) = crate::svp::active_vapoursynth() {
+        subtitle.push_str(&format!("\nIn use now: {}", active.display()));
+    }
+    row.set_subtitle(&subtitle);
+    row.connect_selected_notify(|row| {
+        if let Some(&chosen) = CHOICES.get(row.selected() as usize) {
+            save(|s| s.frame_gen.vapoursynth = chosen);
+        }
     });
     row
 }

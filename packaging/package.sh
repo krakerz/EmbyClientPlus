@@ -24,21 +24,21 @@ if readelf -d "$BIN" | grep -q "$REPO_ROOT"; then
     exit 1
 fi
 
-# The VapourSynth scripting library libmpv links against; only a stand-in
-# so the app starts without SVP (SVP's own copy is used when present).
-fallback_vs="$(readlink -f /usr/lib/libvsscript.so 2>/dev/null || true)"
-[ -n "$fallback_vs" ] && [ -e "$fallback_vs" ] || { echo "no libvsscript.so to bundle" >&2; exit 1; }
+# libmpv links libvsscript.so: our stand-in (packaging/vsshim), which loads
+# SVP's VapourSynth or the system's at run time, as the app tells it.
+vsshim_dir="$(mktemp -d)"
+cc -shared -fPIC -O2 -Wall -Wl,-soname,libvsscript.so -o "$vsshim_dir/libvsscript.so" \
+    packaging/vsshim/vsshim.c -ldl
 
 rm -rf "$DIST"
 mkdir -p "$DIST" "$TOOLS"
 
-# Shared layout: bin/ (launcher + binary), lib/ (libmpv + fallback).
+# Shared layout: bin/ (launcher + binary), lib/ (libmpv + VapourSynth stand-in).
 stage() {
     local root="$1"
     install -Dm755 "$BIN" "$root/bin/embyclientplus-bin"
     install -Dm755 packaging/embyclientplus.sh "$root/bin/embyclientplus"
-    install -Dm755 "$fallback_vs" "$root/lib/vapoursynth-fallback/libvsscript.so"
-    install -Dm755 packaging/svp-detect.sh "$root/lib/svp-detect.sh"
+    install -Dm755 "$vsshim_dir/libvsscript.so" "$root/lib/vsshim/libvsscript.so"
 }
 
 # 1. Plain-binary archive with install/uninstall scripts.
