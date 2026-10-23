@@ -633,6 +633,10 @@ pub struct FrameGenSettings {
     /// mpv's own frame blending when SVP isn't interpolating.
     #[serde(default)]
     pub smooth_without_svp: bool,
+    /// Which VapourSynth SVP's filter runs on (Linux, Windows). Read once
+    /// at startup: a running app can't swap its Python.
+    #[serde(default)]
+    pub vapoursynth: VapourSynthSource,
 }
 
 /// What SVP's own mpv setup uses on each OS: a named pipe on Windows
@@ -654,6 +658,7 @@ impl Default for FrameGenSettings {
             svp_socket: default_svp_socket(),
             auto_start_svp: None,
             smooth_without_svp: false,
+            vapoursynth: VapourSynthSource::default(),
         }
     }
 }
@@ -682,6 +687,17 @@ pub enum FrameGenBackend {
     /// The default: SVP attaches whenever SVP Manager is running.
     #[default]
     Svp,
+}
+
+/// Where libmpv's VapourSynth comes from (packaging/vsshim picks it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VapourSynthSource {
+    /// SVP's own copy, which its plugins are built against.
+    #[default]
+    Builtin,
+    /// The one installed on the system, with SVP's as the fallback.
+    System,
 }
 
 fn default_bar_fill() -> String {
@@ -829,6 +845,16 @@ mod tests {
         "#;
         let parsed: Settings = toml::from_str(legacy).unwrap();
         assert_eq!(parsed.frame_gen.default_backend, FrameGenBackend::Off);
+    }
+
+    #[test]
+    fn vapoursynth_source_defaults_to_builtin() {
+        let parsed: Settings = toml::from_str("[frame_gen]\ndefault_backend = \"svp\"\n").unwrap();
+        assert_eq!(parsed.frame_gen.vapoursynth, VapourSynthSource::Builtin);
+        let parsed: Settings = toml::from_str("[frame_gen]\nvapoursynth = \"system\"\n").unwrap();
+        assert_eq!(parsed.frame_gen.vapoursynth, VapourSynthSource::System);
+        let saved = toml::to_string(&parsed).unwrap();
+        assert!(saved.contains("vapoursynth = \"system\""));
     }
 
     #[test]
