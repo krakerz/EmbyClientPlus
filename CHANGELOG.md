@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.29.0] — 2026-10-23
+
+### Added
+- Preferences: choose between SVP's built-in VapourSynth and the system's (Linux, Windows); takes effect after a restart and falls back to SVP's if the system one fails.
+
 ## [1.28.0] — 2026-10-23
 
 ### Changed
