@@ -43,6 +43,34 @@ gridview.poster-grid > child {
     padding: 4px 12px;
     font-weight: bold;
 }
+/* The sync markers (AL / MAL / Kitsu / Trakt) beside an episode's icons or
+   action buttons: a small pill like the origin badge. No margins: the
+   container's own spacing sets the gaps. */
+.sync-chip {
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: bold;
+    background: alpha(@window_fg_color, 0.1);
+}
+.sync-chip image {
+    -gtk-icon-size: 12px;
+}
+.sync-chip.sync-on {
+    background: alpha(@success_color, 0.18);
+    color: @success_color;
+}
+.sync-chip.sync-not-yet {
+    opacity: 0.55;
+}
+.sync-chip.sync-queued {
+    background: alpha(@accent_bg_color, 0.25);
+    color: @accent_color;
+}
+.sync-chip.sync-unmatched {
+    background: alpha(@warning_color, 0.18);
+    color: @warning_color;
+}
 /* Every player button is the same true circle (hover and focus ring
    included), text ones like SVP too. */
 button.osd-button,
@@ -559,10 +587,11 @@ fn stored_session(settings: &Settings) -> Option<Session> {
     Some(Session {
         client: Arc::new(client),
         user_id: server.user_id.clone(),
+        server_id: server.server_id.clone(),
     })
 }
 
-fn show_main(state: &Rc<State>, session: Session) {
+fn show_main(state: &Rc<State>, mut session: Session) {
     // The account's settings apply from now on: its saved copy at once,
     // then the server's.
     let mut server = Settings::load().unwrap_or_default().server;
@@ -576,6 +605,7 @@ fn show_main(state: &Rc<State>, session: Session) {
         );
         server = Settings::load().unwrap_or_default().server;
     }
+    session.server_id = server.server_id.clone();
     crate::account::sign_in(
         server.server_id.as_deref().unwrap_or_default(),
         &server.url,
@@ -669,6 +699,7 @@ fn on_logged_in(state: &Rc<State>, logged_in: LoggedIn) {
         Session {
             client: Arc::new(logged_in.client),
             user_id: logged_in.user_id,
+            server_id: None,
         },
     );
 }

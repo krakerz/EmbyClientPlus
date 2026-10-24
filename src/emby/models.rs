@@ -330,6 +330,8 @@ pub struct UserWithSettings {
 #[serde(rename_all = "PascalCase", default)]
 pub struct BaseItem {
     pub id: String,
+    /// The server the item is from; ids only repeat across servers.
+    pub server_id: Option<String>,
     /// The long id user settings refer to libraries by (`OrderedViews`).
     pub guid: Option<String>,
     /// Only on single-item fetches that ask for it (details pages).
@@ -402,6 +404,11 @@ pub struct BaseItem {
     pub playlist_item_id: Option<String>,
     /// `Audio`, `Video`, ...; tells music playlists from video ones.
     pub media_type: Option<String>,
+    /// External ids (`Tvdb`, `AniDB`, ...), only when asked for via
+    /// `Fields`. Key casing varies by plugin (`AniDB`/`anidb`).
+    pub provider_ids: HashMap<String, String>,
+    /// The last episode a multi-episode file covers.
+    pub index_number_end: Option<i32>,
 }
 
 /// A linked item by name and id (album artists).

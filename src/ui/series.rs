@@ -24,6 +24,8 @@ struct SeriesView {
     /// The selected season's own dates and overview, when the server has them.
     season_meta: gtk::Label,
     season_overview: gtk::Label,
+    /// "Tracking: MAL ✓ · AniList ✓ …", only with a mapping service logged in.
+    tracking: gtk::Label,
     /// The series' own overview: a season repeating it word for word
     /// doesn't show it again.
     series_overview: RefCell<String>,
@@ -189,9 +191,17 @@ pub fn page(ui: &Ui, series: &BaseItem) -> adw::NavigationPage {
         .max_width_chars(120)
         .visible(false)
         .build();
+    let tracking = gtk::Label::builder()
+        .xalign(0.0)
+        .wrap(true)
+        .css_classes(["dim-label", "caption"])
+        .focusable(false)
+        .visible(false)
+        .build();
     hero.extra.append(&seasons.root);
     hero.extra.append(&season_meta);
     hero.extra.append(&season_overview);
+    hero.extra.append(&tracking);
     hero.extra.append(&episodes);
     hero.extra.append(&related);
     hero.show(ui, series, None);
@@ -205,6 +215,7 @@ pub fn page(ui: &Ui, series: &BaseItem) -> adw::NavigationPage {
         related,
         season_meta,
         season_overview,
+        tracking,
         series_overview: RefCell::new(String::new()),
         season_items: RefCell::new(Vec::new()),
         opened: RefCell::new(None),
@@ -318,6 +329,7 @@ fn load(ui: &Ui, view: &Rc<SeriesView>, series_id: &str) {
             .buttons
             .append(&download_button(&ui, &view, &series));
         super::hero::show_related(&ui, &view.related, &series);
+        show_tracking(&view, &series_id);
 
         // Keep the user's current season across reloads; otherwise open
         // where the series continues (see `opening_season`).
@@ -348,6 +360,36 @@ fn load(ui: &Ui, view: &Rc<SeriesView>, series_id: &str) {
                 load_episodes(&ui, &view, &series_id, &season.id);
             }
             None => clear_list(&view.episodes),
+        }
+    });
+}
+
+/// Resolves the series in the background (cached for this run) and shows
+/// which seasons the tracking services will update.
+fn show_tracking(view: &Rc<SeriesView>, series_id: &str) {
+    let tracker = crate::tracking::tracker::get();
+    let active = tracker.active();
+    if !active.iter().any(|id| id.uses_mapping()) {
+        view.tracking.set_visible(false);
+        return;
+    }
+    let label = view.tracking.downgrade();
+    let series_id = series_id.to_string();
+    glib::spawn_future_local(async move {
+        let result = spawn_tokio(tracker.series_status(series_id)).await;
+        let Some(label) = label.upgrade() else {
+            return;
+        };
+        match result {
+            Ok(resolved) => {
+                let line = crate::tracking::tracker::status_line(&resolved, &active);
+                label.set_visible(line.is_some());
+                label.set_label(line.as_deref().unwrap_or_default());
+            }
+            Err(e) => {
+                tracing::warn!("tracking check failed: {e:#}");
+                label.set_visible(false);
+            }
         }
     });
 }
@@ -423,8 +465,9 @@ fn load_episodes(ui: &Ui, view: &Rc<SeriesView>, series_id: &str, season_id: &st
     let view = view.clone();
     glib::spawn_future_local(async move {
         let wanted = season_id.clone();
+        let fetch_series = series_id.clone();
         let result =
-            spawn_tokio(async move { client.episodes(&series_id, &season_id, &user_id).await })
+            spawn_tokio(async move { client.episodes(&fetch_series, &season_id, &user_id).await })
                 .await;
         // The user may have switched seasons while this was loading.
         let current = view
@@ -438,8 +481,10 @@ fn load_episodes(ui: &Ui, view: &Rc<SeriesView>, series_id: &str, season_id: &st
         clear_list(&view.episodes);
         match result {
             Ok(episodes) => {
+                let mut markers = Vec::new();
                 for (index, episode) in episodes.iter().enumerate() {
-                    let row = episode_row(&ui, episode);
+                    let (row, chips) = episode_row(&ui, episode);
+                    markers.push((episode.clone(), chips));
                     let (opened, season) = (Rc::downgrade(&view), wanted.clone());
                     row.connect_activated(move |_| {
                         if let Some(view) = opened.upgrade() {
@@ -448,6 +493,8 @@ fn load_episodes(ui: &Ui, view: &Rc<SeriesView>, series_id: &str, season_id: &st
                     });
                     view.episodes.append(&row);
                 }
+                let name = episodes.first().and_then(|e| e.series_name.clone());
+                super::sync_markers::show_on_rows(series_id, name.unwrap_or_default(), markers);
                 match view.reload_mark.take() {
                     Some(mark) => {
                         mark.restore();
@@ -460,7 +507,8 @@ fn load_episodes(ui: &Ui, view: &Rc<SeriesView>, series_id: &str, season_id: &st
     });
 }
 
-fn episode_row(ui: &Ui, episode: &BaseItem) -> adw::ActionRow {
+/// The row, and its handle for the sync chips (left of the trailing icons).
+fn episode_row(ui: &Ui, episode: &BaseItem) -> (adw::ActionRow, Rc<super::sync_markers::RowChips>) {
     let row = adw::ActionRow::builder()
         .title(glib::markup_escape_text(&episode.episode_label()))
         .activatable(true)
@@ -507,15 +555,17 @@ fn episode_row(ui: &Ui, episode: &BaseItem) -> adw::ActionRow {
                 .build(),
         );
     }
-    if crate::downloads::is_downloaded(&episode.id) {
+    if crate::downloads::is_downloaded(ui.server_id(), &episode.id) {
         frame.add_overlay(&super::download_badge());
     }
     images::load(ui, &thumb, episode.landscape(), 320);
     row.add_prefix(&frame);
+    let mut trailing: Vec<gtk::Widget> = Vec::new();
     if episode.played() {
-        row.add_suffix(&gtk::Image::from_icon_name(crate::ui::icons::WATCHED));
+        trailing.push(gtk::Image::from_icon_name(crate::ui::icons::WATCHED).upcast());
     }
-    row.add_suffix(&gtk::Image::from_icon_name(crate::ui::icons::NEXT));
+    trailing.push(gtk::Image::from_icon_name(crate::ui::icons::NEXT).upcast());
+    let chips = super::sync_markers::RowChips::new(&row, trailing);
 
     let target = episode.clone();
     super::card::attach_menu(ui, &row, move || Some(target.clone()));
@@ -526,7 +576,7 @@ fn episode_row(ui: &Ui, episode: &BaseItem) -> adw::ActionRow {
             ui.open(&target);
         }
     });
-    row
+    (row, chips)
 }
 
 /// Puts the cursor on an episode, so the controller starts there instead

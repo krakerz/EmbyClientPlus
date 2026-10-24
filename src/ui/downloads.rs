@@ -58,7 +58,7 @@ fn is_paused(item_id: &str) -> bool {
 
 /// Downloads `item` (once), after whatever is already downloading.
 pub fn start(ui: &Ui, item: &BaseItem) {
-    if enqueue(item) {
+    if enqueue(ui, item) {
         if RUNNING.with(|r| r.borrow().is_empty()) {
             ui.toast(&format!("Downloading {}", item.episode_label()));
         } else {
@@ -70,10 +70,10 @@ pub fn start(ui: &Ui, item: &BaseItem) {
 
 /// Queues `item` unless it's downloaded, downloading or queued already;
 /// a paused one is resumed.
-fn enqueue(item: &BaseItem) -> bool {
+fn enqueue(ui: &Ui, item: &BaseItem) -> bool {
     // The cached id set: queueing a long series mustn't rescan the folder
     // for every episode.
-    if is_running(&item.id) || crate::downloads::is_downloaded(&item.id) {
+    if is_running(&item.id) || crate::downloads::is_downloaded(ui.server_id(), &item.id) {
         return false;
     }
     let paused = PAUSED.with(|p| {
@@ -115,7 +115,7 @@ pub fn start_episodes_of(ui: &Ui, target: &BaseItem) {
         let added = episodes
             .iter()
             .filter(|e| season.is_none() || e.season_id == season)
-            .filter(|e| enqueue(e))
+            .filter(|e| enqueue(&ui, e))
             .count();
         match added {
             0 => ui.toast(&format!("Everything in {name} is downloaded already")),
@@ -204,7 +204,9 @@ pub fn restore(ui: &Ui) {
     let mut resumed = 0;
     for entry in pending {
         let item = entry.item();
-        if crate::downloads::is_downloaded(&item.id) || is_running(&item.id) || is_paused(&item.id)
+        if crate::downloads::is_downloaded(ui.server_id(), &item.id)
+            || is_running(&item.id)
+            || is_paused(&item.id)
         {
             continue;
         }
@@ -232,6 +234,7 @@ fn run(ui: &Ui, item: &BaseItem) {
     };
     RUNNING.with(|r| r.borrow_mut().push(running.clone()));
     let (client, user_id) = (ui.client(), ui.user_id());
+    let server_id = ui.server_id().map(str::to_string);
     let weak = ui.downgrade();
     let epoch = EPOCH.with(Cell::get);
     glib::spawn_future_local(async move {
@@ -243,6 +246,7 @@ fn run(ui: &Ui, item: &BaseItem) {
         );
         let result = crate::runtime::spawn_tokio(crate::downloads::fetch(
             client,
+            server_id,
             user_id.clone(),
             id,
             progress,
@@ -335,14 +339,14 @@ fn resume(ui: &Ui, item_id: Option<&str>) {
 /// Drops a paused download and its partial file.
 fn cancel_paused(ui: &Ui, item_id: &str) {
     PAUSED.with(|p| p.borrow_mut().retain(|i| i.id != item_id));
-    crate::downloads::discard_partial(item_id);
+    crate::downloads::discard_partial(ui.server_id(), item_id);
     save_state(ui);
     ui.data_changed();
 }
 
 /// Deletes `item`'s download (from a menu).
 pub fn remove(ui: &Ui, item: &BaseItem) {
-    let Some(download) = crate::downloads::find(&item.id) else {
+    let Some(download) = crate::downloads::find(ui.server_id(), &item.id) else {
         return;
     };
     match crate::downloads::delete(&download) {
@@ -982,7 +986,7 @@ pub fn sync_auto(ui: &Ui) {
             let queued = plan
                 .download
                 .iter()
-                .filter(|e| !is_paused(&e.id) && enqueue(e))
+                .filter(|e| !is_paused(&e.id) && enqueue(&ui, e))
                 .count();
             let mut news = Vec::new();
             match queued {
@@ -1018,7 +1022,7 @@ pub fn button(ui: &Ui, item: &BaseItem) -> Option<gtk::Button> {
         .build();
     let weak = ui.downgrade();
     let target = item.clone();
-    if crate::downloads::is_downloaded(&item.id) {
+    if crate::downloads::is_downloaded(ui.server_id(), &item.id) {
         button.set_icon_name(crate::ui::icons::DOWNLOAD);
         button.add_css_class("downloaded");
         button.set_tooltip_text(Some("Downloaded; delete the download"));

@@ -119,12 +119,33 @@ impl Db {
 
     /// Brings the file to the current schema (`PRAGMA user_version`). Version
     /// 1 scopes every row by server and user; older files are rebuilt, their
-    /// rows kept under [`LEGACY_SCOPE`].
+    /// rows kept under [`LEGACY_SCOPE`]. Version 2 adds `tracking_queue`.
     fn init_schema(conn: &Connection) -> Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if version >= 1 {
-            return Ok(());
+        if version < 1 {
+            Db::migrate_to_v1(conn)?;
         }
+        if version < 2 {
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE IF NOT EXISTS tracking_queue (
+                     id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                     server_id   TEXT NOT NULL,
+                     item_id     TEXT NOT NULL,
+                     watched     INTEGER NOT NULL,
+                     services    TEXT NOT NULL,
+                     created_at  INTEGER NOT NULL,
+                     attempts    INTEGER NOT NULL DEFAULT 0
+                 );
+                 PRAGMA user_version = 2;
+                 COMMIT;",
+            )
+            .context("failed to create tracking_queue")?;
+        }
+        Ok(())
+    }
+
+    fn migrate_to_v1(conn: &Connection) -> Result<()> {
         let tx = conn.unchecked_transaction()?;
         let has_table = |name: &str| -> Result<bool> {
             Ok(tx
@@ -348,6 +369,69 @@ impl Db {
         )?;
         Ok(())
     }
+
+    /// Queues a tracking update; `services` is a comma list of service keys.
+    pub fn push_tracking(
+        &self,
+        server_id: &str,
+        item_id: &str,
+        watched: bool,
+        services: &str,
+        created_at: i64,
+    ) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO tracking_queue (server_id, item_id, watched, services, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![server_id, item_id, watched, services, created_at],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// The server's queued updates, oldest first.
+    pub fn tracking_queue(&self, server_id: &str) -> Result<Vec<QueuedUpdate>> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, server_id, item_id, watched, services, created_at, attempts
+             FROM tracking_queue WHERE server_id = ?1 ORDER BY id",
+        )?;
+        let rows = statement.query_map([server_id], |row| {
+            Ok(QueuedUpdate {
+                id: row.get(0)?,
+                server_id: row.get(1)?,
+                item_id: row.get(2)?,
+                watched: row.get(3)?,
+                services: row.get(4)?,
+                created_at: row.get(5)?,
+                attempts: row.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn update_tracking(&self, id: i64, services: &str, attempts: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE tracking_queue SET services = ?2, attempts = ?3 WHERE id = ?1",
+            rusqlite::params![id, services, attempts],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_tracking(&self, id: i64) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM tracking_queue WHERE id = ?1", [id])?;
+        Ok(())
+    }
+}
+
+/// A watched/unwatched change waiting to reach the tracking services.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedUpdate {
+    pub id: i64,
+    pub server_id: String,
+    pub item_id: String,
+    pub watched: bool,
+    pub services: String,
+    pub created_at: i64,
+    pub attempts: i64,
 }
 
 fn default_db_path() -> Result<PathBuf> {
@@ -610,7 +694,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         old_database(&path);
         let db = Db::open(&path).unwrap();
-        assert_eq!(user_version(&db), 1);
+        assert_eq!(user_version(&db), 2);
         let old = db.get_override("", "old").unwrap().unwrap();
         assert_eq!(old.audio_language.as_deref(), Some("jpn"));
         assert_eq!(old.volume, Some(80.0));
@@ -649,8 +733,28 @@ mod tests {
         old_database(&path);
         drop(Db::open(&path).unwrap());
         let db = Db::open(&path).unwrap();
-        assert_eq!(user_version(&db), 1);
+        assert_eq!(user_version(&db), 2);
         assert!(db.get_override("", "old").unwrap().is_some());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn tracking_queue_keeps_order_and_scopes_by_server() {
+        let db = Db::open_in_memory().unwrap();
+        db.push_tracking("srv-a", "item1", true, "mal,trakt", 10)
+            .unwrap();
+        db.push_tracking("srv-b", "item2", true, "mal", 11).unwrap();
+        db.push_tracking("srv-a", "item1", false, "mal", 12)
+            .unwrap();
+        let rows = db.tracking_queue("srv-a").unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].watched);
+        assert!(!rows[1].watched);
+        db.update_tracking(rows[0].id, "trakt", 1).unwrap();
+        let rows = db.tracking_queue("srv-a").unwrap();
+        assert_eq!(rows[0].services, "trakt");
+        assert_eq!(rows[0].attempts, 1);
+        db.delete_tracking(rows[0].id).unwrap();
+        assert_eq!(db.tracking_queue("srv-a").unwrap().len(), 1);
     }
 }

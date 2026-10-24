@@ -191,7 +191,8 @@ impl Card {
         let unplayed = item.unplayed_count();
         self.watched.set_visible(played);
         self.downloaded.set_visible(
-            super::downloads::can_download(item) && crate::downloads::is_downloaded(&item.id),
+            super::downloads::can_download(item)
+                && crate::downloads::is_downloaded(ui.server_id(), &item.id),
         );
         self.unplayed.set_label(&if unplayed >= 1000 {
             "1k+".to_string()
@@ -385,7 +386,7 @@ fn show_menu_with(ui: &Ui, widget: &gtk::Widget, item: &BaseItem, in_place: bool
     }
     if super::downloads::can_download(item) {
         let target = item.clone();
-        if crate::downloads::find(&item.id).is_some() {
+        if crate::downloads::find(ui.server_id(), &item.id).is_some() {
             add(
                 "Delete Download",
                 Box::new(move |ui| ui.delete_download(&target)),

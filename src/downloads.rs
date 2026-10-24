@@ -4,7 +4,7 @@
 //! naming mpv reads language and forced from).
 //! The folder is the index: whatever has a `.emby.json` is a download.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
@@ -211,35 +211,54 @@ pub fn save_pending(user_id: &str, pending: &[Pending]) {
     }
 }
 
-/// The downloaded items' ids, rescanned at most every few seconds (and
-/// after each download or delete), so lists can badge every card cheaply.
-static IDS: Mutex<Option<(Instant, Arc<HashSet<String>>)>> = Mutex::new(None);
+/// Whether a download from `held` (its saved server id) is one of the
+/// current server `current`'s. Item ids are only unique per server; a
+/// download from before server ids were saved (`None`) keeps matching, and
+/// so does anything while the current server is unknown.
+fn same_server(held: Option<&str>, current: Option<&str>) -> bool {
+    match (held, current) {
+        (Some(held), Some(current)) => held == current,
+        _ => true,
+    }
+}
+
+/// The downloaded items' ids with the servers they came from, rescanned at
+/// most every few seconds (and after each download or delete), so lists can
+/// badge every card cheaply.
+type IdMap = HashMap<String, Vec<Option<String>>>;
+static IDS: Mutex<Option<(Instant, Arc<IdMap>)>> = Mutex::new(None);
 const IDS_FRESH_FOR: Duration = Duration::from_secs(5);
 
-/// Whether the Emby item `item_id` is downloaded.
-pub fn is_downloaded(item_id: &str) -> bool {
+/// Whether the item `item_id` of server `server_id` is downloaded.
+pub fn is_downloaded(server_id: Option<&str>, item_id: &str) -> bool {
     let ids = {
         let mut cached = IDS.lock().unwrap_or_else(|e| e.into_inner());
         match cached.as_ref() {
             Some((at, ids)) if at.elapsed() < IDS_FRESH_FOR => ids.clone(),
             _ => {
-                let ids: Arc<HashSet<String>> =
-                    Arc::new(list().into_iter().map(|d| d.item.id).collect());
+                let mut map = IdMap::new();
+                for d in list() {
+                    map.entry(d.item.id).or_default().push(d.item.server_id);
+                }
+                let ids = Arc::new(map);
                 *cached = Some((Instant::now(), ids.clone()));
                 ids
             }
         }
     };
-    ids.contains(item_id)
+    ids.get(item_id)
+        .is_some_and(|held| held.iter().any(|h| same_server(h.as_deref(), server_id)))
 }
 
 fn forget_ids() {
     IDS.lock().unwrap_or_else(|e| e.into_inner()).take();
 }
 
-/// The download of the Emby item `item_id`, if there is one.
-pub fn find(item_id: &str) -> Option<Download> {
-    list().into_iter().find(|d| d.item.id == item_id)
+/// The download of the item `item_id` of server `server_id`, if there is one.
+pub fn find(server_id: Option<&str>, item_id: &str) -> Option<Download> {
+    list()
+        .into_iter()
+        .find(|d| d.item.id == item_id && same_server(d.item.server_id.as_deref(), server_id))
 }
 
 /// The downloaded episodes before and after `download` in its series.
@@ -247,11 +266,15 @@ pub fn neighbours(download: &Download) -> (Option<Download>, Option<Download>) {
     let Some(series) = &download.item.series_id else {
         return (None, None);
     };
+    let server = download.item.server_id.as_deref();
     let episodes: Vec<Download> = list()
         .into_iter()
-        .filter(|d| d.item.series_id.as_ref() == Some(series))
+        .filter(|d| {
+            d.item.series_id.as_ref() == Some(series)
+                && same_server(d.item.server_id.as_deref(), server)
+        })
         .collect();
-    let Some(index) = episodes.iter().position(|d| d.item.id == download.item.id) else {
+    let Some(index) = episodes.iter().position(|d| d.file == download.file) else {
         return (None, None);
     };
     let previous = index.checked_sub(1).and_then(|i| episodes.get(i).cloned());
@@ -330,22 +353,36 @@ fn relative_path(item: &BaseItem) -> PathBuf {
 
 /// `file`, or, when it's another item's download (or any file we didn't
 /// make) `<name> (<item id>).<ext>`, so a later download never replaces an
-/// earlier one that happens to share its name.
-fn claim(file: PathBuf, item_id: &str) -> PathBuf {
-    let owner = |path: &Path| -> Option<String> {
-        let meta: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(meta_path(path)).ok()?).ok()?;
-        meta["Id"].as_str().map(str::to_string)
+/// earlier one that happens to share its name. Another server's item with
+/// the same id gets `<name> (<server id>-<item id>).<ext>`.
+fn claim(file: PathBuf, server_id: Option<&str>, item_id: &str) -> PathBuf {
+    let ours = |path: &Path| -> bool {
+        let meta: Option<serde_json::Value> = std::fs::read_to_string(meta_path(path))
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok());
+        meta.is_some_and(|m| {
+            m["Id"].as_str() == Some(item_id) && same_server(m["ServerId"].as_str(), server_id)
+        })
     };
-    if !file.exists() || owner(&file).as_deref() == Some(item_id) {
-        return file;
+    let tagged = |tag: &str| {
+        let stem = file.file_stem().unwrap_or_default().to_string_lossy();
+        let name = match file.extension() {
+            Some(ext) => format!("{stem} ({tag}).{}", ext.to_string_lossy()),
+            None => format!("{stem} ({tag})"),
+        };
+        file.with_file_name(name)
+    };
+    let mut candidates = vec![file.clone(), tagged(item_id)];
+    if let Some(server) = server_id {
+        candidates.push(tagged(&format!("{server}-{item_id}")));
     }
-    let stem = file.file_stem().unwrap_or_default().to_string_lossy();
-    let name = match file.extension() {
-        Some(ext) => format!("{stem} ({item_id}).{}", ext.to_string_lossy()),
-        None => format!("{stem} ({item_id})"),
-    };
-    file.with_file_name(name)
+    let last = candidates.len() - 1;
+    candidates
+        .into_iter()
+        .enumerate()
+        .find(|(i, path)| *i == last || !path.exists() || ours(path))
+        .map(|(_, path)| path)
+        .unwrap_or(file)
 }
 
 /// Not enough room on the disk for a download (it never started).
@@ -407,18 +444,27 @@ fn free_space_at(path: &Path) -> Option<u64> {
     (ok != 0).then_some(free)
 }
 
-/// A half-finished download's file: `<file>.<item id>.part`, so it can be
+/// What names an item's partial file: its id, behind its server's when
+/// known (item ids repeat across servers).
+fn partial_key(server_id: Option<&str>, item_id: &str) -> String {
+    match server_id {
+        Some(server) => format!("{server}-{item_id}"),
+        None => item_id.to_string(),
+    }
+}
+
+/// A half-finished download's file: `<file>.<key>.part`, so it can be
 /// found again (to resume or discard) from the item alone.
-fn partial_path(file: &Path, item_id: &str) -> PathBuf {
+fn partial_path(file: &Path, key: &str) -> PathBuf {
     let mut name = file.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".{item_id}.part"));
+    name.push(format!(".{key}.part"));
     file.with_file_name(name)
 }
 
-/// `item_id`'s half-finished downloads anywhere under the downloads
+/// The item's half-finished downloads anywhere under the downloads
 /// folder (the item may have been renamed since it started).
-fn partials(item_id: &str) -> Vec<PathBuf> {
-    let suffix = format!(".{item_id}.part");
+fn partials(key: &str) -> Vec<PathBuf> {
+    let suffix = format!(".{key}.part");
     fn walk(dir: &Path, suffix: &str, depth: usize, found: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
@@ -436,19 +482,21 @@ fn partials(item_id: &str) -> Vec<PathBuf> {
     found
 }
 
-/// Deletes `item_id`'s half-finished download, if any (a cancelled one).
-pub fn discard_partial(item_id: &str) {
-    for path in partials(item_id) {
+/// Deletes the half-finished download of `item_id` (of server `server_id`),
+/// if any (a cancelled one).
+pub fn discard_partial(server_id: Option<&str>, item_id: &str) {
+    for path in partials(&partial_key(server_id, item_id)) {
         let _ = std::fs::remove_file(path);
     }
 }
 
-/// Downloads `item_id`'s original file with its metadata and artwork;
-/// returns where it went. `progress` and `cancelled` are shared with the
+/// Downloads `item_id`'s original file from server `server_id` with its
+/// metadata and artwork; returns where it went. `progress` and `cancelled` are shared with the
 /// UI. A cancelled or interrupted download keeps its partial file, which
 /// the next attempt continues; `discard` (a cancel, not a pause) deletes it.
 pub async fn fetch(
     client: Arc<EmbyClient>,
+    server_id: Option<String>,
     user_id: String,
     item_id: String,
     progress: Arc<Progress>,
@@ -456,10 +504,20 @@ pub async fn fetch(
     discard: Arc<AtomicBool>,
 ) -> Result<PathBuf> {
     let raw = client.item_json(&user_id, &item_id).await?;
-    let value: serde_json::Value =
+    let mut value: serde_json::Value =
         serde_json::from_str(&raw).context("Emby sent unreadable metadata")?;
+    // The meta must say which server it came from, even if the item doesn't.
+    let raw = match &server_id {
+        Some(server) if value["ServerId"].as_str() != Some(server) => {
+            value["ServerId"] = serde_json::Value::String(server.clone());
+            value.to_string()
+        }
+        _ => raw,
+    };
     let item: BaseItem =
         serde_json::from_value(value.clone()).context("Emby sent unreadable metadata")?;
+    let server_id = server_id.or_else(|| item.server_id.clone());
+    let key = partial_key(server_id.as_deref(), &item.id);
     let source = &value["MediaSources"][0];
     let extension = source["Container"]
         .as_str()
@@ -485,10 +543,10 @@ pub async fn fetch(
     // Written as .part and renamed at the end, so a half download is never
     // mistaken for a finished one. An earlier attempt's partial is carried
     // on even if the item has been renamed on the server since.
-    let partial = partials(&item.id)
+    let partial = partials(&key)
         .into_iter()
         .next()
-        .unwrap_or_else(|| partial_path(&file, &item.id));
+        .unwrap_or_else(|| partial_path(&file, &key));
     let have = std::fs::metadata(&partial).map_or(0, |m| m.len());
     let size = source["Size"].as_u64().filter(|s| *s > 0);
     // Finished but never renamed (the app died in between): nothing to fetch.
@@ -512,7 +570,7 @@ pub async fn fetch(
     }
     // Decided now, not at the start: another download may have taken the
     // name meanwhile.
-    let file = claim(file, &item.id);
+    let file = claim(file, server_id.as_deref(), &item.id);
     std::fs::rename(&partial, &file)
         .with_context(|| format!("couldn't finish {}", file.display()))?;
     crate::config::write_atomic(&meta_path(&file), raw.as_bytes())
@@ -750,11 +808,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("Trailer.mkv");
-        assert_eq!(claim(file.clone(), "2"), file);
+        assert_eq!(claim(file.clone(), None, "2"), file);
         std::fs::write(&file, "video").unwrap();
         std::fs::write(meta_path(&file), r#"{"Id":"1","Name":"Trailer"}"#).unwrap();
-        assert_eq!(claim(file.clone(), "1"), file);
-        assert_eq!(claim(file.clone(), "2"), dir.join("Trailer (2).mkv"));
+        assert_eq!(claim(file.clone(), None, "1"), file);
+        assert_eq!(claim(file.clone(), None, "2"), dir.join("Trailer (2).mkv"));
+        // Same id from another server is not the same download.
+        std::fs::write(
+            meta_path(&file),
+            r#"{"Id":"1","ServerId":"A","Name":"Trailer"}"#,
+        )
+        .unwrap();
+        assert_eq!(claim(file.clone(), Some("A"), "1"), file);
+        assert_eq!(
+            claim(file.clone(), Some("B"), "1"),
+            dir.join("Trailer (1).mkv")
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -806,6 +875,43 @@ mod tests {
                 dir.join("S01E01 - Pilot.jpn.forced.ass")
             ]
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn downloads_match_their_own_server_only() {
+        assert!(same_server(Some("A"), Some("A")));
+        assert!(!same_server(Some("A"), Some("B")));
+        // Saved before server ids were kept, or server not known yet.
+        assert!(same_server(None, Some("B")));
+        assert!(same_server(Some("A"), None));
+        assert_eq!(partial_key(Some("A"), "1"), "A-1");
+        assert_eq!(partial_key(None, "1"), "1");
+    }
+
+    #[test]
+    fn find_and_is_downloaded_tell_servers_apart() {
+        let dir = std::env::temp_dir().join(format!("ecp-servers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut found = Vec::new();
+        for (name, meta) in [
+            ("a.mkv", r#"{"Id":"1","ServerId":"A","Name":"a"}"#),
+            ("old.mkv", r#"{"Id":"2","Name":"old"}"#),
+        ] {
+            std::fs::write(dir.join(name), "v").unwrap();
+            std::fs::write(meta_path(&dir.join(name)), meta).unwrap();
+        }
+        collect(&dir, &mut found, 0);
+        let has = |server: Option<&str>, id: &str| {
+            found
+                .iter()
+                .any(|d| d.item.id == id && same_server(d.item.server_id.as_deref(), server))
+        };
+        assert!(has(Some("A"), "1"));
+        assert!(!has(Some("B"), "1"));
+        assert!(has(Some("B"), "2"));
+        assert!(has(None, "1"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

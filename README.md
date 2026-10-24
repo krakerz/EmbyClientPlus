@@ -17,6 +17,7 @@ Icons: [Lucide](https://lucide.dev/) (ISC, `data/icons/LICENSE`), converted for 
 - **Picture:** quality presets or custom scalers/debanding, deinterlacing, FSR and Anime4K shaders plus your own, per title.
 - **SVP:** attaches when SVP 4 is installed; per-title toggle with a status light; mpv frame blending as an alternative.
 - **Profile:** your Emby account's own settings (languages, subtitle mode, autoplay, intro skipping, hidden watched items, library order), picture, password and PIN; shared with Emby's apps.
+- **Tracking:** MyAnimeList, AniList, Kitsu and Trakt follow what you watch, including split anime seasons (matched through AniBridge) and downloads watched offline; MyAnimeList and AniList log in from Desktop Mode.
 - **Downloads:** original files for offline play with the full player; pause and resume, resuming after the app closes, with disk space shown; auto-download keeps a series' next unwatched episodes and can delete watched ones; downloaded titles are badged.
 - **Music:** mini player, queue, shuffle/repeat, gapless, playlists, Instant Mix, media keys and now-playing on every OS.
 - **Controller & Steam Deck:** everything works with a gamepad, with on-screen hints and remappable buttons; Steam library artwork included.
@@ -118,6 +119,10 @@ Manager, red SVP Manager not running, grey SVP not found.
 
 **Does auto-download convert files on the server?** No, it downloads the original files, like any
 download, so the server does no transcoding.
+
+**Why wasn't an episode synced?** It wasn't matched: the series page's tracking line says which
+seasons are, and the AL / MAL / Kitsu / Trakt chips on each episode show its state per service (hover
+for the entry). Unmatched episodes are skipped, never guessed.
 
 **Is HDR supported?** Not really: HDR plays converted to SDR, untested. SVP starts off for HDR
 titles unless you turn it on for that title.
