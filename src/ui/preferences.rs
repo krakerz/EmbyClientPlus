@@ -448,6 +448,14 @@ fn show_with(parent: &impl IsA<gtk::Widget>, server: bool) {
         "Video",
         crate::ui::icons::PICTURE,
     );
+    if server {
+        stack.add_titled_with_icon(
+            &super::tracking_prefs::page(parent.upcast_ref()),
+            Some("tracking"),
+            "Tracking",
+            crate::ui::icons::WATCHED,
+        );
+    }
     stack.add_titled_with_icon(
         &controller_page(),
         Some("controller"),
@@ -1544,7 +1552,7 @@ pub(super) fn selected_language(row: &adw::ComboRow) -> Option<String> {
     codes.get(row.selected() as usize).cloned()
 }
 
-fn save(change: impl FnOnce(&mut Settings)) {
+pub(super) fn save(change: impl FnOnce(&mut Settings)) {
     if let Err(e) = Settings::update(change) {
         tracing::warn!("could not save preferences: {e:#}");
     }

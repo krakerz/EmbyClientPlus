@@ -55,6 +55,9 @@ pub const SVP: &str = "ecp-svp-symbolic";
 pub const KEYBOARD: &str = "ecp-keyboard-symbolic";
 pub const DOWNLOAD: &str = "ecp-download-symbolic";
 pub const HISTORY: &str = "ecp-history-symbolic";
+/// The sync markers' "unmatched" state: Lucide `circle-x` (the set has no
+/// triangle-alert).
+pub const UNMATCHED: &str = "edit-clear-symbolic";
 pub const SHUFFLE: &str = "ecp-shuffle-symbolic";
 pub const REPEAT: &str = "ecp-repeat-symbolic";
 pub const REPEAT_ONE: &str = "ecp-repeat-one-symbolic";

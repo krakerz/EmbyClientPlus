@@ -28,6 +28,7 @@ mod runtime;
 mod shaders;
 mod smoke;
 mod svp;
+mod tracking;
 mod ui;
 mod update;
 

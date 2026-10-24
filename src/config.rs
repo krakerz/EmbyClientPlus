@@ -33,6 +33,8 @@ pub struct Settings {
     pub updates: UpdateSettings,
     #[serde(default)]
     pub downloads: DownloadSettings,
+    #[serde(default)]
+    pub tracking: TrackingSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -236,6 +238,36 @@ fn default_width() -> i32 {
 
 fn default_height() -> i32 {
     800
+}
+
+/// Watch-progress sync (Preferences → Tracking). A service is used when
+/// it's logged in and switched on here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackingSettings {
+    #[serde(default = "default_true")]
+    pub mal: bool,
+    #[serde(default = "default_true")]
+    pub anilist: bool,
+    #[serde(default = "default_true")]
+    pub kitsu: bool,
+    #[serde(default = "default_true")]
+    pub trakt: bool,
+    /// Marking an item unwatched also lowers the lists' progress and
+    /// removes Trakt plays. Off: unwatching never syncs.
+    #[serde(default)]
+    pub sync_unwatched: bool,
+}
+
+impl Default for TrackingSettings {
+    fn default() -> Self {
+        TrackingSettings {
+            mal: true,
+            anilist: true,
+            kitsu: true,
+            trakt: true,
+            sync_unwatched: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

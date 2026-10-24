@@ -203,6 +203,7 @@ fn show(ui: &Ui, view: &DetailsView, item: &BaseItem) {
     if let Some(download) = super::downloads::button(ui, item) {
         buttons.append(&download);
     }
+    super::sync_markers::show_on_buttons(buttons, item);
 }
 
 /// Previous/next links and "More in Season N" for an episode.

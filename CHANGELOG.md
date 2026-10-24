@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [1.30.0] — 2026-10-23
+
+### Added
+- Watch progress syncs to MyAnimeList, AniList, Kitsu and Trakt (Preferences → Tracking): finishing an episode or marking it watched updates your lists, also for downloads watched offline.
+- Anime seasons split into several MyAnimeList/AniList entries are matched through AniBridge; series pages show which seasons are matched, and unmatched episodes are skipped with a notice instead of guessed.
+- Marking a whole season or series watched updates each list entry once, to the last episode it covers.
+- MyAnimeList and AniList log in from Desktop Mode; Trakt shows a code to enter at trakt.tv/activate, also in Game Mode, with buttons to open that page and copy the code.
+- Episodes of a show that is still airing, newer than AniBridge's mappings, are matched with the same offset when the list entry's own episode count (or airing status) allows it.
+- Trakt: when you finish an episode, the earlier episodes of the series that Emby has as played but Trakt lacks are added too (at their Emby play date, else their release date).
+- Optional "Also sync unwatched" lowers the lists' progress when you mark an episode, season or series unwatched.
+- Each episode shows small AL / MAL / Kitsu / Trakt chips (episode rows and the episode page) telling whether that service already has it: on your list, not yet, queued, or not matched.
+
+### Fixed
+- Kitsu: shows Kitsu has no MyAnimeList mapping for yet are found through their AniList id; a show not on Kitsu is marked as not matched.
+- The episode page shows the same unmatched AL / MAL / Kitsu chips as its row.
+- Trakt: no more "progress should be at least 1%" errors when pausing right after the start.
+- Trakt: marking a whole season or series watched is one request instead of one per episode, and episodes Trakt already lists as watched are no longer added a second time.
+- A title on another server with the same id no longer shows as downloaded or plays the wrong download.
+
 ## [1.29.0] — 2026-10-23
 
 ### Added
