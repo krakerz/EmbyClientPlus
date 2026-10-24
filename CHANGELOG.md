@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.30.2] — 2026-10-24
+
+### Fixed
+- Steam Deck and other handhelds with a Game Mode session: logins (Emby and the tracking services) now carry over between Desktop Mode and Game Mode, so MyAnimeList and AniList logged in from Desktop Mode also work in Game Mode. Existing Desktop Mode logins move over the next time the app runs there.
+
 ## [1.30.1] — 2026-10-24
 
 ### Added

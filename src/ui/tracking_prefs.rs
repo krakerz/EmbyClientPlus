@@ -118,7 +118,11 @@ fn refresh_row(row: &adw::ActionRow, suffix: &gtk::Box, id: ServiceId) {
         .build();
     suffix.append(&log_in);
     if id.needs_browser() && crate::gamescope::detected() {
-        row.set_subtitle("Log in from Desktop Mode");
+        row.set_subtitle(if crate::auth::tokens_shared_across_modes() {
+            "Log in from Desktop Mode; it carries over"
+        } else {
+            "Log in from Desktop Mode"
+        });
         log_in.set_sensitive(false);
         return;
     }
