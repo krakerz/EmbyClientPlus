@@ -33,6 +33,8 @@ mod side_by_side;
 mod standalone;
 mod stick_scroll;
 mod subtitle_picker;
+mod sync_markers;
+mod tracking_prefs;
 mod version_picker;
 pub use standalone::present as present_standalone;
 mod updates;
@@ -63,6 +65,8 @@ pub const TOAST_SECONDS: u32 = 3;
 pub struct Session {
     pub client: Arc<EmbyClient>,
     pub user_id: String,
+    /// Which server it is (downloads are matched per server); set once known.
+    pub server_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -127,6 +131,24 @@ impl Ui {
                 on_logout: Box::new(on_logout),
             }),
         };
+        crate::tracking::tracker::get().set_session(crate::tracking::tracker::SessionRef {
+            client: ui.inner.session.client.clone(),
+            user_id: ui.inner.session.user_id.clone(),
+            server_id: ui.inner.session.server_id.clone(),
+        });
+        crate::tracking::tracker::set_notifier({
+            let toasts = ui.inner.toasts.downgrade();
+            move |message: &str| {
+                if let Some(toasts) = toasts.upgrade() {
+                    toasts.add_toast(
+                        adw::Toast::builder()
+                            .title(glib::markup_escape_text(message))
+                            .timeout(TOAST_SECONDS)
+                            .build(),
+                    );
+                }
+            }
+        });
         ui.inner.nav.add(&home::page(&ui));
 
         // `nav.home` is reachable from every page's header (see `add_home_button`).
@@ -180,6 +202,10 @@ impl Ui {
 
     pub fn user_id(&self) -> String {
         self.inner.session.user_id.clone()
+    }
+
+    pub fn server_id(&self) -> Option<&str> {
+        self.inner.session.server_id.as_deref()
     }
 
     pub fn toast_overlay(&self) -> &adw::ToastOverlay {
@@ -297,7 +323,9 @@ impl Ui {
         }
     }
 
-    /// Marks `item` watched/unwatched on the server, then refreshes.
+    /// Marks `item` watched/unwatched on the server, then refreshes; the
+    /// tracking services follow (unwatched only with "Also sync unwatched").
+    /// A season or series syncs every episode it covers.
     pub fn set_played(&self, item: &BaseItem, played: bool) {
         let (client, user_id, id) = (self.client(), self.user_id(), item.id.clone());
         self.update_item_refreshing(
@@ -308,6 +336,15 @@ impl Ui {
             } else {
                 "Marked as unwatched"
             },
+        );
+        crate::tracking::tracker::get().on_watch_change(
+            item,
+            if played {
+                crate::tracking::Direction::Watched
+            } else {
+                crate::tracking::Direction::Unwatched
+            },
+            crate::tracking::tracker::Source::Manual,
         );
     }
 
@@ -476,7 +513,7 @@ impl Ui {
             return self.play_song(item);
         }
         // Downloaded: from disk, offline or not.
-        if let Some(download) = crate::downloads::find(&item.id) {
+        if let Some(download) = crate::downloads::find(self.server_id(), &item.id) {
             return self.start_download(&download, start_ticks, true);
         }
         // The current session's quality carries over to the next episode;
@@ -548,7 +585,7 @@ impl Ui {
                 }
                 // Streaming a downloaded title failed (offline, say): back
                 // to the file.
-                Err(e) if let Some(download) = crate::downloads::find(&item.id) => {
+                Err(e) if let Some(download) = crate::downloads::find(ui.server_id(), &item.id) => {
                     tracing::warn!("streaming a downloaded title failed: {e:#}");
                     ui.toast("Couldn't stream it, playing the download instead");
                     ui.start_download(&download, start_ticks, rewind);
@@ -625,7 +662,7 @@ impl Ui {
         };
         let position = session.position_ticks();
         if quality == Quality::Original
-            && let Some(download) = crate::downloads::find(&session.item.id)
+            && let Some(download) = crate::downloads::find(self.server_id(), &session.item.id)
         {
             return self.start_download(&download, position, false);
         }

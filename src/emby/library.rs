@@ -29,6 +29,21 @@ impl EmbyClient {
         Ok(result.items)
     }
 
+    /// Every episode of a series with its ids and play dates, for the Trakt
+    /// backfill of earlier played episodes.
+    pub async fn series_episodes_played(
+        &self,
+        series_id: &str,
+        user_id: &str,
+    ) -> Result<Vec<BaseItem>> {
+        let result: QueryResult<BaseItem> = self
+            .get(&format!(
+                "/emby/Shows/{series_id}/Episodes?UserId={user_id}&SortBy=ParentIndexNumber,IndexNumber&SortOrder=Ascending&Fields=ProviderIds,UserDataLastPlayedDate"
+            ))
+            .await?;
+        Ok(result.items)
+    }
+
     /// The episodes of a series that exist as files: Emby lists unaired and
     /// missing ones too (`LocationType` "Virtual"), which can't be downloaded.
     pub async fn downloadable_episodes(

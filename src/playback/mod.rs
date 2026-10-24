@@ -728,6 +728,11 @@ impl PlaybackSession {
         if self.stopped.get() {
             return;
         }
+        match event {
+            Some("Pause") => self.track_scrobble(crate::tracking::ScrobbleAction::Pause),
+            Some("Unpause") => self.track_scrobble(crate::tracking::ScrobbleAction::Start),
+            _ => {}
+        }
         let Some(client) = self.client.clone() else {
             return;
         };
@@ -740,6 +745,7 @@ impl PlaybackSession {
     }
 
     fn report_playing(&self) {
+        self.track_scrobble(crate::tracking::ScrobbleAction::Start);
         let Some(client) = self.client.clone() else {
             return;
         };
@@ -777,6 +783,38 @@ impl PlaybackSession {
         }
     }
 
+    /// Watched share of the runtime, 0–100 (`None` without a runtime).
+    fn percent(&self, position_ticks: i64) -> Option<f32> {
+        let runtime = self.item.run_time_ticks.filter(|&ticks| ticks > 0)?;
+        Some((position_ticks as f64 * 100.0 / runtime as f64).clamp(0.0, 100.0) as f32)
+    }
+
+    /// Emby titles (streamed or downloaded) feed the tracking services.
+    fn tracks(&self) -> bool {
+        matches!(self.origin, Origin::Server | Origin::Download)
+    }
+
+    /// Trakt's live scrobble.
+    fn track_scrobble(&self, action: crate::tracking::ScrobbleAction) {
+        if self.tracks() {
+            let progress = self.percent(self.position_ticks()).unwrap_or(0.0);
+            crate::tracking::tracker::get().scrobble(&self.item, action, progress);
+        }
+    }
+
+    /// The end of playback: past the played threshold counts as watched,
+    /// also for a download played offline (queued until the server is back).
+    fn track_stop(&self, position_ticks: i64) {
+        if self.tracks() {
+            let progress = if self.ended.get() {
+                100.0
+            } else {
+                self.percent(position_ticks).unwrap_or(0.0)
+            };
+            crate::tracking::tracker::get().playback_stopped(&self.item, progress);
+        }
+    }
+
     /// Stops mpv and tells Emby where playback ended, which becomes the
     /// item's resume point (or marks it watched near the end). Safe to
     /// call more than once.
@@ -805,6 +843,7 @@ impl PlaybackSession {
             timer.remove();
         }
         let position_ticks = self.position_ticks();
+        self.track_stop(position_ticks);
         if let Err(e) = self.player.stop() {
             tracing::warn!("{e:#}");
         }
