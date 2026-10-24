@@ -20,6 +20,9 @@ use crate::player::{
 
 /// OSD hides after this long without pointer movement while playing.
 const OSD_TIMEOUT: Duration = Duration::from_secs(3);
+/// Controls mode (controller on the OSD's buttons) ends after this long
+/// without a press, so a later A means pause again.
+const CONTROLS_IDLE: Duration = Duration::from_secs(4);
 /// Position/markers/Up Next refresh rate while the page is shown.
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
 const SEEK_STEP: i32 = 10;
@@ -170,9 +173,11 @@ struct Inner {
     /// Start pressed: the controller moves through the OSD's buttons
     /// instead of seeking, and the OSD stays up.
     controls_mode: Cell<bool>,
-    /// The item last prepared, to tell a restart (quality change) from a
-    /// new title.
-    prepared_id: RefCell<Option<String>>,
+    /// Ends controls mode after [`CONTROLS_IDLE`] without a press.
+    controls_idle: RefCell<Option<glib::SourceId>>,
+    /// The controller closed the open menu without choosing in it (B or
+    /// another button): controls mode stays, focus back on its button.
+    menu_dismissed: Cell<bool>,
     /// Held seek (controller/arrow repeat): where it's headed. mpv seeks
     /// once, when the presses stop, instead of on every repeat.
     scrub_target: Cell<Option<f64>>,
@@ -213,6 +218,9 @@ struct Osd {
     play: gtk::Button,
     previous: gtk::Button,
     next: gtk::Button,
+    /// Only shown while the file has chapters to skip between.
+    chapter_previous: gtk::Button,
+    chapter_next: gtk::Button,
     volume: gtk::Scale,
     volume_button: gtk::MenuButton,
     audio: gtk::MenuButton,
@@ -274,7 +282,8 @@ impl PlayerPage {
             volume_report: RefCell::new(None),
             volume_seen: Cell::new(None),
             controls_mode: Cell::new(false),
-            prepared_id: RefCell::new(None),
+            controls_idle: RefCell::new(None),
+            menu_dismissed: Cell::new(false),
             scrub_target: Cell::new(None),
             hold_started: Cell::new(None),
             key_held: Cell::new(None),
@@ -321,12 +330,17 @@ impl PlayerPage {
 
     /// Leaves the OSD-buttons mode; the OSD hides again as usual.
     pub fn leave_controls_mode(&self) {
-        let inner = &self.inner;
-        inner.controls_mode.set(false);
-        if let Some(window) = inner.window() {
-            gtk::prelude::GtkWindowExt::set_focus(&window, None::<&gtk::Widget>);
-        }
-        inner.show_osd();
+        self.inner.leave_controls();
+    }
+
+    /// A controller press in controls mode: the idle countdown restarts.
+    pub fn touch_controls(&self) {
+        self.inner.arm_controls_idle();
+    }
+
+    /// The controller is closing the open menu without choosing in it.
+    pub fn menu_dismissed(&self) {
+        self.inner.menu_dismissed.set(true);
     }
 
     /// Runs a player-context controller action.
@@ -373,9 +387,7 @@ impl PlayerPage {
                 }
             }
             Action::ShowControls => {
-                inner.controls_mode.set(true);
-                inner.show_osd();
-                inner.osd.play.grab_focus();
+                inner.enter_controls();
                 return;
             }
             _ => return,
@@ -391,24 +403,7 @@ impl PlayerPage {
     /// Readies the page for `item` before its stream is negotiated.
     pub fn prepare(&self, item: &BaseItem, quality: Quality, handlers: Handlers) {
         self.inner.osd.preview.clear();
-        // Restarting the same title (a quality change) keeps the
-        // controller on the OSD buttons, back on the quality one.
-        let same_title = self
-            .inner
-            .prepared_id
-            .replace(Some(item.id.clone()))
-            .as_deref()
-            == Some(item.id.as_str());
-        if same_title && self.inner.controls_mode.get() {
-            let quality_button = self.inner.osd.quality.downgrade();
-            glib::idle_add_local_once(move || {
-                if let Some(button) = quality_button.upgrade() {
-                    button.grab_focus();
-                }
-            });
-        } else {
-            self.inner.controls_mode.set(false);
-        }
+        self.inner.end_controls_mode();
         // A scrub still waiting to land belongs to the previous video.
         self.inner.stop_stick();
         self.inner.scrub_target.set(None);
@@ -448,6 +443,7 @@ impl PlayerPage {
         inner.osd.seek.clear_marks();
         inner.osd.previous.set_sensitive(false);
         inner.osd.next.set_sensitive(false);
+        inner.show_chapter_buttons(false);
         inner.osd.up_next.set_visible(false);
         inner.osd.skip.set_visible(false);
         inner.rebuild_menus();
@@ -496,6 +492,7 @@ impl PlayerPage {
         }
         inner.osd.previous.set_sensitive(session.previous.is_some());
         inner.osd.next.set_sensitive(session.next.is_some());
+        inner.show_chapter_buttons(session.markers.can_skip_chapters());
         inner
             .osd
             .sleep
@@ -529,13 +526,19 @@ impl Osd {
         use crate::keys::KeyAction;
         let bindings = crate::keys::bindings();
         let pad = crate::ui::legend::pad_in_use();
-        let buttons: [(&gtk::Button, &str, KeyAction); 5] = [
+        let buttons: [(&gtk::Button, &str, KeyAction); 7] = [
             (
                 &self.previous,
                 "Previous episode",
                 KeyAction::PreviousEpisode,
             ),
+            (
+                &self.chapter_previous,
+                "Previous chapter",
+                KeyAction::PreviousChapter,
+            ),
             (&self.play, "Play/Pause", KeyAction::PlayPause),
+            (&self.chapter_next, "Next chapter", KeyAction::NextChapter),
             (&self.next, "Next episode", KeyAction::NextEpisode),
             (&self.mute, "Mute", KeyAction::Mute),
             (&self.fullscreen, "Fullscreen", KeyAction::Fullscreen),
@@ -640,6 +643,10 @@ impl Osd {
         let play = icon_button(crate::ui::icons::PAUSE, "Play/Pause");
         play.add_css_class("large-button");
         let next = icon_button(crate::ui::icons::SKIP_FORWARD, "Next episode");
+        let chapter_previous = icon_button(crate::ui::icons::CHAPTER_PREVIOUS, "Previous chapter");
+        let chapter_next = icon_button(crate::ui::icons::CHAPTER_NEXT, "Next chapter");
+        chapter_previous.set_visible(false);
+        chapter_next.set_visible(false);
         let volume = gtk::Scale::builder()
             .orientation(gtk::Orientation::Horizontal)
             .width_request(180)
@@ -697,7 +704,9 @@ impl Osd {
         start.append(&volume_button);
         let middle = gtk::Box::builder().spacing(12).build();
         middle.append(&previous);
+        middle.append(&chapter_previous);
         middle.append(&play);
+        middle.append(&chapter_next);
         middle.append(&next);
         let end = gtk::Box::builder().spacing(6).build();
         end.append(&audio);
@@ -844,6 +853,8 @@ impl Osd {
             play,
             previous,
             next,
+            chapter_previous,
+            chapter_next,
             volume,
             volume_button,
             audio,
@@ -1076,12 +1087,15 @@ impl Inner {
 
         // Buttons.
         let osd = &self.osd;
+        // Controls mode ends after a button whose action is complete
+        // (`finish_controls`); chapter buttons are for repeated presses.
         osd.play.connect_clicked(glib::clone!(
             #[strong]
             weak,
             move |_| {
                 if let Some(inner) = weak.upgrade() {
                     warn(inner.player.toggle_pause());
+                    inner.finish_controls();
                 }
             }
         ));
@@ -1091,6 +1105,7 @@ impl Inner {
             move |_| {
                 if let Some(inner) = weak.upgrade() {
                     inner.play_neighbour(false);
+                    inner.finish_controls();
                 }
             }
         ));
@@ -1100,6 +1115,25 @@ impl Inner {
             move |_| {
                 if let Some(inner) = weak.upgrade() {
                     inner.play_neighbour(true);
+                    inner.finish_controls();
+                }
+            }
+        ));
+        osd.chapter_previous.connect_clicked(glib::clone!(
+            #[strong]
+            weak,
+            move |_| {
+                if let Some(inner) = weak.upgrade() {
+                    inner.seek_chapter(false);
+                }
+            }
+        ));
+        osd.chapter_next.connect_clicked(glib::clone!(
+            #[strong]
+            weak,
+            move |_| {
+                if let Some(inner) = weak.upgrade() {
+                    inner.seek_chapter(true);
                 }
             }
         ));
@@ -1109,9 +1143,61 @@ impl Inner {
             move |_| {
                 if let Some(inner) = weak.upgrade() {
                     inner.toggle_fullscreen();
+                    inner.finish_controls();
                 }
             }
         ));
+        // `clicked`, not `toggled`: only a press, not SVP's state being set
+        // when a file loads.
+        osd.svp.connect_clicked(glib::clone!(
+            #[strong]
+            weak,
+            move |_| {
+                if let Some(inner) = weak.upgrade() {
+                    inner.finish_controls();
+                }
+            }
+        ));
+        // A menu closing in controls mode: a choice ends the mode; closed
+        // with B (or another pad button), focus returns to its button.
+        for menu in [
+            &osd.volume_button,
+            &osd.audio,
+            &osd.subtitles,
+            &osd.quality,
+            &osd.picture,
+            &osd.shaders,
+            &osd.sleep,
+        ] {
+            menu.connect_active_notify(glib::clone!(
+                #[strong]
+                weak,
+                move |button| {
+                    let Some(inner) = weak.upgrade() else { return };
+                    if button.is_active() {
+                        inner.menu_dismissed.set(false);
+                        return;
+                    }
+                    if !inner.controls_mode.get() {
+                        return;
+                    }
+                    let dismissed = inner.menu_dismissed.replace(false);
+                    let button = button.clone();
+                    // After the popover has handed the focus back.
+                    glib::idle_add_local_once(move || {
+                        if !inner.controls_mode.get() {
+                            return;
+                        }
+                        if dismissed {
+                            button.grab_focus();
+                            inner.arm_controls_idle();
+                        } else {
+                            inner.leave_controls();
+                        }
+                    });
+                }
+            ));
+        }
         osd.svp.connect_toggled(glib::clone!(
             #[strong]
             weak,
@@ -2119,6 +2205,90 @@ impl Inner {
         if let Some(target) = target {
             warn(self.player.seek_absolute(target));
             self.preview_at(target, true);
+        }
+    }
+
+    /// Chapter buttons show only with 2+ chapters to move between.
+    fn show_chapter_buttons(&self, shown: bool) {
+        self.osd.chapter_previous.set_visible(shown);
+        self.osd.chapter_next.set_visible(shown);
+    }
+
+    /// Start: the controller moves through the OSD's buttons, starting on
+    /// Play, until it's idle for a while or does something that completes.
+    fn enter_controls(self: &Rc<Self>) {
+        self.controls_mode.set(true);
+        self.menu_dismissed.set(false);
+        self.set_controls_style(true);
+        // Controller use draws focus rings even after pointer motion.
+        if let Some(window) = self.window() {
+            window.set_focus_visible(true);
+        }
+        self.show_osd();
+        self.osd.play.grab_focus();
+        self.arm_controls_idle();
+    }
+
+    /// Leaves controls mode back to plain video control: the OSD hides on
+    /// its normal timer.
+    fn leave_controls(self: &Rc<Self>) {
+        self.end_controls_mode();
+        if let Some(window) = self.window() {
+            gtk::prelude::GtkWindowExt::set_focus(&window, None::<&gtk::Widget>);
+        }
+        self.show_osd();
+    }
+
+    /// Ends the mode without touching focus or the OSD.
+    fn end_controls_mode(&self) {
+        self.controls_mode.set(false);
+        self.set_controls_style(false);
+        if let Some(timer) = self.controls_idle.take() {
+            timer.remove();
+        }
+    }
+
+    /// A one-shot button did its job: back to plain video control.
+    fn finish_controls(self: &Rc<Self>) {
+        if self.controls_mode.get() {
+            self.leave_controls();
+        }
+    }
+
+    /// (Re)starts the idle countdown; it waits while a menu is open.
+    fn arm_controls_idle(self: &Rc<Self>) {
+        if let Some(timer) = self.controls_idle.take() {
+            timer.remove();
+        }
+        if !self.controls_mode.get() {
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        let timer = glib::timeout_add_local_once(CONTROLS_IDLE, move || {
+            let Some(inner) = weak.upgrade() else { return };
+            inner.controls_idle.take();
+            if !inner.controls_mode.get() {
+                return;
+            }
+            if !inner.page.is_mapped() {
+                inner.end_controls_mode();
+            } else if inner.osd.menu_open() {
+                inner.arm_controls_idle();
+            } else {
+                inner.leave_controls();
+            }
+        });
+        self.controls_idle.replace(Some(timer));
+    }
+
+    /// The bar's strong focus ring (see the CSS) only applies in the mode.
+    fn set_controls_style(&self, on: bool) {
+        if let Some(bar) = self.osd.bottom.child() {
+            if on {
+                bar.add_css_class("controls-mode");
+            } else {
+                bar.remove_css_class("controls-mode");
+            }
         }
     }
 

@@ -125,9 +125,11 @@ pub fn new(player: Player) -> gtk::GLArea {
                 let state = state.clone();
                 clock.connect_after_paint(move |_| {
                     if state.rendered.replace(false)
+                        && crate::player::diag::switches().report_swap
                         && let Some(context) = state.context.borrow().as_ref()
                     {
                         context.report_swap();
+                        crate::player::diag::note_swap();
                     }
                 });
             }
@@ -170,6 +172,7 @@ pub fn new(player: Player) -> gtk::GLArea {
                     }
                 }
                 state.rendered.set(true);
+                crate::player::diag::note_paint();
                 if crate::smoke::pending() {
                     crate::smoke::frame(player, gl_info);
                 }
@@ -194,8 +197,16 @@ pub fn new(player: Player) -> gtk::GLArea {
 fn track_display_fps(player: Player, area: &gtk::GLArea) {
     fn apply(player: Player, monitor: &gtk::gdk::Monitor) {
         let millihertz = monitor.refresh_rate();
-        if millihertz > 0
-            && let Err(e) = player.set_display_fps(f64::from(millihertz) / 1000.0)
+        crate::player::diag::note_monitor(millihertz);
+        // Every monitor starts from its reported rate; the rate watcher in
+        // `diag` corrects it when frames are shown at another one. A monitor
+        // that reports none clears a rate measured on the previous one.
+        let switches = crate::player::diag::switches();
+        let fps = switches.display_fps_for(millihertz).or_else(|| {
+            (switches.display_fps == crate::player::diag::DisplayFps::Monitor).then_some(0.0)
+        });
+        if let Some(fps) = fps
+            && let Err(e) = player.set_display_fps(fps)
         {
             tracing::warn!("{e:#}");
         }

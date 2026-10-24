@@ -30,6 +30,9 @@ pub const PLAY: &str = "ecp-play-symbolic";
 pub const PAUSE: &str = "ecp-pause-symbolic";
 pub const SKIP_FORWARD: &str = "ecp-skip-forward-symbolic";
 pub const SKIP_BACK: &str = "ecp-skip-back-symbolic";
+/// Hand-drawn (data/icons/custom/): Lucide's chevrons-left/right.
+pub const CHAPTER_PREVIOUS: &str = "ecp-chapter-previous-symbolic";
+pub const CHAPTER_NEXT: &str = "ecp-chapter-next-symbolic";
 pub const VOLUME: &str = "ecp-volume-symbolic";
 pub const MUTED: &str = "ecp-muted-symbolic";
 pub const AUDIO: &str = "ecp-audio-symbolic";

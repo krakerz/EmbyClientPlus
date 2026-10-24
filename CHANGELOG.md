@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [1.30.3] — 2026-10-24
+
+### Added
+- More playback timing details in the log, to diagnose dropped frames.
+- Player: Previous chapter and Next chapter buttons next to the episode and play buttons, shown when the video has two or more chapters. Page Up / Page Down and the controller's LT / RT already did the same.
+
+### Changed
+- Player, controller: the Start "controls mode" (moving through the on-screen buttons) now ends by itself after 4 seconds without a press, and right after a button that completes its job (play/pause, previous/next episode, SVP, fullscreen, or picking an item in a menu), so the next A press pauses again as expected. Buttons for repeated use (the chapter buttons, the volume menu) keep it. The focused button is now filled and ringed, and closing a menu with B puts the focus back on the button that opened it.
+
+### Fixed
+- Steam Deck Game Mode: SVP playback dropped about half its frames since 1.28.0, because the app synced video to the screen's reported 120 Hz while gamescope shows frames at 60. While playing, the app now checks the rate frames are actually shown at and follows it instead of the screen's reported rate when the two differ.
+- Game Mode: video is no longer capped at 60 fps on displays faster than 60 Hz (SVP at 120 fps reached only ~60 on a 120 Hz handheld).
+
 ## [1.30.2] — 2026-10-24
 
 ### Fixed
