@@ -1,4 +1,5 @@
 pub mod compositor;
+pub mod diag;
 pub mod user_config;
 pub mod video_area;
 
@@ -259,7 +260,11 @@ impl Player {
             mpv.observe_property(name, format, id)
                 .map_err(|e| anyhow!("failed to observe {name}: {e:?}"))?;
         }
+        // Read (and logged) once, before playback.
+        diag::switches();
         spawn_event_thread(mpv);
+        diag::spawn_stats_thread(mpv);
+        diag::spawn_rate_watch(mpv);
         Ok(Self { mpv })
     }
 
@@ -488,7 +493,9 @@ impl Player {
         self.update_video_sync()?;
         if enabled {
             self.switch_hwdec(HWDEC_DIRECT, HWDEC_COPY);
-            self.set("input-ipc-server", socket)
+            let result = self.set("input-ipc-server", socket);
+            diag::log_config(self.mpv, "SVP on");
+            result
         } else {
             // Clearing the option only closes the listening socket; mpv
             // keeps serving clients already connected, so SVP Manager
@@ -504,6 +511,7 @@ impl Player {
             // drops to software decoding.
             self.switch_hwdec(HWDEC_COPY, HWDEC_DIRECT);
             self.remove_svp_filter();
+            diag::log_config(self.mpv, "SVP off");
             Ok(())
         }
     }
@@ -596,10 +604,11 @@ impl Player {
     /// frames against a 120 Hz display; mpv stretches audio slightly to match.
     fn update_video_sync(self) -> Result<()> {
         let display = self.smooth_motion() || SVP_ON.load(std::sync::atomic::Ordering::Relaxed);
-        self.set(
-            "video-sync",
-            if display { "display-resample" } else { "audio" },
-        )
+        let mode = diag::switches()
+            .video_sync
+            .as_deref()
+            .unwrap_or(if display { "display-resample" } else { "audio" });
+        self.set("video-sync", mode)
     }
 
     /// The refresh rate of the monitor showing the video: libmpv can't
@@ -904,6 +913,10 @@ fn spawn_event_thread(mpv: &'static Mpv) {
                     log_mpv(prefix, level, text);
                     None
                 }
+                Some(Ok(Event::Seek | Event::PlaybackRestart)) => {
+                    diag::note_disturbance();
+                    None
+                }
                 Some(Ok(Event::EndFile(reason))) => {
                     tracing::info!("playback ended (reason {reason})");
                     if reason == END_FILE_REASON_ERROR {
@@ -922,6 +935,19 @@ fn spawn_event_thread(mpv: &'static Mpv) {
                 }
                 _ => None,
             };
+            match &event {
+                Some(PlayerEvent::FileLoaded) => {
+                    diag::set_loaded(true);
+                    diag::note_disturbance();
+                    diag::log_config(mpv, "playback start");
+                }
+                Some(PlayerEvent::Finished(_)) => diag::set_loaded(false),
+                Some(PlayerEvent::Pause(paused)) => {
+                    diag::set_paused(*paused);
+                    diag::note_disturbance();
+                }
+                _ => {}
+            }
             if let (Some(event), Some(handler)) = (event, EVENT_HANDLER.get()) {
                 handler(event);
             }

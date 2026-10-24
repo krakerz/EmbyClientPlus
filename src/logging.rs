@@ -44,6 +44,7 @@ pub fn init() -> Option<PathBuf> {
     match file {
         Ok((_, path)) => {
             tracing::info!("logging to {}", path.display());
+            log_gtk_environment();
             Some(path)
         }
         Err(e) => {
@@ -79,6 +80,18 @@ pub fn redact(text: &str) -> Cow<'_, str> {
     }
     out.push_str(&text[pos..]);
     Cow::Owned(out)
+}
+
+/// The GTK settings in effect, ours (gamescope.rs) or the user's, so a log
+/// shows how the app drew.
+fn log_gtk_environment() {
+    let vars = ["GDK_BACKEND", "GSK_RENDERER", "GDK_DEBUG"].map(|name| {
+        format!(
+            "{name}={}",
+            std::env::var(name).unwrap_or_else(|_| "-".into())
+        )
+    });
+    tracing::info!("GTK: {}", vars.join(" "));
 }
 
 /// Where log files go.

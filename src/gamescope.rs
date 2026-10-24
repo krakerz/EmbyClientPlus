@@ -16,13 +16,21 @@ fn detected_in(var: impl Fn(&str) -> Option<String>) -> bool {
 /// Picks a GTK setup that works in gamescope, unless the user chose one:
 /// gamescope's Vulkan WSI layer aborts GTK's Vulkan renderer, and its
 /// Xwayland is the reliable way in (Wayland is only exposed on request).
+/// gamescope sends GTK's X11 backend no frame timings, so GTK paces its
+/// redraws at an assumed 60 Hz and caps video there (SVP's 120 fps showed
+/// as ~60 on a 120 Hz handheld); `no-vsync` lets mpv's frames through and
+/// gamescope still limits presentation to the display.
 ///
 /// Must run before GTK initialises and before any other thread starts.
 pub fn prepare_environment() {
     if !detected() {
         return;
     }
-    for (name, value) in [("GSK_RENDERER", "ngl"), ("GDK_BACKEND", "x11")] {
+    for (name, value) in [
+        ("GSK_RENDERER", "ngl"),
+        ("GDK_BACKEND", "x11"),
+        ("GDK_DEBUG", "no-vsync"),
+    ] {
         if std::env::var_os(name).is_none() {
             // SAFETY: called first thing in main, while single-threaded.
             unsafe { std::env::set_var(name, value) };

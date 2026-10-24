@@ -114,6 +114,15 @@ embyclientplus --help | --version
 **SVP doesn't kick in?** The SVP button shows why: green interpolating, amber waiting for SVP
 Manager, red SVP Manager not running, grey SVP not found.
 
+**Choppy playback or dropped frames?** The log carries a timing line every 10 seconds while playing.
+For troubleshooting, these environment variables change the timing setup (read at startup):
+
+- `EMBYCLIENTPLUS_VIDEO_SYNC=<mode>`: use this mpv `video-sync` mode instead of the app's choice (e.g. `audio`).
+- `EMBYCLIENTPLUS_DISPLAY_FPS=<number>|off`: use this refresh rate for display timing, or `off` to set none.
+  By default the app starts with the screen's rate and follows the rate frames are actually shown at
+  when the two differ; this switch makes the value final.
+- `EMBYCLIENTPLUS_REPORT_SWAP=0`: stop reporting presented frames to mpv (also turns that check off).
+
 **Where are settings and logs?** `config.toml` and `logs/` are in `~/.config/embyclientplus/`
 (Linux), `%APPDATA%\EmbyClient+\` (Windows) or `~/Library/Application Support/EmbyClient+/` (macOS).
 

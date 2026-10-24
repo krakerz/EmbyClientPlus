@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [1.30.3] — 2026-10-24
+
+### Added
+- More playback timing details in the log, to diagnose dropped frames.
+
+### Fixed
+- Steam Deck Game Mode: SVP playback dropped about half its frames since 1.28.0, because the app synced video to the screen's reported 120 Hz while gamescope shows frames at 60. While playing, the app now checks the rate frames are actually shown at and follows it instead of the screen's reported rate when the two differ.
+- Game Mode: video is no longer capped at 60 fps on displays faster than 60 Hz (SVP at 120 fps reached only ~60 on a 120 Hz handheld).
+
 ## [1.30.2] — 2026-10-24
 
 ### Fixed
