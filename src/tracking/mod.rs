@@ -282,4 +282,8 @@ pub trait TrackingService: Send + Sync {
     ) -> BoxFuture<'a, Result<Option<trakt::ShowState>>> {
         Box::pin(async { Ok(None) })
     }
+    /// Trakt: the movies watched, from the session's copy when there is one.
+    fn watched_movies(&self) -> BoxFuture<'_, Result<std::sync::Arc<trakt::WatchedMovies>>> {
+        Box::pin(async { Ok(Default::default()) })
+    }
 }

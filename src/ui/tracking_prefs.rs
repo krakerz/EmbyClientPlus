@@ -8,7 +8,7 @@ use adw::prelude::*;
 use gtk::glib;
 
 use crate::config::{Settings, TrackingSettings};
-use crate::runtime::spawn_tokio;
+use crate::runtime::spawn_tokio_checked;
 use crate::tracking::tracker;
 use crate::tracking::{Account, LoginInput, ServiceId, oauth, trakt};
 
@@ -137,7 +137,9 @@ fn log_out_of(id: ServiceId, row: &adw::ActionRow, suffix: &gtk::Box) {
     suffix.set_sensitive(false);
     let (row, suffix) = (row.downgrade(), suffix.downgrade());
     glib::spawn_future_local(async move {
-        let result = spawn_tokio(async move { tracker::get().service(id).logout().await }).await;
+        let result = spawn_tokio_checked(async move { tracker::get().service(id).logout().await })
+            .await
+            .and_then(|result| result);
         tracker::get().clear_cache();
         let (Some(row), Some(suffix)) = (row.upgrade(), suffix.upgrade()) else {
             return;
@@ -167,7 +169,9 @@ fn run_login(id: ServiceId, input: LoginInput, row: &adw::ActionRow, suffix: &gt
     let (row, suffix) = (row.downgrade(), suffix.downgrade());
     glib::spawn_future_local(async move {
         let result =
-            spawn_tokio(async move { tracker::get().service(id).login(input).await }).await;
+            spawn_tokio_checked(async move { tracker::get().service(id).login(input).await })
+                .await
+                .and_then(|result| result);
         let (Some(row), Some(suffix)) = (row.upgrade(), suffix.upgrade()) else {
             return;
         };
@@ -275,7 +279,9 @@ fn ask_trakt(anchor: &gtk::Button, row: &adw::ActionRow, suffix: &gtk::Box) {
     suffix.set_sensitive(false);
     let (anchor, row, suffix) = (anchor.downgrade(), row.downgrade(), suffix.downgrade());
     glib::spawn_future_local(async move {
-        let code = spawn_tokio(trakt::request_code()).await;
+        let code = spawn_tokio_checked(trakt::request_code())
+            .await
+            .and_then(|code| code);
         let (Some(anchor), Some(row), Some(suffix)) =
             (anchor.upgrade(), row.upgrade(), suffix.upgrade())
         else {
@@ -335,13 +341,14 @@ fn ask_trakt(anchor: &gtk::Button, row: &adw::ActionRow, suffix: &gtk::Box) {
             move |_| cancel.store(true, Ordering::Relaxed)
         });
         dialog.present(Some(&anchor));
-        let result = spawn_tokio(async move {
+        let result = spawn_tokio_checked(async move {
             tracker::get()
                 .service(ServiceId::Trakt)
                 .login(LoginInput::DeviceCode(code))
                 .await
         })
-        .await;
+        .await
+        .and_then(|result| result);
         let cancelled = cancel.load(Ordering::Relaxed);
         dialog.force_close();
         if cancelled {

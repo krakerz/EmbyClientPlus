@@ -8,7 +8,7 @@ use super::resolve::Resolution;
 use super::resolve::ShowIds;
 use super::rules::{self, ListStatus};
 use super::tracker::target_of;
-use super::trakt::ShowState;
+use super::trakt::{ShowState, WatchedMovies};
 use super::{EntryInfo, ServiceId};
 
 /// The chips' left-to-right order.
@@ -66,8 +66,26 @@ pub enum TraktRead<'a> {
     Show(&'a ShowState),
 }
 
+/// What reading the user's watched movies on Trakt gave.
+#[derive(Clone, Copy)]
+pub enum MovieRead<'a> {
+    Failed(&'a str),
+    List(&'a WatchedMovies),
+}
+
 /// The chip of MAL, AniList or Kitsu for one resolved episode.
 pub fn mapping_chip(service: ServiceId, resolution: &Resolution, queued: bool, read: Read) -> Chip {
+    mapping_chip_for(service, resolution, queued, read, false)
+}
+
+/// `movie`: the tooltip names the entry only, without an episode number.
+pub fn mapping_chip_for(
+    service: ServiceId,
+    resolution: &Resolution,
+    queued: bool,
+    read: Read,
+    movie: bool,
+) -> Chip {
     let name = service.short();
     let unmatched = |why: &str| Chip {
         service,
@@ -99,7 +117,11 @@ pub fn mapping_chip(service: ServiceId, resolution: &Resolution, queued: bool, r
         .map(|i| i.title.as_str())
         .filter(|t| !t.is_empty())
         .map_or_else(|| format!("entry {}", target.id), str::to_string);
-    let base = format!("{name}: {title} · ep {}", target.episode);
+    let base = if movie {
+        format!("{name}: {title}")
+    } else {
+        format!("{name}: {title} · ep {}", target.episode)
+    };
     let chip = |state, note: &str| Chip {
         service,
         state,
@@ -162,6 +184,33 @@ pub fn trakt_chip(
             None => chip(
                 ChipState::NotYet,
                 "status unknown: no Trakt episode matches this episode's IDs",
+            ),
+        },
+    }
+}
+
+/// Trakt's chip for a movie: watched or not on the user's watched list,
+/// matched by the movie's own ids. Without a TMDB or IMDb id the chip is
+/// dimmed as unknown.
+pub fn trakt_movie_chip(title: &str, queued: bool, read: MovieRead, ids: &ShowIds) -> Chip {
+    let service = ServiceId::Trakt;
+    let title = if title.is_empty() { "movie" } else { title };
+    let chip = |state, note: &str| Chip {
+        service,
+        state,
+        tooltip: format!("Trakt: {title} — {note}"),
+    };
+    if queued {
+        return chip(ChipState::Queued, "update queued");
+    }
+    match read {
+        MovieRead::Failed(why) => chip(ChipState::NotYet, &format!("status unavailable ({why})")),
+        MovieRead::List(movies) => match movies.watched(ids) {
+            Some(true) => chip(ChipState::OnList, "watched"),
+            Some(false) => chip(ChipState::NotYet, "not watched on Trakt yet"),
+            None => chip(
+                ChipState::NotYet,
+                "status unknown: the movie has no TMDB or IMDb id",
             ),
         },
     }
@@ -407,5 +456,67 @@ mod tests {
     fn chip_text_and_order() {
         let text: Vec<&str> = ORDER.iter().map(|&id| label(id)).collect();
         assert_eq!(text, ["AL", "MAL", "Kitsu", "Trakt"]);
+    }
+
+    fn watched_list() -> WatchedMovies {
+        crate::tracking::trakt::movies_from_watched(&serde_json::json!([
+            {"movie": {"ids": {"tmdb": 557, "imdb": "tt0145487"}}},
+            {"movie": {"ids": {"imdb": "tt0000002"}}},
+        ]))
+    }
+
+    fn movie_ids(tmdb: Option<u32>, imdb: Option<&str>) -> ShowIds {
+        ShowIds {
+            tmdb,
+            imdb: imdb.map(str::to_string),
+            ..ShowIds::default()
+        }
+    }
+
+    #[test]
+    fn a_movie_chip_has_no_episode_number() {
+        let found = matched(Some((1, 1)), None);
+        let list = entries(1, Some(1), ListStatus::Completed);
+        let chip = mapping_chip_for(ServiceId::Mal, &found, false, Read::Entries(&list), true);
+        assert_eq!(chip.tooltip, "MAL: Dr. Stone — on your list");
+        let none = entries(1, None, ListStatus::PlanToWatch);
+        let chip = mapping_chip_for(ServiceId::Mal, &found, false, Read::Entries(&none), true);
+        assert!(
+            chip.tooltip
+                .starts_with("MAL: Dr. Stone — not on your list yet")
+        );
+        assert!(!chip.tooltip.contains("ep 1"));
+    }
+
+    #[test]
+    fn trakt_movie_chip_states() {
+        let list = watched_list();
+        let chip = |queued, ids: &ShowIds| {
+            trakt_movie_chip("Spider-Man", queued, MovieRead::List(&list), ids)
+        };
+        let by_tmdb = chip(false, &movie_ids(Some(557), None));
+        assert_eq!(by_tmdb.state, ChipState::OnList);
+        assert_eq!(by_tmdb.tooltip, "Trakt: Spider-Man — watched");
+        let by_imdb = chip(false, &movie_ids(None, Some("tt0000002")));
+        assert_eq!(by_imdb.state, ChipState::OnList);
+        let not_yet = chip(false, &movie_ids(Some(1), Some("tt1")));
+        assert_eq!(not_yet.state, ChipState::NotYet);
+        assert_eq!(
+            not_yet.tooltip,
+            "Trakt: Spider-Man — not watched on Trakt yet"
+        );
+        let unknown = chip(false, &ShowIds::default());
+        assert_eq!(unknown.state, ChipState::NotYet);
+        assert!(unknown.tooltip.contains("status unknown"));
+        // a queued write wins, even without ids
+        assert_eq!(chip(true, &ShowIds::default()).state, ChipState::Queued);
+        let failed = trakt_movie_chip(
+            "Spider-Man",
+            false,
+            MovieRead::Failed("offline"),
+            &movie_ids(Some(557), None),
+        );
+        assert_eq!(failed.state, ChipState::NotYet);
+        assert!(failed.tooltip.contains("offline"));
     }
 }

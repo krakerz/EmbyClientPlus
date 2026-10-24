@@ -1,6 +1,6 @@
-//! The per-episode sync chips (AL / MAL / Kitsu / Trakt): on an episode row
-//! of the series page, left of the row's own trailing icons, and after the
-//! action buttons on the episode details page.
+//! The sync chips (AL / MAL / Kitsu / Trakt): on an episode row of the series
+//! page, left of the row's own trailing icons, and after the action buttons
+//! on the episode and movie details pages.
 //!
 //! Alignment: a chip is added to the same container as the icons/buttons it
 //! sits beside (the row's suffix box, the hero's button box), so the gap
@@ -182,45 +182,46 @@ fn refresh_rows(page: Rc<Page>, tries: u32) {
     });
 }
 
-/// Fills the chips after the action buttons of an episode's details page
-/// (movies and the like have none).
+/// Fills the chips after the action buttons of an episode's or movie's
+/// details page (other items have none).
 pub fn show_on_buttons(buttons: &gtk::Box, item: &BaseItem) {
-    let Some(series_id) = item.series_id.clone() else {
-        return;
+    let supported = match item.item_type.as_str() {
+        "Episode" => item.series_id.is_some(),
+        "Movie" => true,
+        _ => false,
     };
-    if item.item_type != "Episode" || tracker::get().active().is_empty() {
+    if !supported || tracker::get().active().is_empty() {
         return;
     }
-    // The box is reused for the next episode: its name says whose it is.
+    // The box is reused for the next item: its name says whose it is.
     buttons.set_widget_name(&item.id);
-    let name = item.series_name.clone().unwrap_or_default();
-    refresh_buttons(buttons.downgrade(), item.clone(), series_id, name, 0);
+    refresh_buttons(buttons.downgrade(), item.clone(), 0);
 }
 
-fn refresh_buttons(
-    buttons: glib::WeakRef<gtk::Box>,
-    episode: BaseItem,
-    series_id: String,
-    series_name: String,
-    tries: u32,
-) {
+fn refresh_buttons(buttons: glib::WeakRef<gtk::Box>, item: BaseItem, tries: u32) {
     glib::spawn_future_local(async move {
-        let (sid, name, items) = (
-            series_id.clone(),
-            series_name.clone(),
-            vec![episode.clone()],
-        );
-        let result =
-            spawn_tokio(async move { tracker::get().episode_markers(&sid, &name, &items).await })
-                .await;
+        let asked = item.clone();
+        let result = spawn_tokio(async move {
+            let tracker = tracker::get();
+            if asked.item_type == "Movie" {
+                return tracker.movie_markers(&asked).await;
+            }
+            let series_id = asked.series_id.clone().unwrap_or_default();
+            let name = asked.series_name.clone().unwrap_or_default();
+            let mut found = tracker
+                .episode_markers(&series_id, &name, std::slice::from_ref(&asked))
+                .await?;
+            Ok(found.remove(&asked.id).unwrap_or_default())
+        })
+        .await;
         let Some(buttons) = buttons.upgrade() else {
             return;
         };
-        if buttons.widget_name() != episode.id {
+        if buttons.widget_name() != item.id {
             return;
         }
         let chips = match result {
-            Ok(mut found) => found.remove(&episode.id).unwrap_or_default(),
+            Ok(chips) => chips,
             Err(e) => {
                 tracing::debug!("sync markers: {e:#}");
                 return;
@@ -239,7 +240,7 @@ fn refresh_buttons(
         if any_queued(&[chips]) && tries < RECHECKS {
             let weak = buttons.downgrade();
             glib::timeout_add_seconds_local_once(RECHECK_SECS, move || {
-                refresh_buttons(weak, episode, series_id, series_name, tries + 1);
+                refresh_buttons(weak, item, tries + 1);
             });
         }
     });

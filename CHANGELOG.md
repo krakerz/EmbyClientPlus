@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [1.30.1] — 2026-10-24
+
+### Added
+- The movie page shows the Trakt chip (watched or not) after the buttons, plus MAL / AniList / Kitsu chips for anime movies.
+
+### Fixed
+- Shows that aren't anime no longer get "not matched" MAL / AniList / Kitsu chips, the "Tracking:" line or skip notices; only Trakt is shown for them.
+- Logging in to MyAnimeList, AniList, Kitsu or Trakt no longer crashes on systems whose keyring runs over Secret Service (e.g. SteamOS), where Trakt then kept waiting after you approved the code.
+- A login that fails for any reason now says so and resets the row instead of waiting forever.
+- Trakt: no more "use stop to scrobble" or "at least 1%" errors when pausing near the end or stopping right after the start.
+
 ## [1.30.0] — 2026-10-23
 
 ### Added
