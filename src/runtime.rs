@@ -23,6 +23,22 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
+    let result = spawn_tokio_checked(future);
+    async move {
+        result
+            .await
+            .expect("tokio task panicked before sending its result")
+    }
+}
+
+/// Like [`spawn_tokio`], but a task that panicked (or was dropped) before
+/// producing its output is an error the caller can show, instead of a panic
+/// on the GTK main thread. For flows where the UI waits on the task.
+pub fn spawn_tokio_checked<F>(future: F) -> impl Future<Output = anyhow::Result<F::Output>>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
     let (sender, receiver) = tokio::sync::oneshot::channel();
     runtime().spawn(async move {
         let _ = sender.send(future.await);
@@ -30,7 +46,7 @@ where
     async move {
         receiver
             .await
-            .expect("tokio task panicked before sending its result")
+            .map_err(|_| anyhow::anyhow!("the task failed unexpectedly, see the log"))
     }
 }
 
@@ -63,5 +79,18 @@ mod tests {
     fn spawn_tokio_returns_the_output() {
         let value = gtk::glib::MainContext::new().block_on(spawn_tokio(async { 40 + 2 }));
         assert_eq!(value, 42);
+    }
+
+    #[test]
+    fn spawn_tokio_checked_reports_a_panicked_task() {
+        let ctx = gtk::glib::MainContext::new();
+        let failed = ctx.block_on(spawn_tokio_checked(async {
+            if true {
+                panic!("boom");
+            }
+            1
+        }));
+        assert!(failed.is_err());
+        assert_eq!(ctx.block_on(spawn_tokio_checked(async { 7 })).unwrap(), 7);
     }
 }

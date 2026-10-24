@@ -9,12 +9,27 @@ use crate::config::config_dir;
 
 const SERVICE: &str = "embyclientplus";
 
+/// Runs `f` on a fresh plain thread and waits for it. The secret-service
+/// keyring store drives D-Bus with its own `block_on`, which panics when it
+/// is reached from inside a tokio runtime (and poisons the store's mutex, so
+/// every later keyring call would panic too). A new thread has no runtime
+/// context, so keyring calls stay safe from tokio tasks. Not `spawn_blocking`:
+/// pool threads still carry the runtime handle.
+fn off_runtime<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|scope| match scope.spawn(f).join() {
+        Ok(value) => value,
+        Err(panic) => std::panic::resume_unwind(panic),
+    })
+}
+
 /// Stores the Emby access token for a given server, preferring the
 /// system keyring (secret-service over D-Bus) and falling back to a
 /// plaintext file only when no keyring backend is reachable (e.g. a bare
 /// window-manager setup with no secret-service daemon running).
 pub fn store_token(server_url: &str, token: &str) -> Result<()> {
-    match Entry::new(SERVICE, server_url).and_then(|entry| entry.set_password(token)) {
+    let stored =
+        off_runtime(|| Entry::new(SERVICE, server_url).and_then(|entry| entry.set_password(token)));
+    match stored {
         Ok(()) => {
             // Keyring succeeded — make sure a stale plaintext copy from an
             // earlier no-keyring run doesn't linger and shadow it.
@@ -26,14 +41,15 @@ pub fn store_token(server_url: &str, token: &str) -> Result<()> {
 }
 
 pub fn get_token(server_url: &str) -> Result<Option<String>> {
-    match Entry::new(SERVICE, server_url).and_then(|entry| entry.get_password()) {
+    match off_runtime(|| Entry::new(SERVICE, server_url).and_then(|entry| entry.get_password())) {
         Ok(token) => Ok(Some(token)),
         Err(_) => get_plaintext_token(server_url),
     }
 }
 
 pub fn delete_token(server_url: &str) -> Result<()> {
-    let _ = Entry::new(SERVICE, server_url).and_then(|entry| entry.delete_credential());
+    let _ =
+        off_runtime(|| Entry::new(SERVICE, server_url).and_then(|entry| entry.delete_credential()));
     remove_plaintext_token(server_url)
 }
 
@@ -129,6 +145,18 @@ fn remove_plaintext_token(server_url: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn off_runtime_allows_a_nested_block_on() {
+        // Mirrors the keyring store: it calls `block_on` itself, which
+        // panics inside a tokio runtime unless it runs on a plain thread.
+        let value = off_runtime(|| {
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(async { 40 + 2 })
+        });
+        assert_eq!(value, 42);
+    }
 
     #[test]
     fn plaintext_store_round_trips_and_restricts_permissions() {

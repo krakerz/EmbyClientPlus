@@ -135,6 +135,16 @@ fn action_path(action: ScrobbleAction) -> &'static str {
     }
 }
 
+/// Scrobbles Trakt answers with a 422, so they aren't sent: a pause or stop
+/// below 1 %, and a pause from 80 % on (the later stop scrobbles it).
+fn scrobble_refused(action: ScrobbleAction, progress: f32) -> bool {
+    match action {
+        ScrobbleAction::Start => false,
+        ScrobbleAction::Pause => !(1.0..80.0).contains(&progress),
+        ScrobbleAction::Stop => progress < 1.0,
+    }
+}
+
 fn scrobble_body(item: &TraktItem, progress: f32) -> Value {
     json!({ single_key(item.kind): { "ids": ids_json(&item.ids) }, "progress": progress })
 }
@@ -304,6 +314,44 @@ pub(super) fn episode_map_from_seasons(body: &Value) -> EpisodeMap {
     map
 }
 
+/// The movies Trakt lists as watched, by TMDB and IMDb id.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct WatchedMovies {
+    tmdb: HashSet<u32>,
+    imdb: HashSet<String>,
+}
+
+impl WatchedMovies {
+    /// Whether Trakt lists the movie (tmdb first, then imdb); `None` when
+    /// the ids hold neither, so there is nothing to match by.
+    pub fn watched(&self, ids: &ShowIds) -> Option<bool> {
+        if ids.tmdb.is_none() && ids.imdb.is_none() {
+            return None;
+        }
+        let by_tmdb = ids.tmdb.is_some_and(|id| self.tmdb.contains(&id));
+        let by_imdb = ids.imdb.as_ref().is_some_and(|id| self.imdb.contains(id));
+        Some(by_tmdb || by_imdb)
+    }
+}
+
+/// The movies in a `/sync/watched/movies` answer.
+pub(super) fn movies_from_watched(body: &Value) -> WatchedMovies {
+    let mut movies = WatchedMovies::default();
+    for entry in body.as_array().into_iter().flatten() {
+        if let Some(id) = entry
+            .pointer("/movie/ids/tmdb")
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+        {
+            movies.tmdb.insert(id);
+        }
+        if let Some(id) = entry.pointer("/movie/ids/imdb").and_then(Value::as_str) {
+            movies.imdb.insert(id.to_string());
+        }
+    }
+    movies
+}
+
 /// What Trakt has on one show: the watched episodes and the numbering.
 #[derive(Clone)]
 pub struct ShowState {
@@ -364,6 +412,8 @@ pub struct Trakt {
     progress: Mutex<HashMap<u64, Arc<Watched>>>,
     /// Trakt show id → its episode numbering (stable, kept for the session).
     numbering: Mutex<HashMap<u64, Arc<EpisodeMap>>>,
+    /// The watched movies, read once per session; dropped after our own writes.
+    movies: Mutex<Option<Arc<WatchedMovies>>>,
 }
 
 impl Default for Trakt {
@@ -380,6 +430,7 @@ impl Trakt {
             show_ids: Mutex::new(HashMap::new()),
             progress: Mutex::new(HashMap::new()),
             numbering: Mutex::new(HashMap::new()),
+            movies: Mutex::new(None),
         }
     }
 
@@ -530,8 +581,7 @@ impl Trakt {
         action: ScrobbleAction,
         progress: f32,
     ) -> Result<Outcome> {
-        // Trakt refuses a pause below 1 %.
-        if action == ScrobbleAction::Pause && progress < 1.0 {
+        if scrobble_refused(action, progress) {
             return Ok(Outcome::Unchanged);
         }
         let url = format!("{API_URL}/scrobble/{}", action_path(action));
@@ -546,14 +596,39 @@ impl Trakt {
                 check(resp).await?;
                 if action == ScrobbleAction::Stop {
                     // A finished play changes the watched list.
-                    self.progress
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .clear();
+                    self.forget_watched();
                 }
                 Ok(Outcome::Done)
             }
         }
+    }
+
+    /// Drops the session's copies of the watched lists (shows and movies).
+    fn forget_watched(&self) {
+        self.progress
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        *self.movies.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// The user's watched movies: one call per session, until our own writes.
+    pub async fn watched_movies(&self) -> Result<Arc<WatchedMovies>> {
+        let cached = self
+            .movies
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(movies) = cached {
+            return Ok(movies);
+        }
+        let body = self
+            .get_json("sync/watched/movies")
+            .await?
+            .unwrap_or(Value::Null);
+        let movies = Arc::new(movies_from_watched(&body));
+        *self.movies.lock().unwrap_or_else(|e| e.into_inner()) = Some(movies.clone());
+        Ok(movies)
     }
 
     /// GET with the bearer token; `None` on a 404.
@@ -712,10 +787,7 @@ impl Trakt {
             .json()
             .await
             .unwrap_or(Value::Null);
-        self.progress
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
+        self.forget_watched();
         if not_found_count(&answer) >= send.len() {
             return Ok(Outcome::Skipped(
                 "Trakt doesn't know this title".to_string(),
@@ -783,6 +855,10 @@ impl TrackingService for Trakt {
 
     fn show_progress<'a>(&'a self, ids: &'a ShowIds) -> BoxFuture<'a, Result<Option<ShowState>>> {
         Box::pin(async move { self.show_state(ids, false).await })
+    }
+
+    fn watched_movies(&self) -> BoxFuture<'_, Result<Arc<WatchedMovies>>> {
+        Box::pin(Trakt::watched_movies(self))
     }
 }
 
@@ -880,6 +956,20 @@ mod tests {
         {"number":2,"aired":2,"completed":0,"episodes":[
             {"number":1,"completed":false,"last_watched_at":null},
             {"number":2,"completed":false,"last_watched_at":null}]}]}"#;
+
+    #[test]
+    fn scrobble_guard_skips_what_trakt_rejects() {
+        use ScrobbleAction::{Pause, Start, Stop};
+        assert!(scrobble_refused(Pause, 0.5));
+        assert!(scrobble_refused(Stop, 0.5));
+        assert!(scrobble_refused(Pause, 80.0));
+        assert!(scrobble_refused(Pause, 90.7));
+        assert!(!scrobble_refused(Pause, 1.0));
+        assert!(!scrobble_refused(Pause, 79.9));
+        assert!(!scrobble_refused(Stop, 1.0));
+        assert!(!scrobble_refused(Stop, 95.0));
+        assert!(!scrobble_refused(Start, 0.0));
+    }
 
     #[test]
     fn scrobble_body_shape() {
@@ -1021,6 +1111,34 @@ mod tests {
             state.episode_watched(&ids(Some(11), None, None), 1),
             Some(false)
         );
+    }
+
+    #[test]
+    fn watched_movies_match_by_tmdb_then_imdb() {
+        let body = json!([
+            {"plays": 1, "movie": {"title": "Spider-Man", "ids": {"trakt": 1, "tmdb": 557, "imdb": "tt0145487"}}},
+            {"plays": 2, "movie": {"title": "No tmdb", "ids": {"trakt": 2, "tmdb": null, "imdb": "tt0000002"}}},
+        ]);
+        let movies = movies_from_watched(&body);
+        let ids = |tmdb: Option<u32>, imdb: Option<&str>| ShowIds {
+            tmdb,
+            imdb: imdb.map(str::to_string),
+            ..ShowIds::default()
+        };
+        // tmdb match, even with a wrong imdb
+        assert_eq!(movies.watched(&ids(Some(557), Some("tt9"))), Some(true));
+        // imdb fallback
+        assert_eq!(movies.watched(&ids(None, Some("tt0000002"))), Some(true));
+        assert_eq!(movies.watched(&ids(Some(1), Some("tt0000002"))), Some(true));
+        // known ids, not watched
+        assert_eq!(movies.watched(&ids(Some(1), Some("tt1"))), Some(false));
+        // nothing to match by (tvdb alone doesn't count)
+        let tvdb_only = ShowIds {
+            tvdb: Some(5),
+            ..ShowIds::default()
+        };
+        assert_eq!(movies.watched(&tvdb_only), None);
+        assert_eq!(movies_from_watched(&Value::Null), WatchedMovies::default());
     }
 
     #[test]

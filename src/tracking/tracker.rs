@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
-use super::markers::{self, Chip, Read, TraktRead};
+use super::markers::{self, Chip, MovieRead, Read, TraktRead};
 use super::resolve::{self, EpisodeResolution, Match, Resolution, Route, ShowIds, Target};
 use super::{
     Direction, EntryInfo, EntryKey, HistoryEntry, LoggedOut, Outcome, ScrobbleAction, ServiceId,
@@ -683,8 +683,17 @@ impl Tracker {
                         }
                     }
                     Resolution::Skipped { silent, .. } => {
-                        if !silent {
+                        // A movie or a show AniBridge doesn't know at all (not
+                        // anime) is only logged; a known show toasts the episode.
+                        let known = match item.series_id.as_deref() {
+                            _ if item.item_type == "Movie" => false,
+                            Some(series_id) => self.series_known(session, series_id).await,
+                            None => true,
+                        };
+                        if !silent && known {
                             notify(unmatched_text(item));
+                        } else if !silent {
+                            tracing::info!("{}: unknown to AniBridge, skipped", item.name);
                         }
                         state.remaining.retain(|id| !mapping_ids.contains(id));
                     }
@@ -858,7 +867,10 @@ impl Tracker {
         let queued = queued_pairs(&session).await;
         let resolved = if active.iter().any(|id| id.uses_mapping()) {
             match self.series_status(series_id.to_string()).await {
-                Ok(resolved) => Some(resolved),
+                // A show AniBridge doesn't know at all gets no mapping chips
+                // (a non-anime show would show "not matched" on every episode).
+                Ok(resolved) if show_known(&resolved) => Some(resolved),
+                Ok(_) => None,
                 Err(e) => {
                     tracing::debug!("sync markers: {series_id} not resolved: {e:#}");
                     None
@@ -947,6 +959,112 @@ impl Tracker {
             markers.insert(episode.id.clone(), chips);
         }
         Ok(markers)
+    }
+
+    /// The sync markers of one movie (it needs its `ProviderIds`): Trakt's
+    /// watched-or-not, and MAL / AniList / Kitsu only when AniBridge knows
+    /// the movie (an anime movie); most movies aren't, and get no chip.
+    pub async fn movie_markers(&'static self, movie: &BaseItem) -> Result<Vec<Chip>> {
+        let active = self.active();
+        if active.is_empty() {
+            return Ok(Vec::new());
+        }
+        let session = self.session().context("no session")?;
+        let queued = queued_pairs(&session).await;
+        let ids = ShowIds::from_provider_ids(&movie.provider_ids);
+        let matched = if active.iter().any(|id| id.uses_mapping()) {
+            match mapping::index().await {
+                Ok(index) => match resolve::resolve_movie(&index, &ids) {
+                    Resolution::Matched(found) => Some(found),
+                    Resolution::Skipped { .. } => None,
+                },
+                Err(e) => {
+                    tracing::debug!("sync markers: movie {} not resolved: {e:#}", movie.id);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let mut chips = Vec::new();
+        for id in markers::ORDER.into_iter().filter(|id| active.contains(id)) {
+            let pending = queued.contains(&(movie.id.clone(), id));
+            if id == ServiceId::Trakt {
+                let list = self.service(ServiceId::Trakt).watched_movies().await;
+                let read = match &list {
+                    Ok(list) => MovieRead::List(list),
+                    Err(e) => {
+                        let why = self.read_failure(ServiceId::Trakt, e);
+                        chips.push(markers::trakt_movie_chip(
+                            &movie.name,
+                            pending,
+                            MovieRead::Failed(&why),
+                            &ids,
+                        ));
+                        continue;
+                    }
+                };
+                chips.push(markers::trakt_movie_chip(&movie.name, pending, read, &ids));
+                continue;
+            }
+            let Some(found) = &matched else {
+                continue;
+            };
+            let Some(target) = target_of(id, found) else {
+                continue;
+            };
+            let key = EntryKey {
+                id: target.id,
+                anilist: found.anilist.map(|a| a.id),
+            };
+            let read = self
+                .read_entries(id, vec![key])
+                .await
+                .map_err(|e| self.read_failure(id, &e));
+            let read = match &read {
+                Ok(entries) => Read::Entries(entries),
+                Err(why) => Read::Failed(why),
+            };
+            chips.push(markers::mapping_chip_for(
+                id,
+                &Resolution::Matched(found.clone()),
+                pending,
+                read,
+                true,
+            ));
+        }
+        Ok(chips)
+    }
+
+    /// Whether AniBridge knows the show of an episode (the series resolution
+    /// is cached); `true` when that can't be told, so a skip still shows.
+    async fn series_known(&self, session: &SessionRef, series_id: &str) -> bool {
+        let cached = self
+            .cache
+            .lock()
+            .ok()
+            .and_then(|c| c.get(series_id).cloned());
+        if let Some(cached) = cached {
+            return show_known(&cached);
+        }
+        let resolved = async {
+            let index = mapping::index().await?;
+            resolve::resolve_series(&session.client, &session.user_id, series_id, &index).await
+        }
+        .await;
+        match resolved {
+            Ok(resolved) => {
+                let known = show_known(&resolved);
+                if let Ok(mut cache) = self.cache.lock() {
+                    cache.insert(series_id.to_string(), Arc::new(resolved));
+                }
+                known
+            }
+            Err(e) => {
+                tracing::debug!("tracking: {series_id} not resolved: {e:#}");
+                true
+            }
+        }
     }
 
     /// The entries of one mapping service: from the session's copy where
@@ -1291,8 +1409,23 @@ fn episode_runs(numbers: &[u32]) -> String {
         .join(", ")
 }
 
+/// Whether AniBridge knows the show: some episode resolves, or an id on its
+/// items points into AniBridge (a season id it rejected as another show's).
+/// A non-anime show is unknown: it gets no mapping chips, status line or
+/// skip toasts. Pure, tested.
+pub fn show_known(resolved: &[EpisodeResolution]) -> bool {
+    resolved.iter().any(|r| match &r.resolution {
+        Resolution::Matched(_) => true,
+        Resolution::Skipped {
+            suspect_season_anidb,
+            ..
+        } => suspect_season_anidb.is_some(),
+    })
+}
+
 /// "Tracking: MAL ✓ · AniList ✓ (item IDs) · S3 E13–E24 not matched"; `None`
-/// when no mapping service is active. Pure, tested.
+/// when no mapping service is active or AniBridge doesn't know the show.
+/// Pure, tested.
 pub fn status_line(resolved: &[EpisodeResolution], active: &[ServiceId]) -> Option<String> {
     let mapping: Vec<ServiceId> = active
         .iter()
@@ -1300,6 +1433,9 @@ pub fn status_line(resolved: &[EpisodeResolution], active: &[ServiceId]) -> Opti
         .filter(|id| id.uses_mapping())
         .collect();
     if mapping.is_empty() {
+        return None;
+    }
+    if !show_known(resolved) {
         return None;
     }
     let regular: Vec<&EpisodeResolution> = resolved.iter().filter(|r| r.season >= 1).collect();
@@ -1504,13 +1640,27 @@ mod tests {
 
     #[test]
     fn status_line_nothing_matched_or_no_mapping_service() {
-        let resolved = vec![skipped(1, 1, None)];
+        let resolved = vec![skipped(1, 1, Some(7))];
         assert_eq!(
             status_line(&resolved, &[ServiceId::Kitsu]).as_deref(),
             Some("Tracking: not matched")
         );
         assert_eq!(status_line(&resolved, &[ServiceId::Trakt]), None);
         assert_eq!(status_line(&resolved, &[]), None);
+    }
+
+    #[test]
+    fn a_show_unknown_to_anibridge_has_no_mapping_status() {
+        let unknown = vec![skipped(1, 1, None), skipped(1, 2, None)];
+        assert!(!show_known(&unknown));
+        assert!(!show_known(&[]));
+        assert_eq!(status_line(&unknown, &all_services()), None);
+        // one episode that resolves, or an id pointing into AniBridge, makes it known
+        let mut known = unknown.clone();
+        known.push(matched(1, 3, t(1, 3), None));
+        assert!(show_known(&known));
+        assert!(status_line(&known, &all_services()).is_some());
+        assert!(show_known(&[skipped(1, 1, Some(14087))]));
     }
 
     #[test]
