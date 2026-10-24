@@ -178,6 +178,15 @@ gridview > child:focus-visible .card {
 .card-button:focus-visible .card-title,
 gridview > child:focus-visible .card-title { color: @accent_color; }
 row:focus-visible { outline: 3px solid @accent_color; outline-offset: -3px; }
+/* Player controls mode (controller on the OSD bar): the focused button is
+   filled and ringed, unmistakable over any picture. */
+.player-bar.controls-mode button.osd-button:focus-visible,
+.player-bar.controls-mode menubutton.osd-button > button:focus-visible {
+    background: @accent_bg_color;
+    color: @accent_fg_color;
+    outline: 3px solid @accent_fg_color;
+    outline-offset: 2px;
+}
 /* Menus (player options, card menus): the highlighted choice stands out
    from video behind the popover, not just a faint tint. */
 popover.menu modelbutton:hover,

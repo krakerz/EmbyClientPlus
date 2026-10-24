@@ -46,6 +46,11 @@ impl Markers {
         self.credits.is_some_and(|start| position >= start)
     }
 
+    /// Whether chapter skipping means anything: two or more chapters.
+    pub fn can_skip_chapters(&self) -> bool {
+        self.chapters.len() >= 2
+    }
+
     /// The chapter start after/before `position`, for chapter keys.
     pub fn next_chapter(&self, position: f64) -> Option<f64> {
         self.chapters.iter().copied().find(|&c| c > position + 1.0)
@@ -115,6 +120,40 @@ mod tests {
         assert_eq!(markers.next_chapter(650.0), None);
         assert_eq!(markers.previous_chapter(301.0), Some(0.0));
         assert_eq!(markers.previous_chapter(400.0), Some(300.0));
+    }
+
+    #[test]
+    fn previous_chapter_restarts_the_current_one_first() {
+        let markers = Markers::from_chapters(&[
+            chapter(0, "Chapter"),
+            chapter(300, "Chapter"),
+            chapter(600, "Chapter"),
+        ]);
+        // Within 3 s of a chapter's start: the one before.
+        assert_eq!(markers.previous_chapter(302.0), Some(0.0));
+        assert_eq!(markers.previous_chapter(303.0), Some(0.0));
+        // Later: back to this chapter's own start.
+        assert_eq!(markers.previous_chapter(304.0), Some(300.0));
+        // In the first chapter there's nothing before 3 s; later, its start.
+        assert_eq!(markers.previous_chapter(2.0), None);
+        assert_eq!(markers.previous_chapter(10.0), Some(0.0));
+    }
+
+    #[test]
+    fn chapter_buttons_need_two_chapters() {
+        let none = Markers::default();
+        assert!(!none.can_skip_chapters());
+        let one = Markers::from_chapters(&[chapter(0, "Chapter")]);
+        assert!(!one.can_skip_chapters());
+        // Intro/credits markers aren't chapters.
+        let marked = Markers::from_chapters(&[
+            chapter(0, "Chapter"),
+            chapter(30, "IntroStart"),
+            chapter(120, "IntroEnd"),
+        ]);
+        assert!(!marked.can_skip_chapters());
+        let two = Markers::from_chapters(&[chapter(0, "Chapter"), chapter(300, "Chapter")]);
+        assert!(two.can_skip_chapters());
     }
 
     #[test]

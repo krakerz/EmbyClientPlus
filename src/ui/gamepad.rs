@@ -218,8 +218,12 @@ pub fn player_press(
     repeat: bool,
 ) -> bool {
     // Start: the OSD's buttons, driven like a page (directions move, A
-    // presses or opens, B or Start leave). Menus opened there work as
-    // below.
+    // presses or opens, B or Start leave; idle, or a finished action,
+    // leaves too). Menus opened there work as below. Every press restarts
+    // the idle countdown.
+    if page.controls_mode() {
+        page.touch_controls();
+    }
     if page.controls_mode() && !page.menu_open() {
         match controller::action_for(pad, Context::Browse) {
             Some(Action::Back | Action::Preferences) => page.leave_controls_mode(),
@@ -242,15 +246,14 @@ pub fn player_press(
     // through the menu, picks or closes it; any other button (like the
     // one that opened it) just closes it, and never leaves the player.
     match controller::action_for(pad, Context::Browse) {
-        Some(
-            Action::Up
-            | Action::Down
-            | Action::Left
-            | Action::Right
-            | Action::Activate
-            | Action::Back,
-        ) => false,
+        Some(Action::Up | Action::Down | Action::Left | Action::Right | Action::Activate) => false,
+        // Closing without choosing: controls mode keeps its button.
+        Some(Action::Back) => {
+            page.menu_dismissed();
+            false
+        }
         _ => {
+            page.menu_dismissed();
             close_popover(window);
             true
         }
