@@ -272,6 +272,13 @@ const MIN_SWITCH_GAP: Duration = Duration::from_secs(10);
 const SETTLE: Duration = Duration::from_secs(3);
 const SAMPLE_EVERY: Duration = Duration::from_secs(1);
 
+/// A rate sample counts only if the window painted at least this share of
+/// the sampled rate in that second (a hidden window paints nothing and mpv's
+/// estimate just decays).
+const MIN_PAINT_SHARE: f64 = 0.5;
+/// ...and at least this many frames.
+const MIN_PAINTS: u64 = 5;
+
 /// What to do with `display-fps-override` after a new rate sample.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RateDecision {
@@ -283,12 +290,15 @@ pub enum RateDecision {
 }
 
 /// Decides from the recent `samples` of mpv's `estimated-display-fps` (valid
-/// ones, consecutive, newest last), the current override and the time since
-/// the last change. The last [`WINDOW`] samples all being far from the
-/// override and agreeing means frames are shown at their median rate; far
-/// but disagreeing means the rate can't be trusted either way.
+/// ones, consecutive, newest last), the current override, the monitor's
+/// reported rate and the time since the last change. The last [`WINDOW`]
+/// samples all being far from the override and agreeing means frames are
+/// shown at their median rate (the monitor's exact rate when the median is
+/// within [`FAR`] of it); far but disagreeing means the rate can't be
+/// trusted either way.
 pub fn decide_rate(
     current: Option<f64>,
+    monitor: Option<f64>,
     samples: &[f64],
     since_switch: Option<Duration>,
 ) -> RateDecision {
@@ -308,12 +318,43 @@ pub fn decide_rate(
     let median = sorted[WINDOW / 2];
     let spread = (sorted[WINDOW - 1] - sorted[0]) / median;
     if spread <= AGREE {
-        RateDecision::Switch(median)
+        let target = monitor
+            .filter(|m| *m > 0.0 && (median - m).abs() <= m * FAR)
+            .unwrap_or(median);
+        if current == Some(target) {
+            return RateDecision::Keep;
+        }
+        RateDecision::Switch(target)
     } else if current.is_some() {
         RateDecision::NoOverride
     } else {
         RateDecision::Keep
     }
+}
+
+/// Whether `paints` frames drawn in the last second back up the estimate `rate`.
+fn sample_valid(paints: u64, rate: f64) -> bool {
+    paints >= MIN_PAINTS && (paints as f64) >= MIN_PAINT_SHARE * rate
+}
+
+fn monitor_hz() -> Option<f64> {
+    let mhz = MONITOR_MHZ.load(Relaxed);
+    (mhz > 0).then(|| f64::from(mhz) / 1000.0)
+}
+
+/// Zero-paint ticks in a row that make the window count as hidden.
+const HIDDEN_TICKS: u32 = 3;
+
+/// A tick with `paints` frames after `zero_ticks` ticks without any. After a
+/// real hidden gap, the override to restore: the one in effect before the
+/// window went hidden. Shorter gaps (a stall or seek) restore nothing.
+fn resume_override(zero_ticks: u32, paints: u64, last_good: Option<f64>) -> Option<Option<f64>> {
+    (paints > 0 && zero_ticks >= HIDDEN_TICKS).then_some(last_good)
+}
+
+/// The override a fresh start uses for the current monitor.
+fn current_monitor_override(s: &Switches) -> Option<f64> {
+    s.display_fps_for(i32::try_from(MONITOR_MHZ.load(Relaxed)).unwrap_or(0))
 }
 
 /// Follows mpv's measured display rate with `display-fps-override`, once a
@@ -335,20 +376,51 @@ pub fn spawn_rate_watch(mpv: &'static Mpv) {
         let mut current: Option<f64> = None;
         let mut samples: Vec<f64> = Vec::with_capacity(WINDOW + 1);
         let mut last_switch: Option<Instant> = None;
+        let mut last_painted = PAINTED.load(Relaxed);
+        // Consecutive ticks without paints while a file played: a long run
+        // means hidden (e.g. another workspace), mpv's estimate then decays
+        // and means nothing.
+        let mut zero_ticks: u32 = 0;
         loop {
             std::thread::sleep(SAMPLE_EVERY);
+            let painted_now = PAINTED.load(Relaxed);
+            let paints = painted_now.saturating_sub(last_painted);
+            last_painted = painted_now;
             let seen = MONITOR_GEN.load(Relaxed);
             if seen != generation {
                 // New monitor (or the first one): start over from its rate.
                 generation = seen;
-                current = s.display_fps_for(i32::try_from(MONITOR_MHZ.load(Relaxed)).unwrap_or(0));
+                current = current_monitor_override(s);
                 samples.clear();
                 last_switch = None;
             }
-            if !LOADED.load(Relaxed)
-                || PAUSED.load(Relaxed)
-                || now_ms() < SETTLE_UNTIL_MS.load(Relaxed)
-            {
+            if !LOADED.load(Relaxed) || PAUSED.load(Relaxed) {
+                zero_ticks = 0;
+                samples.clear();
+                continue;
+            }
+            if paints == 0 {
+                zero_ticks += 1;
+                samples.clear();
+                continue;
+            }
+            let gap = std::mem::take(&mut zero_ticks);
+            // `current` was not touched while hidden: it is the last good rate.
+            if let Some(to) = resume_override(gap, paints, current) {
+                if let Err(e) = mpv.set_property("display-fps-override", to.unwrap_or(0.0)) {
+                    tracing::warn!("failed to set display-fps-override: {e:?}");
+                }
+                tracing::info!(
+                    "display rate: window painting again after being hidden -> override restored to {}",
+                    to.map_or_else(|| "off".to_owned(), |v| format!("{v:.3}")),
+                );
+                current = to;
+                samples.clear();
+                last_switch = None;
+                note_disturbance();
+                continue;
+            }
+            if now_ms() < SETTLE_UNTIL_MS.load(Relaxed) {
                 samples.clear();
                 continue;
             }
@@ -358,15 +430,26 @@ pub fn spawn_rate_watch(mpv: &'static Mpv) {
                 samples.clear();
                 continue;
             };
+            // The estimate only means something while frames are drawn.
+            if !sample_valid(paints, rate) {
+                samples.clear();
+                continue;
+            }
             samples.push(rate);
             if samples.len() > WINDOW {
                 samples.remove(0);
             }
-            let decision = decide_rate(current, &samples, last_switch.map(|t| t.elapsed()));
+            let monitor_hz = monitor_hz();
+            let decision = decide_rate(
+                current,
+                monitor_hz,
+                &samples,
+                last_switch.map(|t| t.elapsed()),
+            );
             if decision == RateDecision::Keep || MONITOR_GEN.load(Relaxed) != generation {
                 continue;
             }
-            let monitor = f64::from(MONITOR_MHZ.load(Relaxed)) / 1000.0;
+            let monitor = monitor_hz.unwrap_or(0.0);
             let (value, line) = match decision {
                 RateDecision::Switch(to) => (
                     to,
@@ -406,7 +489,7 @@ pub fn spawn_rate_watch(mpv: &'static Mpv) {
 mod tests {
     use std::time::Duration;
 
-    use super::{DisplayFps, RateDecision, Switches, decide_rate};
+    use super::{DisplayFps, RateDecision, Switches, decide_rate, resume_override, sample_valid};
 
     fn parse(pairs: &[(&str, &str)]) -> Switches {
         Switches::parse(|name| {
@@ -467,7 +550,7 @@ mod tests {
     fn deck_follows_measured_rate() {
         let samples = [59.9, 59.8, 60.0, 59.9, 59.95];
         assert_eq!(
-            decide_rate(Some(119.903), &samples, None),
+            decide_rate(Some(119.903), None, &samples, None),
             RateDecision::Switch(59.9)
         );
     }
@@ -476,7 +559,7 @@ mod tests {
     fn matching_rate_is_kept() {
         let samples = [164.9, 164.8, 165.0, 164.9, 164.85];
         assert_eq!(
-            decide_rate(Some(164.835), &samples, None),
+            decide_rate(Some(164.835), None, &samples, None),
             RateDecision::Keep
         );
     }
@@ -485,36 +568,42 @@ mod tests {
     fn unstable_far_samples_drop_the_override() {
         let samples = [40.0, 59.9, 52.0, 60.0, 45.0];
         assert_eq!(
-            decide_rate(Some(119.903), &samples, None),
+            decide_rate(Some(119.903), None, &samples, None),
             RateDecision::NoOverride
         );
         // Already none: nothing to change.
-        assert_eq!(decide_rate(None, &samples, None), RateDecision::Keep);
+        assert_eq!(decide_rate(None, None, &samples, None), RateDecision::Keep);
         // Unstable, but some samples near the override: keep.
         let mixed = [119.0, 59.9, 118.0, 60.0, 120.0];
-        assert_eq!(decide_rate(Some(119.903), &mixed, None), RateDecision::Keep);
+        assert_eq!(
+            decide_rate(Some(119.903), None, &mixed, None),
+            RateDecision::Keep
+        );
     }
 
     #[test]
     fn too_few_samples_keep() {
         assert_eq!(
-            decide_rate(Some(119.903), &[59.9, 59.9, 59.9, 59.9], None),
+            decide_rate(Some(119.903), None, &[59.9, 59.9, 59.9, 59.9], None),
             RateDecision::Keep
         );
-        assert_eq!(decide_rate(Some(119.903), &[], None), RateDecision::Keep);
+        assert_eq!(
+            decide_rate(Some(119.903), None, &[], None),
+            RateDecision::Keep
+        );
     }
 
     #[test]
     fn only_the_latest_window_counts() {
         let samples = [164.9, 164.9, 59.9, 59.8, 60.0, 59.9, 59.95];
         assert_eq!(
-            decide_rate(Some(164.835), &samples, None),
+            decide_rate(Some(164.835), None, &samples, None),
             RateDecision::Switch(59.9)
         );
         // One stray sample inside the window: far from none, so keep.
         let samples = [59.9, 59.9, 165.0, 59.9, 59.9];
         assert_eq!(
-            decide_rate(Some(164.835), &samples, None),
+            decide_rate(Some(164.835), None, &samples, None),
             RateDecision::Keep
         );
     }
@@ -523,11 +612,11 @@ mod tests {
     fn switches_at_most_every_ten_seconds() {
         let samples = [59.9, 59.8, 60.0, 59.9, 59.95];
         assert_eq!(
-            decide_rate(Some(119.903), &samples, Some(Duration::from_secs(9))),
+            decide_rate(Some(119.903), None, &samples, Some(Duration::from_secs(9))),
             RateDecision::Keep
         );
         assert_eq!(
-            decide_rate(Some(119.903), &samples, Some(Duration::from_secs(10))),
+            decide_rate(Some(119.903), None, &samples, Some(Duration::from_secs(10))),
             RateDecision::Switch(59.9)
         );
     }
@@ -537,13 +626,72 @@ mod tests {
         // Switched to 59.9, then a frame limiter is lifted and ~119.9 shows up.
         let samples = [119.9, 119.8, 119.9, 120.0, 119.9];
         assert_eq!(
-            decide_rate(Some(59.9), &samples, LONG),
+            decide_rate(Some(59.9), None, &samples, LONG),
             RateDecision::Switch(119.9)
         );
         // After "no override", stable samples are adopted.
         assert_eq!(
-            decide_rate(None, &[59.9, 59.9, 59.8, 60.0, 59.9], LONG),
+            decide_rate(None, None, &[59.9, 59.9, 59.8, 60.0, 59.9], LONG),
             RateDecision::Switch(59.9)
         );
+    }
+
+    #[test]
+    fn decaying_hidden_estimate_never_decides() {
+        // The watch drops samples without paints, so decide_rate never sees
+        // a window of them: an empty or short window keeps the override.
+        assert_eq!(
+            decide_rate(Some(165.001), Some(165.001), &[], LONG),
+            RateDecision::Keep
+        );
+        assert_eq!(
+            decide_rate(Some(165.001), Some(165.001), &[90.0, 87.0], LONG),
+            RateDecision::Keep
+        );
+    }
+
+    #[test]
+    fn paint_validity_rule() {
+        assert!(!sample_valid(0, 137.0));
+        assert!(!sample_valid(4, 8.0));
+        assert!(!sample_valid(60, 137.0));
+        assert!(sample_valid(160, 164.0));
+    }
+
+    #[test]
+    fn near_monitor_rate_snaps_to_monitor() {
+        let samples = [159.6, 159.7, 159.5, 159.6, 159.6];
+        assert_eq!(
+            decide_rate(Some(59.9), Some(165.001), &samples, LONG),
+            RateDecision::Switch(165.001)
+        );
+        assert_eq!(
+            decide_rate(Some(165.001), Some(165.001), &samples, LONG),
+            RateDecision::Keep
+        );
+        assert_eq!(
+            decide_rate(None, Some(165.001), &samples, LONG),
+            RateDecision::Switch(165.001)
+        );
+    }
+
+    #[test]
+    fn deck_still_switches_to_measurement() {
+        let samples = [59.9, 59.8, 60.0, 59.9, 59.95];
+        assert_eq!(
+            decide_rate(Some(119.903), Some(119.903), &samples, None),
+            RateDecision::Switch(59.9)
+        );
+    }
+
+    #[test]
+    fn resume_restores_pre_hidden_override_only_after_real_gap() {
+        assert_eq!(resume_override(0, 100, Some(165.001)), None);
+        assert_eq!(resume_override(1, 100, Some(165.001)), None);
+        assert_eq!(resume_override(2, 100, Some(165.001)), None);
+        assert_eq!(resume_override(3, 0, Some(165.001)), None);
+        assert_eq!(resume_override(3, 100, Some(165.001)), Some(Some(165.001)));
+        assert_eq!(resume_override(8, 100, Some(59.9)), Some(Some(59.9)));
+        assert_eq!(resume_override(5, 100, None), Some(None));
     }
 }

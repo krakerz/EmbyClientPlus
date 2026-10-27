@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.30.4] — 2026-10-27
+
+### Fixed
+- Switching back to the player after it was hidden (another workspace) no longer makes SVP playback stutter.
+
 ## [1.30.3] — 2026-10-24
 
 ### Added
