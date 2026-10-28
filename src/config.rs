@@ -102,6 +102,10 @@ pub struct VideoSettings {
         skip_serializing_if = "Option::is_none"
     )]
     pub display_rate: Option<DisplayRate>,
+    /// Game Mode: draw without vsync (`GDK_DEBUG=no-vsync`), past the 60 fps
+    /// GTK's X11 backend paces at under gamescope. Read at startup.
+    #[serde(default)]
+    pub game_mode_no_vsync: bool,
 }
 
 impl Default for VideoSettings {
@@ -116,6 +120,7 @@ impl Default for VideoSettings {
             software_decoding: false,
             upscale_any_size: false,
             display_rate: None,
+            game_mode_no_vsync: false,
         }
     }
 }

@@ -28,6 +28,17 @@ pub fn prepare_environment() {
             unsafe { std::env::set_var(name, value) };
         }
     }
+    // GTK's X11 backend gets no frame timings from gamescope and paces at
+    // 60 Hz, which caps 120 fps SVP at 60. No vsync lifts that, at the cost
+    // of drawing as often as it can, so it's opt-in.
+    let no_vsync = crate::config::Settings::load()
+        .unwrap_or_default()
+        .video
+        .game_mode_no_vsync;
+    if no_vsync && std::env::var_os("GDK_DEBUG").is_none() {
+        // SAFETY: as above.
+        unsafe { std::env::set_var("GDK_DEBUG", "no-vsync") };
+    }
     // Gamescope's WSI layer hooks every Vulkan device in the process and
     // asserts on ones that never present (GTK's probe, mpv's Vulkan
     // decoding). We present through GL on Xwayland, so opt out of it.

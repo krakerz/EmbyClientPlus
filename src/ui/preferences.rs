@@ -1257,6 +1257,20 @@ fn add_display_rate_rows(group: &adw::PreferencesGroup, settings: &Settings) {
     });
     group.add(&row);
     group.add(&custom);
+    if crate::gamescope::detected() {
+        let no_vsync = adw::SwitchRow::builder()
+            .title("Draw past 60 fps")
+            .subtitle(
+                "Under gamescope the app otherwise draws at most 60 frames a second, even with Steam's frame limit off. For 90–120 fps video; uses more power. Restart the app to apply.",
+            )
+            .active(settings.video.game_mode_no_vsync)
+            .build();
+        no_vsync.connect_active_notify(|row| {
+            let on = row.is_active();
+            save(|s| s.video.game_mode_no_vsync = on);
+        });
+        group.add(&no_vsync);
+    }
 }
 
 fn svp_folder_row(parent: &gtk::Widget) -> adw::ActionRow {
