@@ -84,13 +84,16 @@ pub struct VideoSettings {
     #[serde(default = "default_downscaler")]
     pub downscaler: String,
     #[serde(default)]
-    pub deband: bool,
+    pub deband: DebandLevel,
     /// Deinterlace sources flagged as interlaced.
     #[serde(default = "default_true")]
     pub deinterlace: bool,
     /// Decode in software instead of the GPU.
     #[serde(default)]
     pub software_decoding: bool,
+    /// Run the luma upscalers whatever the video and screen sizes (skip their `//!WHEN` gates).
+    #[serde(default)]
+    pub upscale_any_size: bool,
 }
 
 impl Default for VideoSettings {
@@ -100,9 +103,10 @@ impl Default for VideoSettings {
             upscaler: default_upscaler(),
             chroma_scaler: default_upscaler(),
             downscaler: default_downscaler(),
-            deband: false,
+            deband: DebandLevel::Off,
             deinterlace: true,
             software_decoding: false,
+            upscale_any_size: false,
         }
     }
 }
@@ -144,6 +148,73 @@ impl VideoQuality {
             VideoQuality::HighQuality => "High quality",
             VideoQuality::Custom => "Custom",
         }
+    }
+}
+
+/// Debanding strength (mpv's deband-* options).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DebandLevel {
+    #[default]
+    Off,
+    Light,
+    Medium,
+    Strong,
+}
+
+impl DebandLevel {
+    pub const ALL: [DebandLevel; 4] = [
+        DebandLevel::Off,
+        DebandLevel::Light,
+        DebandLevel::Medium,
+        DebandLevel::Strong,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DebandLevel::Off => "Off",
+            DebandLevel::Light => "Light",
+            DebandLevel::Medium => "Medium",
+            DebandLevel::Strong => "Strong",
+        }
+    }
+
+    /// deband-iterations, -threshold, -range, -grain. Medium is mpv's
+    /// defaults, i.e. what the old on/off switch's "on" gave.
+    pub fn params(self) -> (u32, u32, u32, u32) {
+        match self {
+            DebandLevel::Off | DebandLevel::Medium => (1, 48, 16, 32),
+            DebandLevel::Light => (1, 32, 16, 16),
+            DebandLevel::Strong => (2, 64, 12, 48),
+        }
+    }
+}
+
+/// Also reads the old on/off value (`deband = true` → Medium).
+impl<'de> Deserialize<'de> for DebandLevel {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum Level {
+            Off,
+            Light,
+            Medium,
+            Strong,
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Stored {
+            Switch(bool),
+            Level(Level),
+        }
+        Ok(match Stored::deserialize(deserializer)? {
+            Stored::Switch(false) | Stored::Level(Level::Off) => DebandLevel::Off,
+            Stored::Switch(true) | Stored::Level(Level::Medium) => DebandLevel::Medium,
+            Stored::Level(Level::Light) => DebandLevel::Light,
+            Stored::Level(Level::Strong) => DebandLevel::Strong,
+        })
     }
 }
 
@@ -855,6 +926,23 @@ pub fn write_atomic(path: &std::path::Path, contents: &[u8]) -> std::io::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn deband_reads_old_switch_and_levels() {
+        let read = |text: &str| toml::from_str::<VideoSettings>(text).unwrap().deband;
+        assert_eq!(read("deband = true"), DebandLevel::Medium);
+        assert_eq!(read("deband = false"), DebandLevel::Off);
+        assert_eq!(read("deband = \"strong\""), DebandLevel::Strong);
+        assert_eq!(read(""), DebandLevel::Off);
+    }
+
+    #[test]
+    fn old_colour_profile_keys_are_ignored() {
+        let video = toml::from_str::<VideoSettings>(
+            "color_profile = \"file\"\ncolor_profile_file = \"x\"\nsoftware_decoding = true",
+        )
+        .unwrap();
+        assert!(video.software_decoding);
+    }
 
     #[test]
     fn defaults_round_trip_through_toml() {

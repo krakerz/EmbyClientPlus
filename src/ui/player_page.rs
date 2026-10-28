@@ -2217,6 +2217,7 @@ impl Inner {
     /// Start: the controller moves through the OSD's buttons, starting on
     /// Play, until it's idle for a while or does something that completes.
     fn enter_controls(self: &Rc<Self>) {
+        tracing::info!("player: controls mode on");
         self.controls_mode.set(true);
         self.menu_dismissed.set(false);
         self.set_controls_style(true);
@@ -2241,6 +2242,9 @@ impl Inner {
 
     /// Ends the mode without touching focus or the OSD.
     fn end_controls_mode(&self) {
+        if self.controls_mode.get() {
+            tracing::info!("player: controls mode off");
+        }
         self.controls_mode.set(false);
         self.set_controls_style(false);
         if let Some(timer) = self.controls_idle.take() {
@@ -2351,6 +2355,10 @@ impl Inner {
     /// Reveals the OSD and cursor, then hides both after a quiet spell
     /// (unless a menu is open, or paused without "hide when paused").
     fn show_osd(self: &Rc<Self>) {
+        // Logged for the stats lines: drawing the OSD over the video costs frames.
+        if !self.osd.bottom.reveals_child() {
+            tracing::info!("player: controls shown");
+        }
         self.osd.refresh_hints();
         self.osd.top.set_reveal_child(true);
         self.osd.bottom.set_reveal_child(true);
@@ -2377,6 +2385,7 @@ impl Inner {
             inner.osd.top.set_reveal_child(false);
             inner.osd.bottom.set_reveal_child(false);
             inner.page.set_cursor_from_name(Some("none"));
+            tracing::info!("player: controls hidden");
         });
         self.hide_timer.replace(Some(timer));
     }

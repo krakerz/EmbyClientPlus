@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [1.31.0] — 2026-10-28
+
+### Added
+- Preferences → Shaders: three new built-in groups, off until you pick a preset: **Chroma upscaling** (KrigBilateral, Chroma from Luma Lite, Fast Bilateral) for sharper colour edges, **Luma upscaler** (RAVU Lite, plain or anti-ringing, NNEDI3 with 16/32/64 neurons, FSRCNNX 8 and 16; one at a time) and **Sharpening** (AMD CAS, Adaptive sharpen). Like FSR and Anime4K, each title keeps its own pick, and Preferences shows roughly how heavy each group is.
+- Preferences → Shaders → **Run upscalers at any size** (off by default): the Luma upscalers always double the picture first and then it's scaled to the screen, instead of only running when the video is enlarged 1.3–1.4× or more. Smoother edges at a GPU cost; not for the Steam Deck.
+
+### Changed
+- Debanding has a strength: Off, Light, Medium or Strong (Custom quality). High quality keeps Medium, the same as before, and a saved "on" becomes Medium.
+- Custom shader files that use compute shaders are skipped instead of crashing the player.
+
+### Fixed
+- Playing at a lower quality (transcoded) showed only one subtitle track; all text subtitles are listed again, with their names and languages.
+
 ## [1.30.4] — 2026-10-27
 
 ### Fixed

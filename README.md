@@ -14,7 +14,7 @@ Icons: [Lucide](https://lucide.dev/) (ISC, `data/icons/LICENSE`), converted for 
 
 - **Browsing:** Home follows your Emby library order and visibility; library grids with remembered sort and filters (decade, HD/SD, subtitles, rating, recently added) and an A–Z strip, Suggestions and Collections tabs; series open on the season you're watching; details show original title, air dates, studios, genres, tags and each season's own overview when the server has them; cast, More Like This, Included In, favourites, History, search.
 - **Playback:** direct play or transcode (Original down to 420 kbps), version picker, resume and watched state synced, chapters with seek-bar previews, Skip Intro/Credits, Up Next, sleep timer, aspect/zoom, black-bar blur/glow.
-- **Picture:** quality presets or custom scalers/debanding, deinterlacing, FSR and Anime4K shaders plus your own, per title.
+- **Picture:** quality presets or custom scalers and debanding strength, deinterlacing, and per-title shaders: FSR, Anime4K, chroma upscalers (KrigBilateral, Chroma from Luma), luma upscalers (RAVU, NNEDI3, FSRCNNX), sharpeners (AMD CAS, Adaptive sharpen), plus your own.
 - **SVP:** attaches when SVP 4 is installed; per-title toggle with a status light; mpv frame blending as an alternative.
 - **Profile:** your Emby account's own settings (languages, subtitle mode, autoplay, intro skipping, hidden watched items, library order), picture, password and PIN; shared with Emby's apps.
 - **Tracking:** MyAnimeList, AniList, Kitsu and Trakt follow what you watch, including split anime seasons (matched through AniBridge) and downloads watched offline; MyAnimeList and AniList log in from Desktop Mode.
@@ -73,9 +73,12 @@ menu → **Preferences**; your account's settings are on **Profile** (the avatar
   Files go to `Videos/Emby Client+` (Preferences → Downloads); Home's menu → **Downloads** lists
   them.
 - **Video:** Preferences → Video picks a preset (**Auto**, **Fast** for Steam Deck, **Balanced**,
-  **High quality**, **Custom**). The player's **Shaders** button picks one preset per group (FSR,
-  Anime4K, yours), remembered per title. Your own shaders go in the `shaders` folder next to
-  `config.toml`: a folder per group, a `.glsl` file (or a subfolder of them) per preset.
+  **High quality**, **Custom**). The player's **Shaders** button picks one preset per group
+  (FSR, Anime4K, Chroma upscaling, Luma upscaler, Sharpening, yours), remembered per title. Your
+  own shaders go in the `shaders` folder next to `config.toml`: a folder per group, a `.glsl` file
+  (or a subfolder of them) per preset. The bundled shaders keep their authors' licences (MIT,
+  BSD-3-Clause, LGPL-3.0); each group's `LICENSE` is in `data/shaders/<group>/` and next to the
+  installed copies.
 - **Server identity:** the server lists the app as Emby Web by default; turn off Preferences →
   Server → "Appear as a web browser" to list it as Emby Client+ (sign in again).
 - **Steam Game Mode:** add the AppImage (or `~/.local/bin/embyclientplus`) as a non-Steam game with
@@ -132,6 +135,9 @@ download, so the server does no transcoding.
 **Why wasn't an episode synced?** It wasn't matched: the series page's tracking line says which
 seasons are, and the AL / MAL / Kitsu / Trakt chips on each episode show its state per service (hover
 for the entry). Unmatched episodes are skipped, never guessed.
+
+**Can I use any shader in my own shader folder?** Not compute-shader files (e.g. ArtCNN): they
+are skipped, with a warning in the log. Ordinary `.glsl` / `.hook` shaders work.
 
 **Is HDR supported?** Not really: HDR plays converted to SDR, untested. SVP starts off for HDR
 titles unless you turn it on for that title.

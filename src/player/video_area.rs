@@ -217,7 +217,9 @@ fn track_display_fps(player: Player, area: &gtk::GLArea) {
     if let Some(monitor) = area.display().monitor_at_surface(&surface) {
         apply(player, &monitor);
     }
-    surface.connect_enter_monitor(move |_, monitor| apply(player, monitor));
+    surface.connect_enter_monitor(move |_, monitor| {
+        apply(player, monitor);
+    });
 }
 
 /// Re-applies the SVP padding fit after the video's geometry changed.

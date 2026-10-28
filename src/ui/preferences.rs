@@ -751,14 +751,27 @@ fn video_page(settings: &Settings) -> adw::PreferencesPage {
     upscaler.connect_selected_notify(scaler_saved(|v| &mut v.upscaler));
     chroma.connect_selected_notify(scaler_saved(|v| &mut v.chroma_scaler));
     downscaler.connect_selected_notify(scaler_saved(|v| &mut v.downscaler));
-    let deband = adw::SwitchRow::builder()
+    let deband_labels: Vec<&str> = crate::config::DebandLevel::ALL
+        .iter()
+        .map(|level| level.label())
+        .collect();
+    let deband = adw::ComboRow::builder()
         .title("Debanding")
-        .subtitle("Smooths colour banding in gradients")
-        .active(settings.video.deband)
+        .subtitle("Smooths colour banding in gradients; stronger also softens fine detail")
+        .model(&gtk::StringList::new(&deband_labels))
+        .selected(
+            crate::config::DebandLevel::ALL
+                .iter()
+                .position(|level| *level == settings.video.deband)
+                .unwrap_or(0) as u32,
+        )
         .build();
-    deband.connect_active_notify(|row| {
-        let on = row.is_active();
-        save(|s| s.video.deband = on);
+    deband.connect_selected_notify(|row| {
+        let level = crate::config::DebandLevel::ALL
+            .get(row.selected() as usize)
+            .copied()
+            .unwrap_or_default();
+        save(|s| s.video.deband = level);
     });
     let custom_rows: Vec<gtk::Widget> = vec![
         upscaler.upcast(),
@@ -805,13 +818,26 @@ fn video_page(settings: &Settings) -> adw::PreferencesPage {
     let shader_group = adw::PreferencesGroup::builder()
         .title("Shaders")
         .description(
-            "Shown groups get a submenu in the player's Shaders button, where each title keeps its own pick. One preset per group; presets of different groups stack. Upscalers only work when the video is smaller than the screen.",
+            "Shown groups get a submenu in the player's Shaders button, where each title keeps its own pick. One preset per group; presets of different groups stack. Upscalers only work when the video is smaller than the screen: use one of Luma upscaler, Anime4K or FSR at a time. All are off unless picked; heavier ones can drop frames, more so with SVP.",
         )
         .build();
+    let any_size = adw::SwitchRow::builder()
+        .title("Run upscalers at any size")
+        .subtitle("Luma upscalers normally run only when the video is enlarged at least 1.3–1.4×. On, they always double the picture first, then it's scaled to the screen: smoother edges (like supersampling) at a GPU cost — not for the Steam Deck. Applies from the next video.")
+        .active(settings.video.upscale_any_size)
+        .build();
+    any_size.connect_active_notify(move |row| {
+        let on = row.is_active();
+        save(|s| s.video.upscale_any_size = on);
+    });
+    shader_group.add(&any_size);
     for group in crate::shaders::groups() {
         let shown = adw::SwitchRow::builder()
             .title(&group.name)
-            .subtitle("Show in the player")
+            .subtitle(crate::shaders::hint(&group.id).map_or_else(
+                || "Show in the player".to_string(),
+                |hint| format!("Show in the player · {hint}"),
+            ))
             .active(settings.shaders.shown(&group.id))
             .build();
         let mut labels = vec!["Off".to_string()];
