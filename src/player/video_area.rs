@@ -124,6 +124,7 @@ pub fn new(player: Player) -> gtk::GLArea {
             if let Some(clock) = area.frame_clock() {
                 let state = state.clone();
                 clock.connect_after_paint(move |_| {
+                    crate::player::diag::note_window_frame();
                     if state.rendered.replace(false)
                         && crate::player::diag::switches().report_swap
                         && let Some(context) = state.context.borrow().as_ref()
@@ -192,24 +193,12 @@ pub fn new(player: Player) -> gtk::GLArea {
     area
 }
 
-/// Keeps mpv's display rate at the refresh rate of the monitor the window
-/// is on, following it to other monitors.
+/// Tells mpv the display rate (Preferences) when the window enters a
+/// monitor; Automatic takes that monitor's refresh rate.
 fn track_display_fps(player: Player, area: &gtk::GLArea) {
     fn apply(player: Player, monitor: &gtk::gdk::Monitor) {
-        let millihertz = monitor.refresh_rate();
-        crate::player::diag::note_monitor(millihertz);
-        // Every monitor starts from its reported rate; the rate watcher in
-        // `diag` corrects it when frames are shown at another one. A monitor
-        // that reports none clears a rate measured on the previous one.
-        let switches = crate::player::diag::switches();
-        let fps = switches.display_fps_for(millihertz).or_else(|| {
-            (switches.display_fps == crate::player::diag::DisplayFps::Monitor).then_some(0.0)
-        });
-        if let Some(fps) = fps
-            && let Err(e) = player.set_display_fps(fps)
-        {
-            tracing::warn!("{e:#}");
-        }
+        crate::player::diag::note_monitor(monitor.refresh_rate());
+        crate::player::diag::apply_display_rate(player);
     }
     let Some(surface) = area.native().and_then(|native| native.surface()) else {
         return;

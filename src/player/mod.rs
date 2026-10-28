@@ -345,7 +345,6 @@ impl Player {
         diag::switches();
         spawn_event_thread(mpv);
         diag::spawn_stats_thread(mpv);
-        diag::spawn_rate_watch(mpv);
         Ok(Self { mpv })
     }
 
@@ -1021,10 +1020,6 @@ fn spawn_event_thread(mpv: &'static Mpv) {
                     log_mpv(prefix, level, text);
                     None
                 }
-                Some(Ok(Event::Seek | Event::PlaybackRestart)) => {
-                    diag::note_disturbance();
-                    None
-                }
                 Some(Ok(Event::EndFile(reason))) => {
                     tracing::info!("playback ended (reason {reason})");
                     if reason == END_FILE_REASON_ERROR {
@@ -1046,13 +1041,11 @@ fn spawn_event_thread(mpv: &'static Mpv) {
             match &event {
                 Some(PlayerEvent::FileLoaded) => {
                     diag::set_loaded(true);
-                    diag::note_disturbance();
                     diag::log_config(mpv, "playback start");
                 }
                 Some(PlayerEvent::Finished(_)) => diag::set_loaded(false),
                 Some(PlayerEvent::Pause(paused)) => {
                     diag::set_paused(*paused);
-                    diag::note_disturbance();
                 }
                 _ => {}
             }

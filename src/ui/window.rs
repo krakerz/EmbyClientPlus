@@ -73,18 +73,26 @@ gridview.poster-grid > child {
 }
 /* Every player button is the same true circle (hover and focus ring
    included), text ones like SVP too. */
-button.osd-button,
-menubutton.osd-button > button {
+button.osd-button {
     min-width: 36px;
     min-height: 36px;
     padding: 0;
     border-radius: 999px;
 }
 /* The sleep button showing its time left: a pill instead of a circle. */
-menubutton.osd-button.with-label > button {
+button.osd-button.with-label {
     padding: 0 10px;
 }
-/* The hand-built Shaders menu, laid out like the other player menus. */
+/* The player's menus, drawn in the window over the video (player_menu.rs). */
+.player-menu {
+    padding: 6px;
+    border-radius: 12px;
+    background: @popover_bg_color;
+    color: @popover_fg_color;
+    box-shadow: 0 2px 8px alpha(black, 0.35);
+}
+.player-menu separator { margin: 4px 0; }
+.player-menu .menu-heading { padding: 6px 10px 2px; }
 button.menu-row {
     min-width: 200px;
     padding: 6px 10px;
@@ -180,8 +188,7 @@ gridview > child:focus-visible .card-title { color: @accent_color; }
 row:focus-visible { outline: 3px solid @accent_color; outline-offset: -3px; }
 /* Player controls mode (controller on the OSD bar): the focused button is
    filled and ringed, unmistakable over any picture. */
-.player-bar.controls-mode button.osd-button:focus-visible,
-.player-bar.controls-mode menubutton.osd-button > button:focus-visible {
+.player-bar.controls-mode button.osd-button:focus-visible {
     background: @accent_bg_color;
     color: @accent_fg_color;
     outline: 3px solid @accent_fg_color;
@@ -199,6 +206,7 @@ popover modelbutton:focus-visible {
    row that isn't the one with the focus ring. */
 window.pad-mode popover button.flat:hover:not(:focus-visible),
 window.pad-mode popover modelbutton:hover:not(:focus-visible),
+window.pad-mode .player-menu button.flat:hover:not(:focus-visible),
 window.pad-mode button.menu-row:hover:not(:focus-visible) {
     background: transparent;
     color: @popover_fg_color;
@@ -673,7 +681,11 @@ fn show_main(state: &Rc<State>, mut session: Session) {
 }
 
 fn show_login(state: &Rc<State>, error: Option<&str>) {
-    let settings = Settings::load().unwrap_or_default();
+    let mut settings = Settings::load().unwrap_or_default();
+    // Never log in with an empty DeviceId: when the settings file can't be
+    // read, Emby took `DeviceId=""` as matching every device and signed out
+    // all of the user's sessions (2026-10-28).
+    settings.server.ensure_device_id();
     let device_id = settings.server.device_id.clone();
     let weak = Rc::downgrade(state);
     let login = LoginPage::new(device_id, move |logged_in| {

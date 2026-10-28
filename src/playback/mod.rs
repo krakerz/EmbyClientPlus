@@ -438,6 +438,7 @@ impl PlaybackSession {
         if let Err(e) = player.apply_video(&settings.video) {
             tracing::warn!("{e:#}");
         }
+        crate::player::diag::apply_display_rate(player);
         // Each title keeps its own volume (music keeps the player's).
         if !self.item.is_audio() {
             let volume = self

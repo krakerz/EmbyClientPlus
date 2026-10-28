@@ -5,30 +5,25 @@
 //! - `EMBYCLIENTPLUS_VIDEO_SYNC=<mode>`: replaces the mpv `video-sync` the
 //!   app would choose (e.g. `audio`, `display-resample`).
 //! - `EMBYCLIENTPLUS_DISPLAY_FPS=<number>|off`: a number replaces the
-//!   monitor's refresh rate as `display-fps-override`; `off` sets none.
-//!   Either is final: the rate auto-check below stays off.
-//! - `EMBYCLIENTPLUS_REPORT_SWAP=0`: stops telling mpv when frames went out
-//!   (which also turns the rate auto-check off, mpv can't measure then).
-//!
-//! Rate auto-check: the monitor's reported refresh rate isn't always the
-//! rate frames are shown at (a Steam Deck in Game Mode reported 119.9 Hz
-//! while gamescope presented ~60). Playback starts with the monitor's rate
-//! as `display-fps-override`; once a second a thread samples mpv's
-//! `estimated-display-fps` (measured from the swap timing) and
-//! [`decide_rate`] follows it when it is stable and far from the override.
+//!   `display-fps-override` the Preferences setting would give; `off` sets
+//!   none. Wins over the setting.
+//! - `EMBYCLIENTPLUS_REPORT_SWAP=0`: stops telling mpv when frames went out.
+//! - `EMBYCLIENTPLUS_STATS=1`: logs mpv's timing counters every 10 s.
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use libmpv2::Mpv;
+
+use crate::config::{DisplayRate, Settings};
 
 /// What `EMBYCLIENTPLUS_DISPLAY_FPS` asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum DisplayFps {
-    /// Use the monitor's refresh rate.
+    /// Not set: the Preferences setting decides.
     #[default]
-    Monitor,
+    Setting,
     /// Set no `display-fps-override`.
     Off,
     Value(f64),
@@ -45,7 +40,7 @@ impl Default for Switches {
     fn default() -> Self {
         Self {
             video_sync: None,
-            display_fps: DisplayFps::Monitor,
+            display_fps: DisplayFps::Setting,
             report_swap: true,
         }
     }
@@ -68,7 +63,7 @@ impl Switches {
                     Ok(n) if n.is_finite() && n > 0.0 => DisplayFps::Value(n),
                     _ => {
                         tracing::warn!("ignoring EMBYCLIENTPLUS_DISPLAY_FPS={v:?}");
-                        DisplayFps::Monitor
+                        DisplayFps::Setting
                     }
                 }
             };
@@ -79,19 +74,16 @@ impl Switches {
         out
     }
 
-    /// The `display-fps-override` to start with for a monitor rate in
-    /// millihertz, or `None` for no override.
-    pub fn display_fps_for(&self, millihertz: i32) -> Option<f64> {
-        match self.display_fps {
-            DisplayFps::Off => None,
-            DisplayFps::Value(n) => Some(n),
-            DisplayFps::Monitor => (millihertz > 0).then(|| f64::from(millihertz) / 1000.0),
+    /// The `display-fps-override` for the setting and a monitor rate in
+    /// millihertz, or `None` for no override. The env switch wins.
+    pub fn display_fps_for(&self, rate: DisplayRate, millihertz: i32) -> Option<f64> {
+        match (self.display_fps, rate) {
+            (DisplayFps::Off, _) | (DisplayFps::Setting, DisplayRate::Off) => None,
+            (DisplayFps::Value(n), _) | (DisplayFps::Setting, DisplayRate::Fixed(n)) => Some(n),
+            (DisplayFps::Setting, DisplayRate::Automatic) => {
+                (millihertz > 0).then(|| f64::from(millihertz) / 1000.0)
+            }
         }
-    }
-
-    /// Whether the override follows mpv's measured display rate.
-    pub fn auto_check(&self) -> bool {
-        self.display_fps == DisplayFps::Monitor && self.report_swap
     }
 }
 
@@ -113,40 +105,39 @@ pub fn switches() -> &'static Switches {
 }
 
 static MONITOR_MHZ: AtomicU32 = AtomicU32::new(0);
-/// Bumped on every monitor change, so the rate watcher starts over.
-static MONITOR_GEN: AtomicU64 = AtomicU64::new(0);
-/// Milliseconds since `epoch()` until which rate samples are ignored.
-static SETTLE_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
 static PAINTED: AtomicU64 = AtomicU64::new(0);
 static SWAPS: AtomicU64 = AtomicU64::new(0);
+/// Every frame the window's frame clock painted, video or not: far above
+/// `PAINTED` means GTK is redrawing something else (an animation without
+/// vsync pacing can take the whole GPU/CPU).
+static WINDOW_FRAMES: AtomicU64 = AtomicU64::new(0);
 static LOADED: AtomicBool = AtomicBool::new(false);
 static PAUSED: AtomicBool = AtomicBool::new(false);
 
-fn epoch() -> Instant {
-    static EPOCH: OnceLock<Instant> = OnceLock::new();
-    *EPOCH.get_or_init(Instant::now)
-}
-
-fn now_ms() -> u64 {
-    u64::try_from(epoch().elapsed().as_millis()).unwrap_or(u64::MAX)
-}
-
 pub fn note_monitor(millihertz: i32) {
     MONITOR_MHZ.store(u32::try_from(millihertz).unwrap_or(0), Relaxed);
-    MONITOR_GEN.fetch_add(1, Relaxed);
-    note_disturbance();
 }
 
-/// A file loaded, playback resumed or seeked, or the monitor changed: the
-/// display rate measured over the next seconds isn't steady yet.
-pub fn note_disturbance() {
-    let settle = u64::try_from(SETTLE.as_millis()).unwrap_or(0);
-    SETTLE_UNTIL_MS.store(now_ms() + settle, Relaxed);
+/// Tells mpv the display rate the setting (and env switch) ask for; the
+/// monitor's rate is the one last noted. No override clears a previous one.
+pub fn apply_display_rate(player: super::Player) {
+    let chosen = Settings::load().ok().and_then(|s| s.video.display_rate);
+    let rate = DisplayRate::resolve(chosen, crate::gamescope::detected());
+    let mhz = i32::try_from(MONITOR_MHZ.load(Relaxed)).unwrap_or(0);
+    let fps = switches().display_fps_for(rate, mhz).unwrap_or(0.0);
+    if let Err(e) = player.set_display_fps(fps) {
+        tracing::warn!("{e:#}");
+    }
 }
 
 /// mpv rendered a frame into the window.
 pub fn note_paint() {
     PAINTED.fetch_add(1, Relaxed);
+}
+
+/// The window's frame clock finished a frame.
+pub fn note_window_frame() {
+    WINDOW_FRAMES.fetch_add(1, Relaxed);
 }
 
 /// `report_swap` was called.
@@ -183,11 +174,10 @@ pub fn log_config(mpv: &Mpv, reason: &str) {
     let override_fps = num(prop::<f64>(mpv, "display-fps-override"));
     let svp_on = super::SVP_ON.load(Relaxed);
     let attached = prop::<String>(mpv, "vf").is_some_and(|vf| vf.contains("svp"));
-    let auto_check = if switches().auto_check() { "on" } else { "off" };
     tracing::info!(
         target: "embyclientplus::player::stats",
         "timing setup ({reason}): gamescope={} monitor-refresh={monitor} display-fps-override={override_fps} \
-         auto-check={auto_check} video-sync={} hwdec-current={} vo={} svp(on={svp_on}, attached={attached})",
+         video-sync={} hwdec-current={} vo={} svp(on={svp_on}, attached={attached})",
         crate::gamescope::detected(),
         text(prop(mpv, "video-sync")),
         text(prop(mpv, "hwdec-current")),
@@ -203,13 +193,21 @@ struct Counters {
     vo_delayed: i64,
     painted: u64,
     swaps: u64,
+    frames: u64,
 }
 
 const INTERVAL: Duration = Duration::from_secs(10);
 
-/// Logs mpv's timing properties every 10 s while a file plays unpaused.
+/// Logs mpv's timing properties every 10 s while a file plays unpaused
+/// (`EMBYCLIENTPLUS_STATS=1` only).
 /// Reading properties is cheap and runs off the GTK thread.
 pub fn spawn_stats_thread(mpv: &'static Mpv) {
+    // Each property read is answered on mpv's playback thread, between
+    // frames, so these lines are opt-in.
+    if !std::env::var("EMBYCLIENTPLUS_STATS").is_ok_and(|v| v.trim() == "1") {
+        return;
+    }
+    tracing::info!("timing stats on (EMBYCLIENTPLUS_STATS=1)");
     std::thread::spawn(move || {
         let mut prev: Option<Counters> = None;
         loop {
@@ -225,12 +223,14 @@ pub fn spawn_stats_thread(mpv: &'static Mpv) {
                 vo_delayed: prop(mpv, "vo-delayed-frame-count").unwrap_or(0),
                 painted: PAINTED.load(Relaxed),
                 swaps: SWAPS.load(Relaxed),
+                frames: WINDOW_FRAMES.load(Relaxed),
             };
             // After a pause the counters were not sampled: this line then
             // covers everything since the last baseline (or the file start).
             let before = prev.unwrap_or(Counters {
                 painted: now.painted,
                 swaps: now.swaps,
+                frames: now.frames,
                 ..Counters::default()
             });
             prev = Some(now);
@@ -239,7 +239,7 @@ pub fn spawn_stats_thread(mpv: &'static Mpv) {
                 target: "embyclientplus::player::stats",
                 "container-fps={} vf-fps={} display-fps={} est-display-fps={} video-sync={} \
                  drops(frame={:+}, decoder={:+}, mistimed={:+}, vo-delayed={:+}) \
-                 vsync-jitter={} avsync={} pixfmt={} vf={vf:?} painted={} swaps={}",
+                 vsync-jitter={} avsync={} pixfmt={} vf={vf:?} painted={} swaps={} frames={}",
                 num(prop(mpv, "container-fps")),
                 num(prop(mpv, "estimated-vf-fps")),
                 num(prop(mpv, "display-fps")),
@@ -254,242 +254,16 @@ pub fn spawn_stats_thread(mpv: &'static Mpv) {
                 text(prop(mpv, "video-params/pixelformat")),
                 now.painted.saturating_sub(before.painted),
                 now.swaps.saturating_sub(before.swaps),
+                now.frames.saturating_sub(before.frames),
             );
-        }
-    });
-}
-
-/// Samples that have to agree before the override follows them.
-const WINDOW: usize = 5;
-/// Samples this far (relative) from the override count as "far".
-const FAR: f64 = 0.10;
-/// Samples within this spread (relative to their median) agree.
-const AGREE: f64 = 0.03;
-/// At most one change of the override per this long.
-const MIN_SWITCH_GAP: Duration = Duration::from_secs(10);
-/// Rate samples are skipped this long after a load, unpause, seek or
-/// monitor change.
-const SETTLE: Duration = Duration::from_secs(3);
-const SAMPLE_EVERY: Duration = Duration::from_secs(1);
-
-/// A rate sample counts only if the window painted at least this share of
-/// the sampled rate in that second (a hidden window paints nothing and mpv's
-/// estimate just decays).
-const MIN_PAINT_SHARE: f64 = 0.5;
-/// ...and at least this many frames.
-const MIN_PAINTS: u64 = 5;
-
-/// What to do with `display-fps-override` after a new rate sample.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum RateDecision {
-    Keep,
-    /// Use this rate.
-    Switch(f64),
-    /// The measured rate is far off and unstable: use no override.
-    NoOverride,
-}
-
-/// Decides from the recent `samples` of mpv's `estimated-display-fps` (valid
-/// ones, consecutive, newest last), the current override, the monitor's
-/// reported rate and the time since the last change. The last [`WINDOW`]
-/// samples all being far from the override and agreeing means frames are
-/// shown at their median rate (the monitor's exact rate when the median is
-/// within [`FAR`] of it); far but disagreeing means the rate can't be
-/// trusted either way.
-pub fn decide_rate(
-    current: Option<f64>,
-    monitor: Option<f64>,
-    samples: &[f64],
-    since_switch: Option<Duration>,
-) -> RateDecision {
-    if samples.len() < WINDOW || since_switch.is_some_and(|d| d < MIN_SWITCH_GAP) {
-        return RateDecision::Keep;
-    }
-    let recent = &samples[samples.len() - WINDOW..];
-    if recent.iter().any(|s| !s.is_finite() || *s <= 0.0) {
-        return RateDecision::Keep;
-    }
-    let far = |s: f64| current.is_none_or(|c| (s - c).abs() > c * FAR);
-    if !recent.iter().copied().all(far) {
-        return RateDecision::Keep;
-    }
-    let mut sorted = recent.to_vec();
-    sorted.sort_by(f64::total_cmp);
-    let median = sorted[WINDOW / 2];
-    let spread = (sorted[WINDOW - 1] - sorted[0]) / median;
-    if spread <= AGREE {
-        let target = monitor
-            .filter(|m| *m > 0.0 && (median - m).abs() <= m * FAR)
-            .unwrap_or(median);
-        if current == Some(target) {
-            return RateDecision::Keep;
-        }
-        RateDecision::Switch(target)
-    } else if current.is_some() {
-        RateDecision::NoOverride
-    } else {
-        RateDecision::Keep
-    }
-}
-
-/// Whether `paints` frames drawn in the last second back up the estimate `rate`.
-fn sample_valid(paints: u64, rate: f64) -> bool {
-    paints >= MIN_PAINTS && (paints as f64) >= MIN_PAINT_SHARE * rate
-}
-
-fn monitor_hz() -> Option<f64> {
-    let mhz = MONITOR_MHZ.load(Relaxed);
-    (mhz > 0).then(|| f64::from(mhz) / 1000.0)
-}
-
-/// Zero-paint ticks in a row that make the window count as hidden.
-const HIDDEN_TICKS: u32 = 3;
-
-/// A tick with `paints` frames after `zero_ticks` ticks without any. After a
-/// real hidden gap, the override to restore: the one in effect before the
-/// window went hidden. Shorter gaps (a stall or seek) restore nothing.
-fn resume_override(zero_ticks: u32, paints: u64, last_good: Option<f64>) -> Option<Option<f64>> {
-    (paints > 0 && zero_ticks >= HIDDEN_TICKS).then_some(last_good)
-}
-
-/// The override a fresh start uses for the current monitor.
-fn current_monitor_override(s: &Switches) -> Option<f64> {
-    s.display_fps_for(i32::try_from(MONITOR_MHZ.load(Relaxed)).unwrap_or(0))
-}
-
-/// Follows mpv's measured display rate with `display-fps-override`, once a
-/// second on its own thread (reading a property is cheap and never touches
-/// GTK). Does nothing when the switches make the override final.
-pub fn spawn_rate_watch(mpv: &'static Mpv) {
-    let s = switches();
-    if !s.auto_check() {
-        let why = if s.display_fps == DisplayFps::Monitor {
-            "EMBYCLIENTPLUS_REPORT_SWAP=0, mpv can't measure the rate"
-        } else {
-            "EMBYCLIENTPLUS_DISPLAY_FPS is set"
-        };
-        tracing::info!("display rate auto-check off: {why}");
-        return;
-    }
-    std::thread::spawn(move || {
-        let mut generation = u64::MAX;
-        let mut current: Option<f64> = None;
-        let mut samples: Vec<f64> = Vec::with_capacity(WINDOW + 1);
-        let mut last_switch: Option<Instant> = None;
-        let mut last_painted = PAINTED.load(Relaxed);
-        // Consecutive ticks without paints while a file played: a long run
-        // means hidden (e.g. another workspace), mpv's estimate then decays
-        // and means nothing.
-        let mut zero_ticks: u32 = 0;
-        loop {
-            std::thread::sleep(SAMPLE_EVERY);
-            let painted_now = PAINTED.load(Relaxed);
-            let paints = painted_now.saturating_sub(last_painted);
-            last_painted = painted_now;
-            let seen = MONITOR_GEN.load(Relaxed);
-            if seen != generation {
-                // New monitor (or the first one): start over from its rate.
-                generation = seen;
-                current = current_monitor_override(s);
-                samples.clear();
-                last_switch = None;
-            }
-            if !LOADED.load(Relaxed) || PAUSED.load(Relaxed) {
-                zero_ticks = 0;
-                samples.clear();
-                continue;
-            }
-            if paints == 0 {
-                zero_ticks += 1;
-                samples.clear();
-                continue;
-            }
-            let gap = std::mem::take(&mut zero_ticks);
-            // `current` was not touched while hidden: it is the last good rate.
-            if let Some(to) = resume_override(gap, paints, current) {
-                if let Err(e) = mpv.set_property("display-fps-override", to.unwrap_or(0.0)) {
-                    tracing::warn!("failed to set display-fps-override: {e:?}");
-                }
-                tracing::info!(
-                    "display rate: window painting again after being hidden -> override restored to {}",
-                    to.map_or_else(|| "off".to_owned(), |v| format!("{v:.3}")),
-                );
-                current = to;
-                samples.clear();
-                last_switch = None;
-                note_disturbance();
-                continue;
-            }
-            if now_ms() < SETTLE_UNTIL_MS.load(Relaxed) {
-                samples.clear();
-                continue;
-            }
-            let Some(rate) = prop::<f64>(mpv, "estimated-display-fps")
-                .filter(|r| r.is_finite() && (1.0..=1000.0).contains(r))
-            else {
-                samples.clear();
-                continue;
-            };
-            // The estimate only means something while frames are drawn.
-            if !sample_valid(paints, rate) {
-                samples.clear();
-                continue;
-            }
-            samples.push(rate);
-            if samples.len() > WINDOW {
-                samples.remove(0);
-            }
-            let monitor_hz = monitor_hz();
-            let decision = decide_rate(
-                current,
-                monitor_hz,
-                &samples,
-                last_switch.map(|t| t.elapsed()),
-            );
-            if decision == RateDecision::Keep || MONITOR_GEN.load(Relaxed) != generation {
-                continue;
-            }
-            let monitor = monitor_hz.unwrap_or(0.0);
-            let (value, line) = match decision {
-                RateDecision::Switch(to) => (
-                    to,
-                    format!(
-                        "display rate: monitor reports {monitor:.3} Hz, frames are shown at ~{to:.3} Hz \
-                         (override was {}) -> using {to:.3}",
-                        current.map_or_else(|| "off".to_owned(), |c| format!("{c:.3}")),
-                    ),
-                ),
-                _ => (
-                    0.0,
-                    format!(
-                        "display rate: monitor reports {monitor:.3} Hz, measured rate unstable ({}) \
-                         -> no override",
-                        samples
-                            .iter()
-                            .map(|r| format!("{r:.1}"))
-                            .collect::<Vec<_>>()
-                            .join(" "),
-                    ),
-                ),
-            };
-            match mpv.set_property("display-fps-override", value) {
-                Ok(()) => {
-                    tracing::info!("{line}");
-                    current = (value > 0.0).then_some(value);
-                    last_switch = Some(Instant::now());
-                    samples.clear();
-                }
-                Err(e) => tracing::warn!("failed to set display-fps-override: {e:?}"),
-            }
         }
     });
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
-    use super::{DisplayFps, RateDecision, Switches, decide_rate, resume_override, sample_valid};
+    use super::{DisplayFps, Switches};
+    use crate::config::DisplayRate;
 
     fn parse(pairs: &[(&str, &str)]) -> Switches {
         Switches::parse(|name| {
@@ -504,9 +278,21 @@ mod tests {
     fn defaults_when_unset() {
         let s = parse(&[]);
         assert_eq!(s, Switches::default());
-        assert_eq!(s.display_fps_for(59_940), Some(59.94));
-        assert_eq!(s.display_fps_for(0), None);
-        assert!(s.auto_check());
+        assert_eq!(
+            s.display_fps_for(DisplayRate::Automatic, 59_940),
+            Some(59.94)
+        );
+        assert_eq!(s.display_fps_for(DisplayRate::Automatic, 0), None);
+    }
+
+    #[test]
+    fn setting_applies_without_env() {
+        let s = parse(&[]);
+        assert_eq!(s.display_fps_for(DisplayRate::Off, 60_000), None);
+        assert_eq!(
+            s.display_fps_for(DisplayRate::Fixed(72.0), 60_000),
+            Some(72.0)
+        );
     }
 
     #[test]
@@ -522,17 +308,22 @@ mod tests {
     }
 
     #[test]
-    fn display_fps_values() {
+    fn display_fps_env_wins_over_setting() {
         let s = parse(&[("EMBYCLIENTPLUS_DISPLAY_FPS", "48")]);
         assert_eq!(s.display_fps, DisplayFps::Value(48.0));
-        assert_eq!(s.display_fps_for(60_000), Some(48.0));
-        assert!(!s.auto_check());
+        for rate in [
+            DisplayRate::Automatic,
+            DisplayRate::Off,
+            DisplayRate::Fixed(90.0),
+        ] {
+            assert_eq!(s.display_fps_for(rate, 60_000), Some(48.0));
+        }
         let s = parse(&[("EMBYCLIENTPLUS_DISPLAY_FPS", "OFF")]);
-        assert_eq!(s.display_fps_for(60_000), None);
-        assert!(!s.auto_check());
+        assert_eq!(s.display_fps_for(DisplayRate::Automatic, 60_000), None);
+        assert_eq!(s.display_fps_for(DisplayRate::Fixed(90.0), 60_000), None);
         for bad in ["abc", "0", "-5", "nan"] {
             let s = parse(&[("EMBYCLIENTPLUS_DISPLAY_FPS", bad)]);
-            assert_eq!(s.display_fps, DisplayFps::Monitor, "{bad}");
+            assert_eq!(s.display_fps, DisplayFps::Setting, "{bad}");
         }
     }
 
@@ -541,157 +332,5 @@ mod tests {
         assert!(!parse(&[("EMBYCLIENTPLUS_REPORT_SWAP", "0")]).report_swap);
         assert!(parse(&[("EMBYCLIENTPLUS_REPORT_SWAP", "1")]).report_swap);
         assert!(parse(&[]).report_swap);
-        assert!(!parse(&[("EMBYCLIENTPLUS_REPORT_SWAP", "0")]).auto_check());
-    }
-
-    const LONG: Option<Duration> = Some(Duration::from_secs(60));
-
-    #[test]
-    fn deck_follows_measured_rate() {
-        let samples = [59.9, 59.8, 60.0, 59.9, 59.95];
-        assert_eq!(
-            decide_rate(Some(119.903), None, &samples, None),
-            RateDecision::Switch(59.9)
-        );
-    }
-
-    #[test]
-    fn matching_rate_is_kept() {
-        let samples = [164.9, 164.8, 165.0, 164.9, 164.85];
-        assert_eq!(
-            decide_rate(Some(164.835), None, &samples, None),
-            RateDecision::Keep
-        );
-    }
-
-    #[test]
-    fn unstable_far_samples_drop_the_override() {
-        let samples = [40.0, 59.9, 52.0, 60.0, 45.0];
-        assert_eq!(
-            decide_rate(Some(119.903), None, &samples, None),
-            RateDecision::NoOverride
-        );
-        // Already none: nothing to change.
-        assert_eq!(decide_rate(None, None, &samples, None), RateDecision::Keep);
-        // Unstable, but some samples near the override: keep.
-        let mixed = [119.0, 59.9, 118.0, 60.0, 120.0];
-        assert_eq!(
-            decide_rate(Some(119.903), None, &mixed, None),
-            RateDecision::Keep
-        );
-    }
-
-    #[test]
-    fn too_few_samples_keep() {
-        assert_eq!(
-            decide_rate(Some(119.903), None, &[59.9, 59.9, 59.9, 59.9], None),
-            RateDecision::Keep
-        );
-        assert_eq!(
-            decide_rate(Some(119.903), None, &[], None),
-            RateDecision::Keep
-        );
-    }
-
-    #[test]
-    fn only_the_latest_window_counts() {
-        let samples = [164.9, 164.9, 59.9, 59.8, 60.0, 59.9, 59.95];
-        assert_eq!(
-            decide_rate(Some(164.835), None, &samples, None),
-            RateDecision::Switch(59.9)
-        );
-        // One stray sample inside the window: far from none, so keep.
-        let samples = [59.9, 59.9, 165.0, 59.9, 59.9];
-        assert_eq!(
-            decide_rate(Some(164.835), None, &samples, None),
-            RateDecision::Keep
-        );
-    }
-
-    #[test]
-    fn switches_at_most_every_ten_seconds() {
-        let samples = [59.9, 59.8, 60.0, 59.9, 59.95];
-        assert_eq!(
-            decide_rate(Some(119.903), None, &samples, Some(Duration::from_secs(9))),
-            RateDecision::Keep
-        );
-        assert_eq!(
-            decide_rate(Some(119.903), None, &samples, Some(Duration::from_secs(10))),
-            RateDecision::Switch(59.9)
-        );
-    }
-
-    #[test]
-    fn follows_back_to_native_rate() {
-        // Switched to 59.9, then a frame limiter is lifted and ~119.9 shows up.
-        let samples = [119.9, 119.8, 119.9, 120.0, 119.9];
-        assert_eq!(
-            decide_rate(Some(59.9), None, &samples, LONG),
-            RateDecision::Switch(119.9)
-        );
-        // After "no override", stable samples are adopted.
-        assert_eq!(
-            decide_rate(None, None, &[59.9, 59.9, 59.8, 60.0, 59.9], LONG),
-            RateDecision::Switch(59.9)
-        );
-    }
-
-    #[test]
-    fn decaying_hidden_estimate_never_decides() {
-        // The watch drops samples without paints, so decide_rate never sees
-        // a window of them: an empty or short window keeps the override.
-        assert_eq!(
-            decide_rate(Some(165.001), Some(165.001), &[], LONG),
-            RateDecision::Keep
-        );
-        assert_eq!(
-            decide_rate(Some(165.001), Some(165.001), &[90.0, 87.0], LONG),
-            RateDecision::Keep
-        );
-    }
-
-    #[test]
-    fn paint_validity_rule() {
-        assert!(!sample_valid(0, 137.0));
-        assert!(!sample_valid(4, 8.0));
-        assert!(!sample_valid(60, 137.0));
-        assert!(sample_valid(160, 164.0));
-    }
-
-    #[test]
-    fn near_monitor_rate_snaps_to_monitor() {
-        let samples = [159.6, 159.7, 159.5, 159.6, 159.6];
-        assert_eq!(
-            decide_rate(Some(59.9), Some(165.001), &samples, LONG),
-            RateDecision::Switch(165.001)
-        );
-        assert_eq!(
-            decide_rate(Some(165.001), Some(165.001), &samples, LONG),
-            RateDecision::Keep
-        );
-        assert_eq!(
-            decide_rate(None, Some(165.001), &samples, LONG),
-            RateDecision::Switch(165.001)
-        );
-    }
-
-    #[test]
-    fn deck_still_switches_to_measurement() {
-        let samples = [59.9, 59.8, 60.0, 59.9, 59.95];
-        assert_eq!(
-            decide_rate(Some(119.903), Some(119.903), &samples, None),
-            RateDecision::Switch(59.9)
-        );
-    }
-
-    #[test]
-    fn resume_restores_pre_hidden_override_only_after_real_gap() {
-        assert_eq!(resume_override(0, 100, Some(165.001)), None);
-        assert_eq!(resume_override(1, 100, Some(165.001)), None);
-        assert_eq!(resume_override(2, 100, Some(165.001)), None);
-        assert_eq!(resume_override(3, 0, Some(165.001)), None);
-        assert_eq!(resume_override(3, 100, Some(165.001)), Some(Some(165.001)));
-        assert_eq!(resume_override(8, 100, Some(59.9)), Some(Some(59.9)));
-        assert_eq!(resume_override(5, 100, None), Some(None));
     }
 }

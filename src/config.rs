@@ -94,6 +94,14 @@ pub struct VideoSettings {
     /// Run the luma upscalers whatever the video and screen sizes (skip their `//!WHEN` gates).
     #[serde(default)]
     pub upscale_any_size: bool,
+    /// The refresh rate told to mpv; `None` until the user picks (see
+    /// [`DisplayRate::resolve`]).
+    #[serde(
+        default,
+        deserialize_with = "deserialize_display_rate",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub display_rate: Option<DisplayRate>,
 }
 
 impl Default for VideoSettings {
@@ -107,8 +115,73 @@ impl Default for VideoSettings {
             deinterlace: true,
             software_decoding: false,
             upscale_any_size: false,
+            display_rate: None,
         }
     }
+}
+
+/// What mpv is told about how often the screen shows a frame
+/// (`display-fps-override`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DisplayRate {
+    /// The monitor's reported rate, taken when the window enters a monitor.
+    Automatic,
+    /// Nothing: mpv uses what it detects itself.
+    Off,
+    /// A fixed rate in Hz.
+    Fixed(f64),
+}
+
+impl DisplayRate {
+    pub const MIN_HZ: f64 = 10.0;
+    pub const MAX_HZ: f64 = 500.0;
+    /// The presets of the Preferences list.
+    pub const PRESETS: [f64; 10] = [
+        30.0, 40.0, 45.0, 60.0, 72.0, 90.0, 120.0, 144.0, 165.0, 240.0,
+    ];
+
+    /// The setting in effect: the user's pick, else Automatic on the
+    /// desktop and Off in Steam Game Mode (a frame limit makes the monitor's
+    /// rate wrong there).
+    pub fn resolve(chosen: Option<Self>, game_mode: bool) -> Self {
+        chosen.unwrap_or(if game_mode {
+            Self::Off
+        } else {
+            Self::Automatic
+        })
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        if text.eq_ignore_ascii_case("automatic") {
+            Some(Self::Automatic)
+        } else if text.eq_ignore_ascii_case("off") {
+            Some(Self::Off)
+        } else {
+            text.parse::<f64>()
+                .ok()
+                .filter(|n| (Self::MIN_HZ..=Self::MAX_HZ).contains(n))
+                .map(Self::Fixed)
+        }
+    }
+}
+
+impl Serialize for DisplayRate {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Automatic => serializer.serialize_str("automatic"),
+            Self::Off => serializer.serialize_str("off"),
+            Self::Fixed(hz) => serializer.serialize_str(&hz.to_string()),
+        }
+    }
+}
+
+/// A value this version doesn't understand counts as not chosen.
+fn deserialize_display_rate<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<DisplayRate>, D::Error> {
+    let text = Option::<String>::deserialize(deserializer)?;
+    Ok(text.as_deref().and_then(DisplayRate::parse))
 }
 
 fn default_upscaler() -> String {
@@ -716,9 +789,9 @@ impl Default for SubtitleSettings {
     }
 }
 
-/// Interpolation settings themselves (multiplier, quality) live in SVP
-/// Manager, which attaches over mpv's IPC socket — we only decide whether
-/// to expose the socket at all.
+/// Interpolation settings themselves live in SVP Manager, which attaches
+/// over mpv's IPC socket; Preferences can override a few values of its
+/// Automatic profile (`svp_override`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FrameGenSettings {
     #[serde(default)]
@@ -740,6 +813,14 @@ pub struct FrameGenSettings {
     /// at startup: a running app can't swap its Python.
     #[serde(default)]
     pub vapoursynth: VapourSynthSource,
+    /// Values for SVP's Automatic profile (Preferences → SVP), written into
+    /// SVP's profiles.cfg before this app starts SVP Manager. Off by default,
+    /// and SVP's file is then never touched.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::svp_profile::Overrides::is_unset"
+    )]
+    pub svp_override: crate::svp_profile::Overrides,
 }
 
 /// What SVP's own mpv setup uses on each OS: a named pipe on Windows
@@ -762,6 +843,7 @@ impl Default for FrameGenSettings {
             auto_start_svp: None,
             smooth_without_svp: false,
             vapoursynth: VapourSynthSource::default(),
+            svp_override: crate::svp_profile::Overrides::default(),
         }
     }
 }
@@ -925,6 +1007,52 @@ pub fn write_atomic(path: &std::path::Path, contents: &[u8]) -> std::io::Result<
 
 #[cfg(test)]
 mod tests {
+    use super::DisplayRate;
+
+    #[test]
+    fn display_rate_default_follows_the_mode() {
+        assert_eq!(DisplayRate::resolve(None, false), DisplayRate::Automatic);
+        assert_eq!(DisplayRate::resolve(None, true), DisplayRate::Off);
+        let fixed = Some(DisplayRate::Fixed(40.0));
+        assert_eq!(DisplayRate::resolve(fixed, true), DisplayRate::Fixed(40.0));
+        assert_eq!(
+            DisplayRate::resolve(Some(DisplayRate::Automatic), true),
+            DisplayRate::Automatic
+        );
+    }
+
+    #[test]
+    fn display_rate_serde() {
+        use super::VideoSettings;
+        let read = |text: &str| toml::from_str::<VideoSettings>(text).unwrap().display_rate;
+        assert_eq!(read(""), None);
+        assert_eq!(
+            read("display_rate = \"automatic\""),
+            Some(DisplayRate::Automatic)
+        );
+        assert_eq!(read("display_rate = \"off\""), Some(DisplayRate::Off));
+        assert_eq!(
+            read("display_rate = \"72\""),
+            Some(DisplayRate::Fixed(72.0))
+        );
+        assert_eq!(read("display_rate = \"1000\""), None);
+        assert_eq!(read("display_rate = \"junk\""), None);
+        for rate in [
+            DisplayRate::Off,
+            DisplayRate::Automatic,
+            DisplayRate::Fixed(59.94),
+        ] {
+            let video = VideoSettings {
+                display_rate: Some(rate),
+                ..VideoSettings::default()
+            };
+            let text = toml::to_string_pretty(&video).unwrap();
+            assert_eq!(read(&text), Some(rate), "{text}");
+        }
+        let text = toml::to_string_pretty(&VideoSettings::default()).unwrap();
+        assert!(!text.contains("display_rate"));
+    }
+
     use super::*;
     #[test]
     fn deband_reads_old_switch_and_levels() {

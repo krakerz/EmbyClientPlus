@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 
+use super::player_menu::{self, Closed, MenuPanel, check_icon, menu_row};
 use super::{format_timestamp, images};
 use crate::emby::EmbyClient;
 use crate::emby::models::BaseItem;
@@ -136,6 +137,38 @@ fn sleep_remaining(left: Duration) -> String {
     }
 }
 
+/// The OSD's menus, each opened by its button.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuKind {
+    Volume,
+    Audio,
+    Subtitles,
+    Quality,
+    Picture,
+    Shaders,
+    Sleep,
+}
+
+/// The track, quality and sleep menus' entries; the picture and shaders
+/// menus are built as they open.
+struct Menus {
+    audio: gio::Menu,
+    subtitles: gio::Menu,
+    quality: gio::Menu,
+    sleep: gio::Menu,
+}
+
+impl Menus {
+    fn new() -> Self {
+        Menus {
+            audio: gio::Menu::new(),
+            subtitles: gio::Menu::new(),
+            quality: gio::Menu::new(),
+            sleep: sleep_menu(true),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct PlayerPage {
     inner: Rc<Inner>,
@@ -175,9 +208,8 @@ struct Inner {
     controls_mode: Cell<bool>,
     /// Ends controls mode after [`CONTROLS_IDLE`] without a press.
     controls_idle: RefCell<Option<glib::SourceId>>,
-    /// The controller closed the open menu without choosing in it (B or
-    /// another button): controls mode stays, focus back on its button.
-    menu_dismissed: Cell<bool>,
+    /// The OSD menus' entries, rebuilt with the tracks, drawn on opening.
+    menus: RefCell<Menus>,
     /// Held seek (controller/arrow repeat): where it's headed. mpv seeks
     /// once, when the presses stop, instead of on every repeat.
     scrub_target: Cell<Option<f64>>,
@@ -222,14 +254,16 @@ struct Osd {
     chapter_previous: gtk::Button,
     chapter_next: gtk::Button,
     volume: gtk::Scale,
-    volume_button: gtk::MenuButton,
-    audio: gtk::MenuButton,
-    subtitles: gtk::MenuButton,
-    quality: gtk::MenuButton,
-    picture: gtk::MenuButton,
-    shaders: gtk::MenuButton,
+    volume_button: gtk::Button,
+    /// Mute and the volume slider: the volume menu's page.
+    volume_box: gtk::Box,
+    audio: gtk::Button,
+    subtitles: gtk::Button,
+    quality: gtk::Button,
+    picture: gtk::Button,
+    shaders: gtk::Button,
     /// Moon icon, plus the time left (or "End") while a sleep timer runs.
-    sleep: gtk::MenuButton,
+    sleep: gtk::Button,
     sleep_label: gtk::Label,
     svp: gtk::ToggleButton,
     fullscreen: gtk::Button,
@@ -248,6 +282,8 @@ struct Osd {
     volume_osd_icon: gtk::Image,
     volume_osd_level: gtk::ProgressBar,
     volume_osd_label: gtk::Label,
+    /// The open OSD menu, drawn in the window.
+    menu: Rc<MenuPanel>,
 }
 
 impl PlayerPage {
@@ -283,7 +319,7 @@ impl PlayerPage {
             volume_seen: Cell::new(None),
             controls_mode: Cell::new(false),
             controls_idle: RefCell::new(None),
-            menu_dismissed: Cell::new(false),
+            menus: RefCell::new(Menus::new()),
             scrub_target: Cell::new(None),
             hold_started: Cell::new(None),
             key_held: Cell::new(None),
@@ -338,9 +374,15 @@ impl PlayerPage {
         self.inner.arm_controls_idle();
     }
 
-    /// The controller is closing the open menu without choosing in it.
-    pub fn menu_dismissed(&self) {
-        self.inner.menu_dismissed.set(true);
+    /// B on an open menu: a sub-page goes back up, else the menu closes
+    /// without a choice (controls mode keeps its button).
+    pub fn menu_back(&self) {
+        self.inner.osd.menu.back();
+    }
+
+    /// Closes the open menu without choosing in it.
+    pub fn close_menu(&self) {
+        self.inner.osd.menu.close(Closed::Dismissed);
     }
 
     /// Runs a player-context controller action.
@@ -372,14 +414,8 @@ impl PlayerPage {
             Action::NextEpisode => inner.play_neighbour(true),
             Action::PreviousChapter => inner.seek_chapter(false),
             Action::NextChapter => inner.seek_chapter(true),
-            Action::AudioMenu => {
-                inner.show_osd();
-                inner.osd.audio.popup();
-            }
-            Action::SubtitleMenu => {
-                inner.show_osd();
-                inner.osd.subtitles.popup();
-            }
+            Action::AudioMenu => inner.open_menu(MenuKind::Audio),
+            Action::SubtitleMenu => inner.open_menu(MenuKind::Subtitles),
             // The OSD stays up and the controller moves through its buttons.
             Action::Skip => {
                 if inner.osd.skip.is_visible() {
@@ -493,10 +529,7 @@ impl PlayerPage {
         inner.osd.previous.set_sensitive(session.previous.is_some());
         inner.osd.next.set_sensitive(session.next.is_some());
         inner.show_chapter_buttons(session.markers.can_skip_chapters());
-        inner
-            .osd
-            .sleep
-            .set_menu_model(Some(&sleep_menu(session.item.item_type == "Episode")));
+        inner.menus.borrow_mut().sleep = sleep_menu(session.item.item_type == "Episode");
         inner.osd.svp.set_active(session.svp_enabled());
         if session.hdr && !session.svp_enabled() {
             let first_time =
@@ -560,15 +593,6 @@ impl Osd {
                 .tooltip_text(tooltip)
                 .css_classes(["flat", "circular", "osd-button"])
                 // Never stretched by a taller neighbour: stays a circle.
-                .valign(gtk::Align::Center)
-                .build()
-        };
-        let menu_button = |icon: &str, tooltip: &str| {
-            gtk::MenuButton::builder()
-                .icon_name(icon)
-                .tooltip_text(tooltip)
-                .direction(gtk::ArrowType::Up)
-                .css_classes(["flat", "circular", "osd-button"])
                 .valign(gtk::Align::Center)
                 .build()
         };
@@ -663,16 +687,15 @@ impl Osd {
         let volume_box = gtk::Box::builder().spacing(6).build();
         volume_box.append(&mute);
         volume_box.append(&volume);
-        let volume_button = menu_button(crate::ui::icons::VOLUME, "Volume");
-        volume_button.set_popover(Some(&gtk::Popover::builder().child(&volume_box).build()));
-        let audio = menu_button(crate::ui::icons::AUDIO, "Audio");
-        let subtitles = menu_button(crate::ui::icons::SUBTITLES, "Subtitles");
-        let quality = menu_button(crate::ui::icons::QUALITY, "Quality");
-        let picture = menu_button(crate::ui::icons::PICTURE, "Picture");
-        picture.set_menu_model(Some(&picture_menu()));
-        let shaders = menu_button(crate::ui::icons::SHADERS, "Shaders");
-        let sleep = menu_button(crate::ui::icons::SLEEP, "Sleep timer");
-        sleep.set_menu_model(Some(&sleep_menu(true)));
+        // Menu openers are plain buttons: the menus are drawn in the window
+        // (`Inner::open_menu`).
+        let volume_button = icon_button(crate::ui::icons::VOLUME, "Volume");
+        let audio = icon_button(crate::ui::icons::AUDIO, "Audio");
+        let subtitles = icon_button(crate::ui::icons::SUBTITLES, "Subtitles");
+        let quality = icon_button(crate::ui::icons::QUALITY, "Quality");
+        let picture = icon_button(crate::ui::icons::PICTURE, "Picture");
+        let shaders = icon_button(crate::ui::icons::SHADERS, "Shaders");
+        let sleep = icon_button(crate::ui::icons::SLEEP, "Sleep timer");
         let sleep_label = gtk::Label::builder()
             .css_classes(["numeric", "caption-heading"])
             .visible(false)
@@ -838,6 +861,8 @@ impl Osd {
         overlay.add_overlay(&volume_osd);
         let preview = super::scrub_preview::ScrubPreview::new();
         overlay.add_overlay(preview.widget());
+        // Last, so it's above every other layer.
+        let menu = MenuPanel::new(&overlay);
 
         let osd = Osd {
             top,
@@ -857,6 +882,7 @@ impl Osd {
             chapter_next,
             volume,
             volume_button,
+            volume_box,
             audio,
             subtitles,
             quality,
@@ -879,22 +905,13 @@ impl Osd {
             volume_osd_icon,
             volume_osd_level,
             volume_osd_label,
+            menu,
         };
         (osd, overlay)
     }
 
     fn menu_open(&self) -> bool {
-        [
-            &self.volume_button,
-            &self.audio,
-            &self.subtitles,
-            &self.quality,
-            &self.picture,
-            &self.shaders,
-            &self.sleep,
-        ]
-        .iter()
-        .any(|button| button.is_active())
+        self.menu.is_open()
     }
 }
 
@@ -1158,46 +1175,54 @@ impl Inner {
                 }
             }
         ));
-        // A menu closing in controls mode: a choice ends the mode; closed
-        // with B (or another pad button), focus returns to its button.
-        for menu in [
-            &osd.volume_button,
-            &osd.audio,
-            &osd.subtitles,
-            &osd.quality,
-            &osd.picture,
-            &osd.shaders,
-            &osd.sleep,
+        // Each menu button opens its menu in the window (see `player_menu`).
+        for (button, kind) in [
+            (&osd.volume_button, MenuKind::Volume),
+            (&osd.audio, MenuKind::Audio),
+            (&osd.subtitles, MenuKind::Subtitles),
+            (&osd.quality, MenuKind::Quality),
+            (&osd.picture, MenuKind::Picture),
+            (&osd.shaders, MenuKind::Shaders),
+            (&osd.sleep, MenuKind::Sleep),
         ] {
-            menu.connect_active_notify(glib::clone!(
+            button.connect_clicked(glib::clone!(
                 #[strong]
                 weak,
-                move |button| {
-                    let Some(inner) = weak.upgrade() else { return };
-                    if button.is_active() {
-                        inner.menu_dismissed.set(false);
-                        return;
+                move |_| {
+                    if let Some(inner) = weak.upgrade() {
+                        inner.open_menu(kind);
                     }
-                    if !inner.controls_mode.get() {
-                        return;
-                    }
-                    let dismissed = inner.menu_dismissed.replace(false);
-                    let button = button.clone();
-                    // After the popover has handed the focus back.
-                    glib::idle_add_local_once(move || {
-                        if !inner.controls_mode.get() {
-                            return;
-                        }
-                        if dismissed {
-                            button.grab_focus();
-                            inner.arm_controls_idle();
-                        } else {
-                            inner.leave_controls();
-                        }
-                    });
                 }
             ));
         }
+        // A menu closing in controls mode: a choice ends the mode; closed
+        // without one (B, Escape, a click outside), focus stays on its
+        // button. Outside the mode the OSD's hide countdown restarts.
+        osd.menu.connect_closed(glib::clone!(
+            #[strong]
+            weak,
+            move |how| {
+                let Some(inner) = weak.upgrade() else { return };
+                tracing::info!("player: menu closed ({how:?})");
+                if !inner.controls_mode.get() {
+                    inner.show_osd();
+                } else if how == Closed::Chosen {
+                    inner.leave_controls();
+                } else {
+                    inner.arm_controls_idle();
+                }
+            }
+        ));
+        // Leaving the player never keeps a menu open for next time.
+        self.page.connect_hiding(glib::clone!(
+            #[strong]
+            weak,
+            move |_| {
+                if let Some(inner) = weak.upgrade() {
+                    inner.osd.menu.close_quietly();
+                }
+            }
+        ));
         osd.svp.connect_toggled(glib::clone!(
             #[strong]
             weak,
@@ -1603,10 +1628,9 @@ impl Inner {
         };
         let audio = entries(TrackKind::Audio);
         let subtitles = entries(TrackKind::Subtitle);
+        let mut menus = self.menus.borrow_mut();
 
-        self.osd
-            .audio
-            .set_menu_model(Some(&track_menu("player.audio", &audio, None)));
+        menus.audio = track_menu("player.audio", &audio, None);
         self.osd.audio.set_sensitive(audio.len() > 1);
         set_state(
             &self.actions,
@@ -1614,24 +1638,7 @@ impl Inner {
             selected(&audio).unwrap_or(0).to_variant(),
         );
 
-        let subtitle_menu = track_menu("player.subtitle", &subtitles, Some(SUBTITLES_OFF_ID));
-        let adjust = gio::Menu::new();
-        for id in [SUB_SIZE_ROW, SUB_TIMING_ROW] {
-            let item = gio::MenuItem::new(None, None);
-            item.set_attribute_value("custom", Some(&id.to_variant()));
-            adjust.append_item(&item);
-        }
-        subtitle_menu.append_section(None, &adjust);
-        self.osd.subtitles.set_menu_model(Some(&subtitle_menu));
-        if let Some(popover) = self
-            .osd
-            .subtitles
-            .popover()
-            .and_downcast::<gtk::PopoverMenu>()
-        {
-            popover.add_child(&subtitle_size_row(self.player), SUB_SIZE_ROW);
-            popover.add_child(&subtitle_timing_row(self.player), SUB_TIMING_ROW);
-        }
+        menus.subtitles = track_menu("player.subtitle", &subtitles, Some(SUBTITLES_OFF_ID));
         self.osd.subtitles.set_sensitive(!subtitles.is_empty());
         set_state(
             &self.actions,
@@ -1650,51 +1657,87 @@ impl Inner {
             );
             menu.append_item(&item);
         }
-        self.osd.quality.set_menu_model(Some(&menu));
+        menus.quality = menu;
+        drop(menus);
         let current = QUALITIES
             .iter()
             .position(|q| *q == self.quality.get())
             .unwrap_or(0);
         set_state(&self.actions, "quality", (current as i32).to_variant());
-        self.rebuild_shader_menu();
+        self.refresh_shader_button();
     }
 
-    /// The Shaders menu: one row per group shown (Preferences), checked
-    /// while it has a preset on, each opening its list (Off and presets).
-    /// Hand-built: menu models can't put a check before a submenu's arrow.
-    fn rebuild_shader_menu(&self) {
+    /// Opens one of the OSD's menus above its button, drawn in the window
+    /// (see `player_menu`). Built from the current state on every opening.
+    fn open_menu(self: &Rc<Self>, kind: MenuKind) {
+        let osd = &self.osd;
+        let opener = match kind {
+            MenuKind::Volume => &osd.volume_button,
+            MenuKind::Audio => &osd.audio,
+            MenuKind::Subtitles => &osd.subtitles,
+            MenuKind::Quality => &osd.quality,
+            MenuKind::Picture => &osd.picture,
+            MenuKind::Shaders => &osd.shaders,
+            MenuKind::Sleep => &osd.sleep,
+        }
+        .clone();
+        self.show_osd();
+        let menu = Rc::downgrade(&osd.menu);
+        let chosen: Rc<dyn Fn()> = Rc::new(move || {
+            if let Some(menu) = menu.upgrade() {
+                menu.close(Closed::Chosen);
+            }
+        });
+        let model =
+            |model: &gio::Menu| player_menu::model_page(model, &self.actions, chosen.clone());
+        let (main, pages) = {
+            let menus = self.menus.borrow();
+            match kind {
+                MenuKind::Volume => (osd.volume_box.clone(), Vec::new()),
+                MenuKind::Audio => (model(&menus.audio), Vec::new()),
+                MenuKind::Subtitles => {
+                    let page = model(&menus.subtitles);
+                    page.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+                    page.append(&subtitle_size_row(self.player));
+                    page.append(&subtitle_timing_row(self.player));
+                    (page, Vec::new())
+                }
+                MenuKind::Quality => (model(&menus.quality), Vec::new()),
+                MenuKind::Picture => (model(&picture_menu()), Vec::new()),
+                MenuKind::Sleep => (model(&menus.sleep), Vec::new()),
+                MenuKind::Shaders => self.shader_pages(chosen.clone()),
+            }
+        };
+        tracing::info!("player: menu {kind:?} opened");
+        osd.menu.open(&opener, &main, pages);
+    }
+
+    /// The Shaders button: shown while any group is (Preferences), green
+    /// while one has a preset on.
+    fn refresh_shader_button(&self) {
         let groups = self.session().map(|s| s.shaders()).unwrap_or_default();
         self.osd.shaders.set_visible(!groups.is_empty());
         show_shaders_on(
             &self.osd.shaders,
             groups.iter().any(|(_, preset)| preset.is_some()),
         );
-        let popover = gtk::Popover::builder().css_classes(["menu"]).build();
-        let stack = gtk::Stack::builder()
-            .transition_type(gtk::StackTransitionType::SlideLeftRight)
-            .vhomogeneous(false)
-            .hhomogeneous(false)
-            .interpolate_size(true)
-            .build();
+    }
+
+    /// The Shaders menu: one row per group shown (Preferences), checked
+    /// while it has a preset on, each opening its page (Off and presets).
+    /// Hand-built: menu models can't put a check before a submenu's arrow.
+    fn shader_pages(
+        self: &Rc<Self>,
+        chosen: Rc<dyn Fn()>,
+    ) -> (gtk::Box, Vec<(String, gtk::Widget)>) {
+        let groups = self.session().map(|s| s.shaders()).unwrap_or_default();
         let main = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        stack.add_named(&main, Some("groups"));
-        // Each group's pick, shared by its row and its page.
-        let picks: Rc<Vec<RefCell<Option<String>>>> = Rc::new(
-            groups
-                .iter()
-                .map(|(_, preset)| RefCell::new(preset.clone()))
-                .collect(),
-        );
-        let session = self.session().map(|s| Rc::downgrade(&s));
-        let button = self.osd.shaders.downgrade();
-        for (index, (group, _)) in groups.into_iter().enumerate() {
+        let mut pages = Vec::new();
+        let menu = Rc::downgrade(&self.osd.menu);
+        for (index, (group, preset)) in groups.into_iter().enumerate() {
             let page_name = format!("g{index}");
             let check = check_icon();
-            check.set_opacity(if picks[index].borrow().is_some() {
-                1.0
-            } else {
-                0.0
-            });
+            check.set_opacity(if preset.is_some() { 1.0 } else { 0.0 });
             let row = menu_row(
                 &group.name,
                 None,
@@ -1713,81 +1756,41 @@ impl Inner {
             back.add_css_class("heading");
             page.append(&back);
             page.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+            let current = preset.unwrap_or_default();
             let mut options: Vec<(String, String)> = vec![(String::new(), "Off".into())];
             options.extend(group.presets.iter().map(|p| (p.id.clone(), p.name.clone())));
-            let marks: Vec<gtk::Image> = options.iter().map(|_| check_icon()).collect();
-            let show_marks = {
-                let (marks, ids) = (
-                    marks.clone(),
-                    options.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(),
-                );
-                move |pick: &Option<String>| {
-                    let current = pick.clone().unwrap_or_default();
-                    for (mark, id) in marks.iter().zip(&ids) {
-                        mark.set_opacity(if *id == current { 1.0 } else { 0.0 });
-                    }
-                }
-            };
-            show_marks(&picks[index].borrow());
-            for ((id, label), mark) in options.into_iter().zip(marks) {
+            for (id, label) in options {
+                let mark = check_icon();
+                mark.set_opacity(if id == current { 1.0 } else { 0.0 });
                 let option = menu_row(&label, Some(&mark), None, None);
-                let (session, group_id, picks, check, show_marks, button, popover) = (
-                    session.clone(),
-                    group.id.clone(),
-                    picks.clone(),
-                    check.clone(),
-                    show_marks.clone(),
-                    button.clone(),
-                    popover.downgrade(),
-                );
+                let (weak, group_id, chosen) =
+                    (Rc::downgrade(self), group.id.clone(), chosen.clone());
                 option.connect_clicked(move |_| {
-                    let Some(session) = session.as_ref().and_then(Weak::upgrade) else {
-                        return;
-                    };
-                    session.set_shader(&group_id, &id);
-                    let pick = (!id.is_empty()).then(|| id.clone());
-                    check.set_opacity(if pick.is_some() { 1.0 } else { 0.0 });
-                    show_marks(&pick);
-                    picks[index].replace(pick);
-                    if let Some(button) = button.upgrade() {
-                        show_shaders_on(&button, picks.iter().any(|p| p.borrow().is_some()));
+                    if let Some(inner) = weak.upgrade()
+                        && let Some(session) = inner.session()
+                    {
+                        session.set_shader(&group_id, &id);
+                        inner.refresh_shader_button();
                     }
-                    if let Some(popover) = popover.upgrade() {
-                        popover.popdown();
-                    }
+                    chosen();
                 });
                 page.append(&option);
             }
-            stack.add_named(&page, Some(&page_name));
-
-            let to_page = (stack.downgrade(), page.downgrade());
+            let (to_page, name) = (menu.clone(), page_name.clone());
             row.connect_clicked(move |_| {
-                if let (Some(stack), Some(page)) = (to_page.0.upgrade(), to_page.1.upgrade()) {
-                    stack.set_visible_child(&page);
-                    // On the group's current pick, else its first entry.
-                    focus_checked(&page);
+                if let Some(menu) = to_page.upgrade() {
+                    menu.show_page(&name);
                 }
             });
-            let to_main = (stack.downgrade(), main.downgrade());
+            let to_main = menu.clone();
             back.connect_clicked(move |_| {
-                if let (Some(stack), Some(main)) = (to_main.0.upgrade(), to_main.1.upgrade()) {
-                    stack.set_visible_child(&main);
-                    main.child_focus(gtk::DirectionType::TabForward);
+                if let Some(menu) = to_main.upgrade() {
+                    menu.show_main();
                 }
             });
+            pages.push((page_name, page.upcast()));
         }
-        popover.set_child(Some(&stack));
-        let main_ref = main.downgrade();
-        popover.connect_closed(glib::clone!(
-            #[weak]
-            stack,
-            move |_| {
-                if let Some(main) = main_ref.upgrade() {
-                    stack.set_visible_child(&main);
-                }
-            }
-        ));
-        self.osd.shaders.set_popover(Some(&popover));
+        (main, pages)
     }
 
     fn start_tick(self: &Rc<Self>) {
@@ -2219,7 +2222,6 @@ impl Inner {
     fn enter_controls(self: &Rc<Self>) {
         tracing::info!("player: controls mode on");
         self.controls_mode.set(true);
-        self.menu_dismissed.set(false);
         self.set_controls_style(true);
         // Controller use draws focus rings even after pointer motion.
         if let Some(window) = self.window() {
@@ -2304,6 +2306,16 @@ impl Inner {
             .and_downcast::<adw::ApplicationWindow>()
             .is_some_and(|window| window.visible_dialog().is_some());
         if !self.page.is_mapped() || dialog_open {
+            return glib::Propagation::Proceed;
+        }
+        // An open menu takes the keys (this controller captures on the
+        // window): arrows, Enter and Space move and pick in it; Escape steps
+        // back a page or closes it.
+        if self.osd.menu.is_open() {
+            if key == gdk::Key::Escape {
+                self.osd.menu.back();
+                return glib::Propagation::Stop;
+            }
             return glib::Propagation::Proceed;
         }
         let player = self.player;
@@ -2489,76 +2501,11 @@ fn titles(item: &BaseItem) -> (String, String) {
 }
 
 /// Green Shaders button while any group has a preset on.
-fn show_shaders_on(button: &gtk::MenuButton, on: bool) {
+fn show_shaders_on(button: &gtk::Button, on: bool) {
     if on {
         button.add_css_class("shaders-active");
     } else {
         button.remove_css_class("shaders-active");
-    }
-}
-
-/// A menu entry: optional leading icon, label, then an optional mark and
-/// trailing icon.
-fn menu_row(
-    label: &str,
-    leading: Option<&gtk::Image>,
-    mark: Option<&gtk::Image>,
-    trailing: Option<&str>,
-) -> gtk::Button {
-    let line = gtk::Box::builder().spacing(12).build();
-    if let Some(leading) = leading {
-        line.append(leading);
-    }
-    line.append(
-        &gtk::Label::builder()
-            .label(label)
-            .xalign(0.0)
-            .hexpand(true)
-            .build(),
-    );
-    if let Some(mark) = mark {
-        line.append(mark);
-    }
-    if let Some(icon) = trailing {
-        line.append(&gtk::Image::from_icon_name(icon));
-    }
-    gtk::Button::builder()
-        .child(&line)
-        .css_classes(["flat", "menu-row"])
-        .build()
-}
-
-/// A check mark; hidden by opacity so rows keep their alignment.
-fn check_icon() -> gtk::Image {
-    gtk::Image::from_icon_name(crate::ui::icons::WATCHED)
-}
-
-/// Focuses the entry of `page` whose check shows, else its first entry.
-fn focus_checked(page: &gtk::Box) {
-    let mut child = page.first_child();
-    let mut first = None;
-    while let Some(widget) = child {
-        child = widget.next_sibling();
-        let Some(row) = widget.downcast_ref::<gtk::Button>() else {
-            continue;
-        };
-        // Skip the back row at the top.
-        if row.has_css_class("heading") {
-            continue;
-        }
-        first.get_or_insert_with(|| row.clone());
-        let checked = row
-            .child()
-            .and_then(|line| line.first_child())
-            .and_downcast::<gtk::Image>()
-            .is_some_and(|mark| mark.opacity() > 0.5);
-        if checked {
-            row.grab_focus();
-            return;
-        }
-    }
-    if let Some(row) = first {
-        row.grab_focus();
     }
 }
 
@@ -2608,9 +2555,6 @@ pub fn bar_fill_from_name(name: &str) -> BarFill {
     }
 }
 
-const SUB_SIZE_ROW: &str = "subtitle-size";
-const SUB_TIMING_ROW: &str = "subtitle-timing";
-
 /// "Label  −  value  +" for the subtitles menu; clicking the value resets
 /// it. `step` changes the value by one step (±1) or resets it (0) and
 /// returns the new text.
@@ -2627,12 +2571,16 @@ fn adjust_row(title: &str, current: String, step: impl Fn(i32) -> String + 'stat
             .hexpand(true)
             .build(),
     );
+    // Tooltips are popup surfaces; Game Mode keeps the window the only one.
+    let tooltips = !crate::gamescope::detected();
     let value = gtk::Button::builder()
         .label(current)
-        .tooltip_text("Reset")
         .css_classes(["flat", "numeric"])
         .width_request(72)
         .build();
+    if tooltips {
+        value.set_tooltip_text(Some("Reset"));
+    }
     let step = std::rc::Rc::new(step);
     for (icon, tooltip, direction) in [
         ("list-remove-symbolic", "Less", -1),
@@ -2640,9 +2588,11 @@ fn adjust_row(title: &str, current: String, step: impl Fn(i32) -> String + 'stat
     ] {
         let button = gtk::Button::builder()
             .icon_name(icon)
-            .tooltip_text(tooltip)
             .css_classes(["flat", "circular"])
             .build();
+        if tooltips {
+            button.set_tooltip_text(Some(tooltip));
+        }
         let (step, value_button) = (step.clone(), value.clone());
         button.connect_clicked(move |_| value_button.set_label(&step(direction)));
         if direction < 0 {
