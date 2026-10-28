@@ -62,44 +62,7 @@ fn show_with(parent: &impl IsA<gtk::Widget>, server: bool) {
             "Defaults for new playback; the player's menus change them per title or session.",
         )
         .build();
-    let svp = adw::SwitchRow::builder()
-        .title("Use SVP by default")
-        .subtitle("Titles where you toggled SVP in the player keep their own choice")
-        .active(settings.frame_gen.default_backend == FrameGenBackend::Svp)
-        .build();
-    svp.connect_active_notify(|row| {
-        let backend = if row.is_active() {
-            FrameGenBackend::Svp
-        } else {
-            FrameGenBackend::Off
-        };
-        save(|s| s.frame_gen.default_backend = backend);
-    });
-    playback.add(&svp);
-    let auto_start = adw::SwitchRow::builder()
-        .title("Start SVP Manager automatically")
-        .subtitle("When SVP is wanted and SVP Manager isn't running (on by default in Game Mode)")
-        .active(settings.frame_gen.auto_start_svp())
-        .build();
-    auto_start.connect_active_notify(|row| {
-        let on = row.is_active();
-        save(|s| s.frame_gen.auto_start_svp = Some(on));
-    });
-    playback.add(&auto_start);
-    let smooth = adw::SwitchRow::builder()
-        .title("Smooth motion without SVP")
-        .subtitle("mpv's frame blending, for titles where SVP is switched off")
-        .active(settings.frame_gen.smooth_without_svp)
-        .build();
-    smooth.connect_active_notify(|row| {
-        let on = row.is_active();
-        save(|s| s.frame_gen.smooth_without_svp = on);
-    });
-    playback.add(&smooth);
-    playback.add(&svp_folder_row(parent.upcast_ref()));
-    playback.add(&svp_socket_row(&settings));
-    #[cfg(not(target_os = "macos"))]
-    playback.add(&vapoursynth_row(&settings));
+    add_display_rate_rows(&playback, &settings);
 
     let labels: Vec<String> = QUALITIES.iter().map(|q| q.label()).collect();
     let quality = adw::ComboRow::builder()
@@ -448,6 +411,12 @@ fn show_with(parent: &impl IsA<gtk::Widget>, server: bool) {
         "Video",
         crate::ui::icons::PICTURE,
     );
+    stack.add_titled_with_icon(
+        &svp_page(parent.upcast_ref(), &settings),
+        Some("svp"),
+        "SVP",
+        crate::ui::icons::SVP,
+    );
     if server {
         stack.add_titled_with_icon(
             &super::tracking_prefs::page(parent.upcast_ref()),
@@ -468,14 +437,11 @@ fn show_with(parent: &impl IsA<gtk::Widget>, server: bool) {
         "Keyboard",
         crate::ui::icons::KEYBOARD,
     );
-    let header = adw::HeaderBar::builder()
-        .title_widget(
-            &adw::ViewSwitcher::builder()
-                .stack(&stack)
-                .policy(adw::ViewSwitcherPolicy::Wide)
-                .build(),
-        )
+    let switcher = adw::ViewSwitcher::builder()
+        .stack(&stack)
+        .policy(adw::ViewSwitcherPolicy::Wide)
         .build();
+    let header = adw::HeaderBar::builder().title_widget(&switcher).build();
     // Quitting from here is easier with a controller than Steam's menu.
     let quit = gtk::Button::builder()
         .label("Quit")
@@ -500,7 +466,7 @@ fn show_with(parent: &impl IsA<gtk::Widget>, server: bool) {
     toasts.set_child(Some(&toolbar));
     let dialog = adw::Dialog::builder()
         .title("Preferences")
-        .content_width(780)
+        .content_width(dialog_width(&switcher))
         .content_height(820)
         .child(&toasts)
         .build();
@@ -517,6 +483,16 @@ fn show_with(parent: &impl IsA<gtk::Widget>, server: bool) {
         }
     });
     dialog.present(Some(parent));
+}
+
+/// Wide enough for every tab label in full, plus room on each side of the
+/// switcher for the header's buttons (Close, Quit); a smaller window still
+/// shrinks the dialog.
+fn dialog_width(switcher: &adw::ViewSwitcher) -> i32 {
+    const MIN: i32 = 780;
+    const SIDES: i32 = 2 * 56;
+    let (_, natural, _, _) = switcher.measure(gtk::Orientation::Horizontal, -1);
+    (natural + SIDES).max(MIN)
 }
 
 /// "5.2 MB", or "Empty" for nothing.
@@ -751,14 +727,27 @@ fn video_page(settings: &Settings) -> adw::PreferencesPage {
     upscaler.connect_selected_notify(scaler_saved(|v| &mut v.upscaler));
     chroma.connect_selected_notify(scaler_saved(|v| &mut v.chroma_scaler));
     downscaler.connect_selected_notify(scaler_saved(|v| &mut v.downscaler));
-    let deband = adw::SwitchRow::builder()
+    let deband_labels: Vec<&str> = crate::config::DebandLevel::ALL
+        .iter()
+        .map(|level| level.label())
+        .collect();
+    let deband = adw::ComboRow::builder()
         .title("Debanding")
-        .subtitle("Smooths colour banding in gradients")
-        .active(settings.video.deband)
+        .subtitle("Smooths colour banding in gradients; stronger also softens fine detail")
+        .model(&gtk::StringList::new(&deband_labels))
+        .selected(
+            crate::config::DebandLevel::ALL
+                .iter()
+                .position(|level| *level == settings.video.deband)
+                .unwrap_or(0) as u32,
+        )
         .build();
-    deband.connect_active_notify(|row| {
-        let on = row.is_active();
-        save(|s| s.video.deband = on);
+    deband.connect_selected_notify(|row| {
+        let level = crate::config::DebandLevel::ALL
+            .get(row.selected() as usize)
+            .copied()
+            .unwrap_or_default();
+        save(|s| s.video.deband = level);
     });
     let custom_rows: Vec<gtk::Widget> = vec![
         upscaler.upcast(),
@@ -805,13 +794,26 @@ fn video_page(settings: &Settings) -> adw::PreferencesPage {
     let shader_group = adw::PreferencesGroup::builder()
         .title("Shaders")
         .description(
-            "Shown groups get a submenu in the player's Shaders button, where each title keeps its own pick. One preset per group; presets of different groups stack. Upscalers only work when the video is smaller than the screen.",
+            "Shown groups get a submenu in the player's Shaders button, where each title keeps its own pick. One preset per group; presets of different groups stack. Upscalers only work when the video is smaller than the screen: use one of Luma upscaler, Anime4K or FSR at a time. All are off unless picked; heavier ones can drop frames, more so with SVP.",
         )
         .build();
+    let any_size = adw::SwitchRow::builder()
+        .title("Run upscalers at any size")
+        .subtitle("Luma upscalers normally run only when the video is enlarged at least 1.3–1.4×. On, they always double the picture first, then it's scaled to the screen: smoother edges (like supersampling) at a GPU cost — not for the Steam Deck. Applies from the next video.")
+        .active(settings.video.upscale_any_size)
+        .build();
+    any_size.connect_active_notify(move |row| {
+        let on = row.is_active();
+        save(|s| s.video.upscale_any_size = on);
+    });
+    shader_group.add(&any_size);
     for group in crate::shaders::groups() {
         let shown = adw::SwitchRow::builder()
             .title(&group.name)
-            .subtitle("Show in the player")
+            .subtitle(crate::shaders::hint(&group.id).map_or_else(
+                || "Show in the player".to_string(),
+                |hint| format!("Show in the player · {hint}"),
+            ))
             .active(settings.shaders.shown(&group.id))
             .build();
         let mut labels = vec!["Off".to_string()];
@@ -889,6 +891,58 @@ fn video_page(settings: &Settings) -> adw::PreferencesPage {
         shader_group.add(&row);
     }
     page.add(&shader_group);
+    page
+}
+
+/// SVP: how the app uses SVP Manager, then SVP's own Automatic profile.
+fn svp_page(parent: &gtk::Widget, settings: &Settings) -> adw::PreferencesPage {
+    let page = adw::PreferencesPage::builder()
+        .title("SVP")
+        .icon_name(crate::ui::icons::SVP)
+        .build();
+    let group = adw::PreferencesGroup::builder()
+        .title("SVP Manager")
+        .build();
+    let svp = adw::SwitchRow::builder()
+        .title("Use SVP by default")
+        .subtitle("Titles where you toggled SVP in the player keep their own choice")
+        .active(settings.frame_gen.default_backend == FrameGenBackend::Svp)
+        .build();
+    svp.connect_active_notify(|row| {
+        let backend = if row.is_active() {
+            FrameGenBackend::Svp
+        } else {
+            FrameGenBackend::Off
+        };
+        save(|s| s.frame_gen.default_backend = backend);
+    });
+    group.add(&svp);
+    let auto_start = adw::SwitchRow::builder()
+        .title("Start SVP Manager automatically")
+        .subtitle("When SVP is wanted and SVP Manager isn't running (on by default in Game Mode)")
+        .active(settings.frame_gen.auto_start_svp())
+        .build();
+    auto_start.connect_active_notify(|row| {
+        let on = row.is_active();
+        save(|s| s.frame_gen.auto_start_svp = Some(on));
+    });
+    group.add(&auto_start);
+    let smooth = adw::SwitchRow::builder()
+        .title("Smooth motion without SVP")
+        .subtitle("mpv's frame blending, for titles where SVP is switched off")
+        .active(settings.frame_gen.smooth_without_svp)
+        .build();
+    smooth.connect_active_notify(|row| {
+        let on = row.is_active();
+        save(|s| s.frame_gen.smooth_without_svp = on);
+    });
+    group.add(&smooth);
+    group.add(&svp_folder_row(parent));
+    group.add(&svp_socket_row(settings));
+    #[cfg(not(target_os = "macos"))]
+    group.add(&vapoursynth_row(settings));
+    page.add(&group);
+    page.add(&super::svp_settings::group());
     page
 }
 
@@ -1145,6 +1199,66 @@ fn capture_key(
 
 /// "SVP folder" with Choose… and Reset. Only detection uses it: the
 /// VapourSynth libraries are linked from the folder given at build time.
+/// Row positions in the "Display refresh rate" list: Automatic, Off, the
+/// presets, then Custom.
+const RATE_PRESETS_AT: usize = 2;
+
+/// "Display refresh rate", plus a Hz row that shows only for Custom.
+fn add_display_rate_rows(group: &adw::PreferencesGroup, settings: &Settings) {
+    use crate::config::DisplayRate;
+    let current = DisplayRate::resolve(settings.video.display_rate, crate::gamescope::detected());
+    let preset_labels: Vec<String> = DisplayRate::PRESETS
+        .iter()
+        .map(|hz| format!("{hz} Hz"))
+        .collect();
+    let mut labels = vec!["Automatic (screen's rate)", "Don't tell the player"];
+    labels.extend(preset_labels.iter().map(String::as_str));
+    labels.push("Custom\u{2026}");
+    let custom_at = labels.len() - 1;
+    let selected = match current {
+        DisplayRate::Automatic => 0,
+        DisplayRate::Off => 1,
+        DisplayRate::Fixed(hz) => DisplayRate::PRESETS
+            .iter()
+            .position(|p| (*p - hz).abs() < 1e-6)
+            .map_or(custom_at, |i| i + RATE_PRESETS_AT),
+    };
+    let row = choice_row("Display refresh rate", &labels, selected);
+    row.set_subtitle(
+        "Tells the video player how often the screen shows a frame. In Steam Game Mode with a frame limit, pick the limit or Don't tell the player.",
+    );
+    let custom = adw::SpinRow::with_range(DisplayRate::MIN_HZ, DisplayRate::MAX_HZ, 1.0);
+    custom.set_title("Custom refresh rate (Hz)");
+    custom.set_value(match current {
+        DisplayRate::Fixed(hz) => hz,
+        _ => 60.0,
+    });
+    custom.set_visible(selected == custom_at);
+    custom.connect_value_notify(|row| {
+        let hz = row.value();
+        save(|s| s.video.display_rate = Some(DisplayRate::Fixed(hz)));
+    });
+    row.connect_selected_notify({
+        let custom = custom.clone();
+        move |row| {
+            let at = row.selected() as usize;
+            custom.set_visible(at == custom_at);
+            let rate = match at {
+                0 => DisplayRate::Automatic,
+                1 => DisplayRate::Off,
+                _ if at == custom_at => DisplayRate::Fixed(custom.value()),
+                _ => match DisplayRate::PRESETS.get(at - RATE_PRESETS_AT) {
+                    Some(hz) => DisplayRate::Fixed(*hz),
+                    None => return,
+                },
+            };
+            save(|s| s.video.display_rate = Some(rate));
+        }
+    });
+    group.add(&row);
+    group.add(&custom);
+}
+
 fn svp_folder_row(parent: &gtk::Widget) -> adw::ActionRow {
     let row = adw::ActionRow::builder()
         .title("SVP folder")

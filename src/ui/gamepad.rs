@@ -247,16 +247,20 @@ pub fn player_press(
     // one that opened it) just closes it, and never leaves the player.
     match controller::action_for(pad, Context::Browse) {
         Some(Action::Up | Action::Down | Action::Left | Action::Right | Action::Activate) => false,
-        // Closing without choosing: controls mode keeps its button.
+        // B steps back a page, or closes without choosing: controls mode
+        // keeps its button.
         Some(Action::Back) => {
-            page.menu_dismissed();
-            false
-        }
-        _ => {
-            page.menu_dismissed();
-            close_popover(window);
+            page.menu_back();
             true
         }
+        Some(other) => {
+            tracing::info!("player: menu closed by controller {other:?}");
+            page.close_menu();
+            true
+        }
+        // Not a mapped button (stick drift, extra buttons of a virtual pad):
+        // nothing to do, and it mustn't close the menu.
+        None => true,
     }
 }
 
@@ -887,14 +891,18 @@ fn focus_page(ui: &Ui) -> bool {
 }
 
 /// Moves focus like the arrow keys would, inside whichever surface holds
-/// it (the window, an open popover, or a dialog).
+/// it (the window, an open popover, or a dialog), or inside the player's
+/// open menu.
 fn move_focus(window: &adw::ApplicationWindow, direction: gtk::DirectionType) {
     let focus = gtk::prelude::GtkWindowExt::focus(window);
     // A popover hangs off a widget inside the grid (the card), so the grid's
     // own rules would walk out of it: inside one, only its entries count.
-    let in_popover = focus
-        .as_ref()
-        .is_some_and(|f| f.ancestor(gtk::Popover::static_type()).is_some());
+    // The player's in-window menu is moved through the same way.
+    let menu = focus.as_ref().and_then(player_menu_of);
+    let in_popover = menu.is_some()
+        || focus
+            .as_ref()
+            .is_some_and(|f| f.ancestor(gtk::Popover::static_type()).is_some());
     if !in_popover {
         if let Some(focus) = &focus
             && (library::move_in_grid(focus, direction) || library::move_in_strip(focus, direction))
@@ -914,11 +922,13 @@ fn move_focus(window: &adw::ApplicationWindow, direction: gtk::DirectionType) {
             return;
         }
     }
-    let mut scope: gtk::Widget = focus
-        .as_ref()
-        .and_then(|widget| widget.native())
-        .map(|native| native.upcast())
-        .unwrap_or_else(|| window.clone().upcast());
+    let mut scope: gtk::Widget = menu.unwrap_or_else(|| {
+        focus
+            .as_ref()
+            .and_then(|widget| widget.native())
+            .map(|native| native.upcast())
+            .unwrap_or_else(|| window.clone().upcast())
+    });
     // An open dialog is drawn inside the window: never step out of it onto
     // the page behind.
     if scope == *window.upcast_ref::<gtk::Widget>()
@@ -959,6 +969,18 @@ fn move_focus(window: &adw::ApplicationWindow, direction: gtk::DirectionType) {
 
 /// Whether focus moving from `from` to `to` went against `direction`, or
 /// (Left/Right) onto another row.
+/// The player's open menu holding `widget`, if any (`player_menu`).
+fn player_menu_of(widget: &gtk::Widget) -> Option<gtk::Widget> {
+    let mut current = Some(widget.clone());
+    while let Some(w) = current {
+        if w.has_css_class(super::player_menu::CSS_CLASS) {
+            return Some(w);
+        }
+        current = w.parent();
+    }
+    None
+}
+
 fn wanders(
     scope: &gtk::Widget,
     from: &gtk::Widget,

@@ -21,6 +21,7 @@ mod library_page;
 pub mod login;
 mod marquee;
 mod music;
+mod player_menu;
 pub mod player_page;
 mod playlists;
 mod preferences;
@@ -33,6 +34,7 @@ mod side_by_side;
 mod standalone;
 mod stick_scroll;
 mod subtitle_picker;
+mod svp_settings;
 mod sync_markers;
 mod tracking_prefs;
 mod version_picker;
@@ -818,8 +820,12 @@ impl Ui {
                 Ok(stream) => match ui.inner.player.load_at(
                     &stream.url,
                     0.0,
-                    // mpv shows a single added subtitle file by default.
-                    &stream.subtitle.as_deref().into_iter().collect::<Vec<_>>(),
+                    // The link's captions, shown from the start.
+                    stream
+                        .subtitle
+                        .map(crate::player::SubtitleFile::plain)
+                        .into_iter()
+                        .collect(),
                     stream.audio.as_deref(),
                 ) {
                     Ok(()) => ui.inner.playing_link.set(true),

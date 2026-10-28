@@ -20,7 +20,7 @@ use crate::emby::EmbyClient;
 use crate::emby::models::{BaseItem, MediaSource, ProgressRequest, StoppedRequest};
 use crate::emby::playback_info::StreamRequest;
 use crate::frame_gen::resolve_backend;
-use crate::player::{Player, Track, TrackKind};
+use crate::player::{Player, SubtitleFile, Track, TrackKind};
 use crate::runtime::{block_on_timeout, spawn_detached, spawn_tokio};
 use crate::ui::Session;
 use markers::{Markers, neighbours};
@@ -268,7 +268,11 @@ impl PlaybackSession {
                     .context("Emby didn't offer a transcode for this item")?,
             )),
         };
-        let external_subtitles = subtitle_files(&client, &item.id, &source, quality)?;
+        let subtitle_files = subtitle_files(&client, &item.id, &source, quality)?;
+        let external_subtitles: Vec<(i32, String)> = subtitle_files
+            .iter()
+            .map(|(index, file)| (*index, file.url.clone()))
+            .collect();
         let hdr = crate::emby::models::is_hdr(&source.media_streams);
         let (previous, next) = neighbours(&episodes, &item.id);
         let (override_key, override_type) = title_key(&item);
@@ -307,16 +311,15 @@ impl PlaybackSession {
             anyhow::bail!("superseded by a newer start");
         }
         session.set_up_player()?;
-        let subtitle_urls: Vec<&str> = session
-            .external_subtitles
-            .iter()
-            .map(|(_, url)| url.as_str())
-            .chain(web_captions.as_deref())
+        let subtitles: Vec<SubtitleFile> = subtitle_files
+            .into_iter()
+            .map(|(_, file)| file)
+            .chain(web_captions.map(SubtitleFile::plain))
             .collect();
         player.load_at(
             &url,
             start_ticks as f64 / TICKS_PER_SECOND as f64,
-            &subtitle_urls,
+            subtitles,
             external_audio.as_deref(),
         )?;
         session.report_playing();
@@ -389,16 +392,16 @@ impl PlaybackSession {
             anyhow::bail!("superseded by a newer start");
         }
         session.set_up_player()?;
-        let subtitles: Vec<&str> = stream
+        let subtitles: Vec<SubtitleFile> = stream
             .subtitle
-            .as_deref()
+            .map(SubtitleFile::plain)
             .into_iter()
-            .chain(subtitle_files.iter().map(String::as_str))
+            .chain(subtitle_files.into_iter().map(SubtitleFile::beside_video))
             .collect();
         player.load_at(
             &stream.url,
             start_ticks as f64 / TICKS_PER_SECOND as f64,
-            &subtitles,
+            subtitles,
             stream.audio.as_deref(),
         )?;
         if session.client.is_some() {
@@ -435,6 +438,7 @@ impl PlaybackSession {
         if let Err(e) = player.apply_video(&settings.video) {
             tracing::warn!("{e:#}");
         }
+        crate::player::diag::apply_display_rate(player);
         // Each title keeps its own volume (music keeps the player's).
         if !self.item.is_audio() {
             let volume = self
@@ -682,10 +686,11 @@ impl PlaybackSession {
     }
 
     fn apply_shaders(&self) {
-        let settings = Settings::load().unwrap_or_default().shaders;
+        let settings = Settings::load().unwrap_or_default();
         let title = self.shader_choices();
-        let active = crate::shaders::active(&self.shader_groups, &settings, &title);
-        if let Err(e) = self.player.set_shaders(&crate::shaders::chain(&active)) {
+        let active = crate::shaders::active(&self.shader_groups, &settings.shaders, &title);
+        let files = crate::shaders::chain(&active, settings.video.upscale_any_size);
+        if let Err(e) = self.player.set_shaders(&files) {
             tracing::warn!("{e:#}");
         }
     }
@@ -875,7 +880,7 @@ fn subtitle_files(
     item_id: &str,
     source: &MediaSource,
     quality: Quality,
-) -> Result<Vec<(i32, String)>> {
+) -> Result<Vec<(i32, SubtitleFile)>> {
     let mut files = Vec::new();
     for stream in &source.media_streams {
         if stream.stream_type != "Subtitle" {
@@ -895,7 +900,15 @@ fn subtitle_files(
                 client.subtitle_url(item_id, &source.id, stream.index, format)?
             }
         };
-        files.push((stream.index, url));
+        files.push((
+            stream.index,
+            SubtitleFile {
+                url,
+                title: stream.display_title.clone(),
+                lang: stream.language.clone(),
+                select: false,
+            },
+        ));
     }
     Ok(files)
 }
@@ -1113,7 +1126,10 @@ mod tests {
             files,
             [(
                 4,
-                "http://server:8096/Videos/i/ms1/Subtitles/4/Stream.srt".to_string()
+                SubtitleFile {
+                    select: false,
+                    ..SubtitleFile::plain("http://server:8096/Videos/i/ms1/Subtitles/4/Stream.srt")
+                }
             )]
         );
     }
@@ -1124,7 +1140,7 @@ mod tests {
         let indexes: Vec<i32> = files.iter().map(|(i, _)| *i).collect();
         assert_eq!(indexes, [2, 4]);
         assert_eq!(
-            files[0].1,
+            files[0].1.url,
             "http://server:8096/emby/Videos/i/ms1/Subtitles/2/Stream.ass?api_key=tok"
         );
     }

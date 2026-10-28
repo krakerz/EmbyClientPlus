@@ -3,7 +3,7 @@ pub mod diag;
 pub mod user_config;
 pub mod video_area;
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Result, anyhow};
 use libmpv2::events::{Event, PropertyData};
@@ -129,6 +129,83 @@ static BAR_FILL: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(
 /// Mirrors whether frame blending is on, since mpv keeps it across files.
 static SMOOTH_MOTION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Subtitle files to add once the file that was just asked for has loaded.
+static PENDING_SUBTITLES: Mutex<Vec<SubtitleFile>> = Mutex::new(Vec::new());
+
+/// An external subtitle for mpv to add, with the labels to show for it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SubtitleFile {
+    /// A URL or a file path.
+    pub url: String,
+    pub title: Option<String>,
+    /// Language code (`eng`, `tha`, ...).
+    pub lang: Option<String>,
+    /// Show it right away (a web link's captions) instead of leaving the
+    /// choice to mpv's language rules and the initial track selection.
+    pub select: bool,
+}
+
+impl SubtitleFile {
+    /// A subtitle with no labels of its own, shown from the start.
+    pub fn plain(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            select: true,
+            ..Default::default()
+        }
+    }
+
+    /// A subtitle file beside a local video: `Movie.eng.srt` is English.
+    pub fn beside_video(path: impl Into<String>) -> Self {
+        let url = path.into();
+        let lang = std::path::Path::new(&url)
+            .file_stem()
+            .and_then(|stem| std::path::Path::new(stem).extension())
+            .and_then(|tag| tag.to_str())
+            .filter(|tag| {
+                (2..=3).contains(&tag.len()) && tag.chars().all(|c| c.is_ascii_alphabetic())
+            })
+            .map(str::to_ascii_lowercase);
+        Self {
+            url,
+            title: None,
+            lang,
+            select: false,
+        }
+    }
+
+    /// Arguments of mpv's `sub-add`: `<url> <flags> [<title> [<lang>]]`.
+    /// Trailing empty ones are left off; an empty title falls back to the
+    /// file name.
+    fn sub_add_args(&self) -> Vec<&str> {
+        let flags = if self.select { "select" } else { "auto" };
+        let mut args = vec![self.url.as_str(), flags];
+        if self.title.is_some() || self.lang.is_some() {
+            args.push(self.title.as_deref().unwrap_or(""));
+        }
+        if let Some(lang) = &self.lang {
+            args.push(lang);
+        }
+        args
+    }
+}
+
+/// Adds the subtitles queued by `load_at`, one `sub-add` each in order.
+/// (`sub-files-append` as a per-file option keeps only the last of several
+/// files, and can't carry titles or languages.) Runs before the UI hears
+/// about the loaded file, so the initial track choice sees them all.
+fn add_pending_subtitles(mpv: &Mpv) {
+    let files = std::mem::take(&mut *PENDING_SUBTITLES.lock().unwrap_or_else(|e| e.into_inner()));
+    for file in files {
+        if let Err(e) = mpv.command("sub-add", &file.sub_add_args()) {
+            tracing::warn!(
+                "couldn't add subtitle {}: {e:?}",
+                crate::logging::redact(&file.url)
+            );
+        }
+    }
+}
+
 static EVENT_HANDLER: OnceLock<Box<dyn Fn(PlayerEvent) + Send + Sync>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,11 +260,15 @@ static SVP_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::ne
 
 /// Options Preferences → Video sets, and their values when mpv started
 /// (mpv's defaults or the user's mpv.conf), for the Auto quality.
-const VIDEO_PROPERTIES: [&str; 10] = [
+const VIDEO_PROPERTIES: [&str; 14] = [
     "scale",
     "cscale",
     "dscale",
     "deband",
+    "deband-iterations",
+    "deband-threshold",
+    "deband-range",
+    "deband-grain",
     "correct-downscaling",
     "linear-downscaling",
     "sigmoid-upscaling",
@@ -264,7 +345,6 @@ impl Player {
         diag::switches();
         spawn_event_thread(mpv);
         diag::spawn_stats_thread(mpv);
-        diag::spawn_rate_watch(mpv);
         Ok(Self { mpv })
     }
 
@@ -305,6 +385,10 @@ impl Player {
     }
 
     pub fn load(self, target: &str) -> Result<()> {
+        PENDING_SUBTITLES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         self.command("loadfile", &[target])
     }
 
@@ -315,13 +399,14 @@ impl Player {
         self,
         target: &str,
         start_seconds: f64,
-        subtitle_files: &[&str],
+        subtitle_files: Vec<SubtitleFile>,
         audio_file: Option<&str>,
     ) -> Result<()> {
         // Filters outlive the file: SVP's would start the new one with the
         // previous file's script, until SVP Manager swaps in its own a few
         // seconds later (interpolation visibly starting twice).
         self.remove_svp_filter();
+        *PENDING_SUBTITLES.lock().unwrap_or_else(|e| e.into_inner()) = subtitle_files;
         // mpv ≥ 0.38 takes the playlist index before the per-file options.
         self.command(
             "loadfile",
@@ -329,7 +414,7 @@ impl Player {
                 target,
                 "replace",
                 "-1",
-                &file_options(start_seconds, subtitle_files, audio_file),
+                &file_options(start_seconds, audio_file),
             ],
         )
     }
@@ -668,7 +753,7 @@ impl Player {
                 video.upscaler.clone(),
                 video.chroma_scaler.clone(),
                 video.downscaler.clone(),
-                flag(video.deband).into(),
+                flag(video.deband != crate::config::DebandLevel::Off).into(),
             ),
         };
         // mpv's own "fast" profile skips these too; elsewhere they're cheap.
@@ -682,6 +767,24 @@ impl Player {
             VideoQuality::Fast => "no".into(),
             // mpv's own default.
             _ => "fruit".into(),
+        };
+        let [iterations, threshold, range, grain] = match video.quality {
+            VideoQuality::Auto => [
+                "deband-iterations",
+                "deband-threshold",
+                "deband-range",
+                "deband-grain",
+            ]
+            .map(initial),
+            quality => {
+                let level = match quality {
+                    VideoQuality::Custom => video.deband,
+                    // High quality's "on"; Fast and Balanced have it off anyway.
+                    _ => crate::config::DebandLevel::Medium,
+                };
+                let (iterations, threshold, range, grain) = level.params();
+                [iterations, threshold, range, grain].map(|n| n.to_string())
+            }
         };
         let hwdec = if video.software_decoding {
             "no".into()
@@ -701,6 +804,10 @@ impl Player {
             ("cscale", cscale),
             ("dscale", dscale),
             ("deband", deband),
+            ("deband-iterations", iterations),
+            ("deband-threshold", threshold),
+            ("deband-range", range),
+            ("deband-grain", grain),
             ("correct-downscaling", extras("correct-downscaling")),
             ("linear-downscaling", extras("linear-downscaling")),
             ("sigmoid-upscaling", extras("sigmoid-upscaling")),
@@ -877,11 +984,8 @@ fn unix_socket_path(fd: libc::c_int) -> Option<String> {
 
 /// Per-file `loadfile` options. Values use mpv's `%len%` quoting, since
 /// URLs can contain the `,` and `=` that separate options.
-fn file_options(start_seconds: f64, subtitle_files: &[&str], audio_file: Option<&str>) -> String {
+fn file_options(start_seconds: f64, audio_file: Option<&str>) -> String {
     let mut options = vec![format!("start={start_seconds:.3}")];
-    for file in subtitle_files {
-        options.push(format!("sub-files-append=%{}%{file}", file.len()));
-    }
     // %len% quoting: these URLs have commas of their own.
     if let Some(file) = audio_file {
         options.push(format!("audio-files-append=%{}%{file}", file.len()));
@@ -903,7 +1007,10 @@ fn spawn_event_thread(mpv: &'static Mpv) {
         loop {
             let event = match mpv.wait_event(-1.0) {
                 Some(Ok(Event::Shutdown)) => break,
-                Some(Ok(Event::FileLoaded)) => Some(PlayerEvent::FileLoaded),
+                Some(Ok(Event::FileLoaded)) => {
+                    add_pending_subtitles(mpv);
+                    Some(PlayerEvent::FileLoaded)
+                }
                 Some(Ok(Event::LogMessage {
                     prefix,
                     level,
@@ -911,10 +1018,6 @@ fn spawn_event_thread(mpv: &'static Mpv) {
                     ..
                 })) => {
                     log_mpv(prefix, level, text);
-                    None
-                }
-                Some(Ok(Event::Seek | Event::PlaybackRestart)) => {
-                    diag::note_disturbance();
                     None
                 }
                 Some(Ok(Event::EndFile(reason))) => {
@@ -938,13 +1041,11 @@ fn spawn_event_thread(mpv: &'static Mpv) {
             match &event {
                 Some(PlayerEvent::FileLoaded) => {
                     diag::set_loaded(true);
-                    diag::note_disturbance();
                     diag::log_config(mpv, "playback start");
                 }
                 Some(PlayerEvent::Finished(_)) => diag::set_loaded(false),
                 Some(PlayerEvent::Pause(paused)) => {
                     diag::set_paused(*paused);
-                    diag::note_disturbance();
                 }
                 _ => {}
             }
@@ -999,7 +1100,7 @@ fn padding_zoom(source: (f64, f64), output: (f64, f64), window: (f64, f64)) -> f
 
 #[cfg(test)]
 mod tests {
-    use super::{PlayerEvent, file_options, padding_zoom, property_event};
+    use super::{PlayerEvent, SubtitleFile, file_options, padding_zoom, property_event};
     use libmpv2::events::PropertyData;
 
     #[test]
@@ -1034,16 +1135,40 @@ mod tests {
     }
 
     #[test]
-    fn file_options_quote_subtitle_urls() {
+    fn file_options_quote_urls() {
+        assert_eq!(file_options(12.5, None), "start=12.500");
         assert_eq!(
-            file_options(12.5, &["http://s/a.srt?x=1,2"], None),
-            "start=12.500,sub-files-append=%20%http://s/a.srt?x=1,2"
-        );
-        assert_eq!(file_options(0.0, &[], None), "start=0.000");
-        assert_eq!(
-            file_options(0.0, &[], Some("http://a/b,c")),
+            file_options(0.0, Some("http://a/b,c")),
             "start=0.000,audio-files-append=%12%http://a/b,c"
         );
+    }
+
+    #[test]
+    fn sub_add_args_carry_title_and_language() {
+        let url = "http://s/a.srt?x=1,2".to_string();
+        let mut file = SubtitleFile::plain(url.clone());
+        assert_eq!(file.sub_add_args(), [url.as_str(), "select"]);
+        file.select = false;
+        assert_eq!(file.sub_add_args(), [url.as_str(), "auto"]);
+        file.lang = Some("tha".into());
+        assert_eq!(file.sub_add_args(), [url.as_str(), "auto", "", "tha"]);
+        file.title = Some("Thai (SUBRIP)".into());
+        assert_eq!(
+            file.sub_add_args(),
+            [url.as_str(), "auto", "Thai (SUBRIP)", "tha"]
+        );
+        file.lang = None;
+        assert_eq!(file.sub_add_args(), [url.as_str(), "auto", "Thai (SUBRIP)"]);
+    }
+
+    #[test]
+    fn language_is_read_from_local_subtitle_names() {
+        let lang = |p: &str| SubtitleFile::beside_video(p).lang;
+        assert_eq!(lang("/m/Movie.eng.srt").as_deref(), Some("eng"));
+        assert_eq!(lang("/m/Movie.EN.ass").as_deref(), Some("en"));
+        assert_eq!(lang("/m/Movie.srt"), None);
+        assert_eq!(lang("/m/Movie.2024.srt"), None);
+        assert_eq!(lang("/m/Movie.Final.srt"), None);
     }
 
     #[test]

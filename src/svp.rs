@@ -600,6 +600,8 @@ pub fn ensure_running() {
     let Some(dir) = install_dir().filter(|dir| is_install(dir)) else {
         return;
     };
+    // SVP reads its profiles only at startup: overrides go in now or never.
+    crate::svp_profile::apply_before_start();
     let manager = manager_path(&dir);
     let in_gamescope = crate::gamescope::detected();
     // A headless gamescope around it (to hide it) cost GPU time while
