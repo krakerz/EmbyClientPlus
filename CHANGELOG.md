@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.32.0] — 2026-10-28
+
+### Added
+- Preferences → General → Playback, Steam Game Mode only: **Draw past 60 fps** (off by default). Gamescope otherwise holds the app to 60 frames a second even with Steam's frame limit off; turn it on for 90–120 fps SVP. Uses more power; takes effect after restarting the app.
+
 ## [1.31.0] — 2026-10-28
 
 ### Added
