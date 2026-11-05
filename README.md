@@ -17,7 +17,7 @@ Icons: [Lucide](https://lucide.dev/) (ISC, `data/icons/LICENSE`), converted for 
 - **Picture:** quality presets or custom scalers and debanding strength, deinterlacing, and per-title shaders: FSR, Anime4K, chroma upscalers (KrigBilateral, Chroma from Luma), luma upscalers (RAVU, NNEDI3, FSRCNNX), sharpeners (AMD CAS, Adaptive sharpen), plus your own.
 - **SVP:** attaches when SVP 4 is installed; per-title toggle with a status light; mpv frame blending as an alternative; Preferences shows SVP's main settings and can override them.
 - **Profile:** your Emby account's own settings (languages, subtitle mode, autoplay, intro skipping, hidden watched items, library order), picture, password and PIN; shared with Emby's apps.
-- **Tracking:** MyAnimeList, AniList, Kitsu and Trakt follow what you watch, including split anime seasons (matched through AniBridge) and downloads watched offline; MyAnimeList and AniList log in from Desktop Mode.
+- **Tracking:** MyAnimeList, AniList, Kitsu and Trakt follow what you watch, including split anime seasons (matched through AniBridge) and downloads watched offline; MyAnimeList and AniList log in from Desktop Mode; Trakt uses your own free Client ID (see [below](#trakt-use-your-own-client-id)).
 - **Downloads:** original files for offline play with the full player; pause and resume, resuming after the app closes, with disk space shown; auto-download keeps a series' next unwatched episodes and can delete watched ones; downloaded titles are badged.
 - **Music:** mini player, queue, shuffle/repeat, gapless, playlists, Instant Mix, media keys and now-playing on every OS.
 - **Controller & Steam Deck:** everything works with a gamepad, with on-screen hints and remappable buttons; Steam library artwork included.
@@ -84,6 +84,22 @@ menu → **Preferences**; your account's settings are on **Profile** (the avatar
 - **Steam Game Mode:** add the AppImage (or `~/.local/bin/embyclientplus`) as a non-Steam game with
   the **Gamepad** layout. Artwork is in `EmbyClientPlus-<version>-steam-library.zip` on the
   release page (and the archive's `steam-library/`); set it from the shortcut's library page.
+
+### Trakt: use your own Client ID
+
+Trakt limits how many requests each API app may make, so this app ships no Client ID of its own.
+Making one takes a minute and is free.
+
+1. On trakt.tv open **Settings → Your API Apps → New Application**.
+2. Pick any name, set the Redirect URI to `urn:ietf:wg:oauth:2.0:oob`, tick the **/scrobble**
+   permission and leave the rest empty.
+3. **Save**, then copy the **Client ID** (not the secret).
+4. In the app open Preferences → Tracking → Trakt → Client ID, paste it, press Enter, then
+   **Log In**.
+
+Changing the Client ID logs you out of Trakt. To spare your quota, watched episodes are queued and
+sent together (every 15 minutes by default, or only when you quit; **Send updates**), and the live
+"watching now" status is off unless you turn on **Show 'watching now' on Trakt**.
 
 ### Keyboard and controller
 

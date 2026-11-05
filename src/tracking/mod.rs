@@ -13,6 +13,7 @@ pub mod rules;
 pub mod tokens;
 pub mod tracker;
 pub mod trakt;
+mod trakt_cache;
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -222,12 +223,13 @@ impl std::fmt::Display for LoggedOut {
 
 impl std::error::Error for LoggedOut {}
 
-/// No connection (offline, DNS, timeout): keep the update queued.
+/// No connection (offline, DNS, timeout) or Trakt's rate limit: keep the update queued.
 pub fn is_network(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         cause
             .downcast_ref::<reqwest::Error>()
             .is_some_and(|e| e.is_connect() || e.is_timeout() || e.is_request())
+            || cause.is::<trakt::RateLimited>()
     })
 }
 
@@ -273,14 +275,6 @@ pub trait TrackingService: Send + Sync {
         _keys: &'a [EntryKey],
     ) -> BoxFuture<'a, Result<HashMap<u32, EntryInfo>>> {
         Box::pin(async { Ok(HashMap::new()) })
-    }
-    /// Trakt: the episodes watched on a show (`None`: Trakt doesn't know the
-    /// show), from the session's copy when there is one.
-    fn show_progress<'a>(
-        &'a self,
-        _ids: &'a resolve::ShowIds,
-    ) -> BoxFuture<'a, Result<Option<trakt::ShowState>>> {
-        Box::pin(async { Ok(None) })
     }
     /// Trakt: the movies watched, from the session's copy when there is one.
     fn watched_movies(&self) -> BoxFuture<'_, Result<std::sync::Arc<trakt::WatchedMovies>>> {

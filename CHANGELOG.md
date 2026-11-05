@@ -7,6 +7,16 @@
 ### Added
 - Preferences → General → Playback, Steam Game Mode only: **Draw past 60 fps** (off by default). Gamescope otherwise holds the app to 60 frames a second even with Steam's frame limit off; turn it on for 90–120 fps SVP. Uses more power; takes effect after restarting the app.
 
+- Preferences → Tracking → Trakt: **Show 'watching now' on Trakt** (off by default) and **Send updates** (every 5, 15, 30 or 60 minutes, or only when quitting).
+
+### Changed
+- Trakt gets watched episodes in one batch instead of one request per episode, and series pages no longer ask Trakt for anything.
+- Trakt now uses your own Client ID, set in Preferences → Tracking (the README shows how to get one); existing Trakt logins are signed out once.
+- Trakt sync makes far fewer requests and waits when Trakt asks it to slow down.
+
+### Removed
+- The built-in Trakt Client ID.
+
 ## [1.31.0] — 2026-10-28
 
 ### Added

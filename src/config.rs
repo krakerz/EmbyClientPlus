@@ -405,6 +405,20 @@ pub struct TrackingSettings {
     /// removes Trakt plays. Off: unwatching never syncs.
     #[serde(default)]
     pub sync_unwatched: bool,
+    /// The Client ID of the user's own Trakt API app; empty: Trakt can't log in.
+    #[serde(default)]
+    pub trakt_client_id: String,
+    /// Live "watching now" scrobbles on every play and pause; off saves
+    /// Trakt's request quota.
+    #[serde(default)]
+    pub trakt_live: bool,
+    /// Minutes between sends of queued Trakt updates; 0: only when quitting.
+    #[serde(default = "default_trakt_sync_minutes")]
+    pub trakt_sync_minutes: u32,
+}
+
+fn default_trakt_sync_minutes() -> u32 {
+    15
 }
 
 impl Default for TrackingSettings {
@@ -415,6 +429,9 @@ impl Default for TrackingSettings {
             kitsu: true,
             trakt: true,
             sync_unwatched: false,
+            trakt_client_id: String::new(),
+            trakt_live: false,
+            trakt_sync_minutes: default_trakt_sync_minutes(),
         }
     }
 }

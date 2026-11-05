@@ -1,5 +1,5 @@
 //! Preferences → Tracking: log in to MyAnimeList, AniList, Kitsu and Trakt,
-//! switch each on or off, and the "Also sync unwatched" option.
+//! switch each on or off, the Trakt Client ID and the "Also sync unwatched" option.
 
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
@@ -27,6 +27,7 @@ pub fn page(_parent: &gtk::Widget) -> adw::PreferencesPage {
              episode's own IDs.",
         )
         .build();
+    let mut trakt_row = None;
     for id in ServiceId::ALL {
         let row = adw::ActionRow::builder().title(id.label()).build();
         let suffix = gtk::Box::builder()
@@ -37,8 +38,88 @@ pub fn page(_parent: &gtk::Widget) -> adw::PreferencesPage {
         row.add_suffix(&suffix);
         refresh_row(&row, &suffix, id);
         services.add(&row);
+        if id == ServiceId::Trakt {
+            trakt_row = Some((row.clone(), suffix.clone()));
+        }
     }
     page.add(&services);
+
+    let trakt_group = adw::PreferencesGroup::builder()
+        .title("Trakt")
+        .description(
+            "Trakt needs a Client ID from your own free API app (trakt.tv → Settings → Your API \
+             Apps).",
+        )
+        .build();
+    trakt_group.set_header_suffix(Some(
+        &gtk::LinkButton::builder()
+            .label("Guide")
+            .uri("https://github.com/krakerz/EmbyClientPlus#trakt-use-your-own-client-id")
+            .valign(gtk::Align::Center)
+            .build(),
+    ));
+    let client_id = adw::EntryRow::builder()
+        .title("Client ID")
+        .text(&settings.tracking.trakt_client_id)
+        .show_apply_button(true)
+        .build();
+    if let Some((row, suffix)) = trakt_row {
+        let (row, suffix) = (row.downgrade(), suffix.downgrade());
+        client_id.connect_apply(move |entry| {
+            let id = entry.text().trim().to_string();
+            if id == trakt::client_id().unwrap_or_default() {
+                return;
+            }
+            super::preferences::save(|s| s.tracking.trakt_client_id = id.clone());
+            trakt::set_client_id(&id);
+            let (Some(row), Some(suffix)) = (row.upgrade(), suffix.upgrade()) else {
+                return;
+            };
+            // Tokens belong to the Client ID they were made with.
+            if tracker::get().service(ServiceId::Trakt).is_logged_in() {
+                log_out_of(ServiceId::Trakt, &row, &suffix);
+            } else {
+                refresh_row(&row, &suffix, ServiceId::Trakt);
+            }
+        });
+    }
+    trakt_group.add(&client_id);
+    let live = adw::SwitchRow::builder()
+        .title("Show 'watching now' on Trakt")
+        .subtitle("Sends a request on every play and pause. Off saves Trakt's limited requests.")
+        .active(settings.tracking.trakt_live)
+        .build();
+    live.connect_active_notify(|row| {
+        let value = row.is_active();
+        super::preferences::save(|s| s.tracking.trakt_live = value);
+    });
+    trakt_group.add(&live);
+    let sync_minutes = adw::ComboRow::builder()
+        .title("Send updates")
+        .subtitle("Watched episodes wait in a queue and go to Trakt together.")
+        .model(&gtk::StringList::new(&[
+            "Every 5 minutes",
+            "Every 15 minutes",
+            "Every 30 minutes",
+            "Every 60 minutes",
+            "Only when quitting",
+        ]))
+        .selected(
+            SYNC_MINUTES
+                .iter()
+                .position(|&m| m == settings.tracking.trakt_sync_minutes)
+                .unwrap_or(1) as u32,
+        )
+        .build();
+    sync_minutes.connect_selected_notify(|row| {
+        let minutes = SYNC_MINUTES
+            .get(row.selected() as usize)
+            .copied()
+            .unwrap_or(15);
+        super::preferences::save(|s| s.tracking.trakt_sync_minutes = minutes);
+    });
+    trakt_group.add(&sync_minutes);
+    page.add(&trakt_group);
 
     let options = adw::PreferencesGroup::builder().title("Options").build();
     let unwatched = adw::SwitchRow::builder()
@@ -57,6 +138,9 @@ pub fn page(_parent: &gtk::Widget) -> adw::PreferencesPage {
     page.add(&options);
     page
 }
+
+/// The "Send updates" choices, in the combo's order (0: only when quitting).
+const SYNC_MINUTES: [u32; 5] = [5, 15, 30, 60, 0];
 
 /// Shows the notice on the main window, like the update and sleep timer ones.
 fn toast(message: &str) {
@@ -117,6 +201,11 @@ fn refresh_row(row: &adw::ActionRow, suffix: &gtk::Box, id: ServiceId) {
         .valign(gtk::Align::Center)
         .build();
     suffix.append(&log_in);
+    if id == ServiceId::Trakt && trakt::client_id().is_err() {
+        row.set_subtitle("Add your Client ID below first");
+        log_in.set_sensitive(false);
+        return;
+    }
     if id.needs_browser() && crate::gamescope::detected() {
         row.set_subtitle(if crate::auth::tokens_shared_across_modes() {
             "Log in from Desktop Mode; it carries over"
