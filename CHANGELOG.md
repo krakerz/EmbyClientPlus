@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [1.33.0] — 2026-11-05
+
+### Added
+- Preferences → Tracking → Trakt: **Show 'watching now' on Trakt** (off by default) and **Send updates** (every 5, 15, 30 or 60 minutes, or only when quitting).
+
+### Changed
+- Trakt gets watched episodes in one batch instead of one request per episode, and series pages no longer ask Trakt for anything.
+- Trakt now uses your own Client ID, set in Preferences → Tracking (the README shows how to get one); existing Trakt logins are signed out once.
+- Trakt sync makes far fewer requests and waits when Trakt asks it to slow down.
+
+### Removed
+- The built-in Trakt Client ID.
+
 ## [1.32.0] — 2026-10-28
 
 ### Added

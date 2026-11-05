@@ -28,7 +28,10 @@ pub const PLAYED_PERCENT: f32 = 90.0;
 
 /// Rows that keep failing are dropped after this many flushes.
 const MAX_ATTEMPTS: i64 = 5;
-const RETRY_EVERY: Duration = Duration::from_secs(15 * 60);
+/// The retry loop ticks at least this often (also the cap on the Trakt interval).
+const TICK_MAX_MINUTES: u32 = 15;
+/// How long quitting waits for the final Trakt send.
+const QUIT_FLUSH_TIMEOUT: Duration = Duration::from_secs(10);
 /// AniList's token lasts a year and can't be renewed.
 const ANILIST_WARN_DAYS: i64 = 14;
 /// Trakt allows one write per second.
@@ -52,6 +55,10 @@ pub enum Source {
 
 pub struct Tracker {
     services: Vec<Arc<dyn TrackingService>>,
+    /// The same instance as in `services`, for its fresh/stored reads.
+    trakt: Arc<trakt::Trakt>,
+    /// When queued Trakt updates last went out.
+    last_trakt_send: Mutex<Option<Instant>>,
     session: Mutex<Option<SessionRef>>,
     cache: Mutex<HashMap<String, Arc<Vec<EpisodeResolution>>>>,
     /// The sync markers' reads: (service, entry id) → the entry. Dropped
@@ -79,6 +86,14 @@ thread_local! {
 /// Toasts; called once from `Ui::new` on the GTK thread.
 pub fn set_notifier(notify: impl Fn(&str) + 'static) {
     NOTIFY.with(|n| *n.borrow_mut() = Some(Box::new(notify)));
+    // Loads the services (dropping a pre-1.32 Trakt login) now that toasts can show.
+    get();
+    if trakt::take_legacy_logout() {
+        self::notify(
+            "Logged out of Trakt: it now needs your own Client ID, see Preferences → Tracking"
+                .to_string(),
+        );
+    }
 }
 
 /// Shows a toast on the main window from any thread.
@@ -132,17 +147,22 @@ struct RowState {
     stop: bool,
     /// A service failed for another reason: counts as an attempt.
     failed: bool,
+    /// Trakt's part of the row goes out in this flush.
+    trakt_due: bool,
 }
 
 impl Tracker {
     fn new() -> Tracker {
+        let trakt = Arc::new(trakt::Trakt::new());
         Tracker {
             services: vec![
                 Arc::new(mal::Mal::new()),
                 Arc::new(anilist::AniList::new()),
                 Arc::new(kitsu::Kitsu::new()),
-                Arc::new(trakt::Trakt::new()),
+                trakt.clone(),
             ],
+            trakt,
+            last_trakt_send: Mutex::new(None),
             session: Mutex::new(None),
             cache: Mutex::new(HashMap::new()),
             lists: Mutex::new(HashMap::new()),
@@ -175,7 +195,7 @@ impl Tracker {
     }
 
     /// From `Ui::new`: remembers the session, refreshes tokens, warns about
-    /// AniList's expiry, flushes the queue, starts the 15-min retry loop (once).
+    /// AniList's expiry, flushes the queue, starts the retry loop (once).
     pub fn set_session(&'static self, session: SessionRef) {
         if let Ok(mut slot) = self.session.lock() {
             *slot = Some(session);
@@ -195,7 +215,11 @@ impl Tracker {
         if !self.retry_started.swap(true, Ordering::SeqCst) {
             crate::runtime::spawn_detached(async move {
                 loop {
-                    tokio::time::sleep(RETRY_EVERY).await;
+                    let minutes = Settings::load()
+                        .unwrap_or_default()
+                        .tracking
+                        .trakt_sync_minutes;
+                    tokio::time::sleep(tick_every(minutes)).await;
                     self.flush().await;
                 }
             });
@@ -219,7 +243,9 @@ impl Tracker {
 
     /// Trakt live scrobble (start/pause) — fire-and-forget.
     pub fn scrobble(&'static self, item: &BaseItem, action: ScrobbleAction, progress: f32) {
-        if !self.active().contains(&ServiceId::Trakt) {
+        if !Settings::load().unwrap_or_default().tracking.trakt_live
+            || !self.active().contains(&ServiceId::Trakt)
+        {
             return;
         }
         let Some(item) = TraktItem::from_item(item) else {
@@ -285,9 +311,10 @@ impl Tracker {
             return;
         }
         if let Source::Playback { progress } = source
+            && settings.trakt_live
             && let Some(at) = services.iter().position(|&id| id == ServiceId::Trakt)
         {
-            // Trakt already got the live scrobble; a failed stop is queued
+            // Live mode: Trakt already got the live scrobble; a failed stop is queued
             // as a plain history entry instead.
             services.remove(at);
             if let Some(trakt_item) = TraktItem::from_item(item) {
@@ -450,8 +477,53 @@ impl Tracker {
         Ok(())
     }
 
-    /// Sends the current server's queued rows in order.
+    /// Whether the queued Trakt rows go out now.
+    fn trakt_due(&self) -> bool {
+        let minutes = Settings::load()
+            .unwrap_or_default()
+            .tracking
+            .trakt_sync_minutes;
+        let since = self
+            .last_trakt_send
+            .lock()
+            .ok()
+            .and_then(|last| last.map(|at| at.elapsed()));
+        sync_due(minutes, since)
+    }
+
+    /// Quit: one last flush that sends the Trakt rows too, bounded in time.
+    /// Nothing queued for Trakt: no call, no wait.
+    pub fn flush_on_quit(&'static self) {
+        let Some(session) = self.session() else {
+            return;
+        };
+        if !self.active().contains(&ServiceId::Trakt) {
+            return;
+        }
+        let queued = crate::runtime::block_on_timeout(
+            async move {
+                queued_pairs(&session)
+                    .await
+                    .iter()
+                    .any(|(_, id)| *id == ServiceId::Trakt)
+            },
+            Duration::from_secs(2),
+        );
+        if queued != Some(true) {
+            return;
+        }
+        let sent = crate::runtime::block_on_timeout(self.flush_with(true), QUIT_FLUSH_TIMEOUT);
+        if sent.is_none() {
+            tracing::debug!("Trakt: final send timed out");
+        }
+    }
+
+    /// Sends the current server's queued rows in order; Trakt's only when due.
     async fn flush(&'static self) {
+        self.flush_with(false).await;
+    }
+
+    async fn flush_with(&'static self, force_trakt: bool) {
         let _guard = self.flushing.lock().await;
         let Some(session) = self.session() else {
             return;
@@ -475,12 +547,18 @@ impl Tracker {
             }
         };
         let active = self.active();
+        let trakt_due = force_trakt || self.trakt_due();
         let mut blocked: HashSet<(String, ServiceId)> = HashSet::new();
         let mut shows: HashMap<String, ShowIds> = HashMap::new();
         let mut deferred: Vec<TraktRow> = Vec::new();
         let mut stopped = false;
         let sent = !rows.is_empty();
         for row in rows {
+            // Only Trakt left and not due: leave the row queued, no Emby call.
+            let left = row_services(&row, &active);
+            if !trakt_due && !left.is_empty() && left.iter().all(|&id| id == ServiceId::Trakt) {
+                continue;
+            }
             let item = match session.client.item(&session.user_id, &row.item_id).await {
                 Ok(item) => item,
                 Err(e) if is_network(&e) => {
@@ -497,6 +575,7 @@ impl Tracker {
                 remaining: row_services(&row, &active),
                 stop: false,
                 failed: false,
+                trakt_due,
             };
             let entry = self
                 .process_row(&session, &row, &item, &mut state, &mut blocked, &mut shows)
@@ -524,7 +603,11 @@ impl Tracker {
         } else {
             self.backfill_for(&session, &deferred, &mut shows).await
         };
+        let sending = !deferred.is_empty();
         self.send_trakt(deferred, extra, stopped).await;
+        if sending && let Ok(mut last) = self.last_trakt_send.lock() {
+            *last = Some(Instant::now());
+        }
         if sent {
             self.invalidate_lists();
         }
@@ -627,7 +710,7 @@ impl Tracker {
     ) -> Vec<HistoryEntry> {
         let read = async {
             let show = series_ids(session, series_id, shows).await?;
-            let Some(state) = self.service(ServiceId::Trakt).show_progress(&show).await? else {
+            let Some(state) = self.trakt.show_state(&show, true).await? else {
                 return Ok(Vec::new());
             };
             let episodes = session
@@ -706,7 +789,7 @@ impl Tracker {
                 }
             }
         }
-        if state.stop || !state.remaining.contains(&ServiceId::Trakt) {
+        if state.stop || !state.trakt_due || !state.remaining.contains(&ServiceId::Trakt) {
             return None;
         }
         let Some(trakt_item) = TraktItem::from_item(item) else {
@@ -1121,7 +1204,7 @@ impl Tracker {
         if ids.tvdb.is_none() && ids.tmdb.is_none() && ids.imdb.is_none() {
             return TraktOutcome::NoIds;
         }
-        match self.service(ServiceId::Trakt).show_progress(&ids).await {
+        match self.trakt.show_state(&ids, false).await {
             Ok(Some(state)) => TraktOutcome::Show(state),
             Ok(None) => TraktOutcome::Unknown,
             Err(e) => TraktOutcome::Failed(self.read_failure(ServiceId::Trakt, &e)),
@@ -1235,6 +1318,24 @@ async fn show_episode(
         ids: ShowIds::from_provider_ids(&item.provider_ids),
         count: episode_count(item),
     }))
+}
+
+/// How often the retry loop ticks: the Trakt interval, at most 15 minutes.
+fn tick_every(trakt_sync_minutes: u32) -> Duration {
+    let minutes = match trakt_sync_minutes {
+        0 => TICK_MAX_MINUTES,
+        m => m.min(TICK_MAX_MINUTES),
+    };
+    Duration::from_secs(u64::from(minutes) * 60)
+}
+
+/// Whether queued Trakt rows are due: never at 0 (quit only), else once the
+/// interval has passed since the last send (or none was sent yet).
+fn sync_due(minutes: u32, since_last: Option<Duration>) -> bool {
+    if minutes == 0 {
+        return false;
+    }
+    since_last.is_none_or(|d| d >= Duration::from_secs(u64::from(minutes) * 60))
 }
 
 /// Drops a settled queue row, or saves what is left of it (a row that
@@ -1595,6 +1696,23 @@ mod tests {
             1
         );
         assert!(entry_updates(&covered, ServiceId::AniList, Direction::Watched).is_empty());
+    }
+
+    #[test]
+    fn trakt_sync_is_due_after_the_interval() {
+        let mins = |m: u64| Some(Duration::from_secs(m * 60));
+        assert!(sync_due(15, None));
+        assert!(!sync_due(15, mins(14)));
+        assert!(sync_due(15, mins(15)));
+        assert!(!sync_due(0, None));
+        assert!(!sync_due(0, mins(10_000)));
+    }
+
+    #[test]
+    fn retry_ticks_at_most_every_fifteen_minutes() {
+        assert_eq!(tick_every(5), Duration::from_secs(300));
+        assert_eq!(tick_every(60), Duration::from_secs(900));
+        assert_eq!(tick_every(0), Duration::from_secs(900));
     }
 
     #[test]

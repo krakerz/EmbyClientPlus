@@ -1,18 +1,19 @@
-//! Trakt: device code flow (client id only, no secret), scrobbles by the
+//! Trakt: device code flow with the user's own client id (no secret), scrobbles by the
 //! item's own ids. Refresh tokens are single-use: the new pair is saved
 //! before anything else, and refreshes are serialized.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::resolve::ShowIds;
 use super::tokens::{self, Tokens};
+use super::trakt_cache::{self, Disk, Snapshot};
 use super::{
     Account, BoxFuture, Direction, HistoryEntry, LoggedOut, LoginInput, Outcome, ScrobbleAction,
     ServiceId, TrackingService, TraktItem, TraktKind, Update, http, is_network,
@@ -22,10 +23,36 @@ pub const API_URL: &str = "https://api.trakt.tv";
 pub const DEVICE_CODE_URL: &str = "https://api.trakt.tv/oauth/device/code";
 pub const DEVICE_TOKEN_URL: &str = "https://api.trakt.tv/oauth/device/token";
 pub const TOKEN_URL: &str = "https://api.trakt.tv/oauth/token";
-pub const CLIENT_ID: &str = "BH2BcEg_aYlDFV9pM82N3nU3Ew6jke40NytzK1EXiAo";
+/// The user's own API app (Preferences → Tracking); see `set_client_id`.
+static CLIENT_ID: RwLock<String> = RwLock::new(String::new());
+/// Saved tokens from the shipped client id were dropped at startup.
+static LEGACY_LOGOUT: AtomicBool = AtomicBool::new(false);
 
 const ID: ServiceId = ServiceId::Trakt;
 const REFRESH_MARGIN: i64 = 86_400;
+/// The watched shows are re-read when a flush finds the copy older than this.
+const LIST_FRESH: Duration = Duration::from_secs(120);
+const MAX_429_RETRIES: u32 = 2;
+const MAX_429_WAIT: Duration = Duration::from_secs(30);
+
+/// Sets the Client ID of the user's own Trakt app (Preferences → Tracking).
+pub fn set_client_id(id: &str) {
+    *CLIENT_ID.write().unwrap_or_else(|e| e.into_inner()) = id.trim().to_string();
+}
+
+/// The Client ID to send; an error while the user hasn't entered one.
+pub fn client_id() -> Result<String> {
+    let id = CLIENT_ID.read().unwrap_or_else(|e| e.into_inner()).clone();
+    if id.is_empty() {
+        bail!("Trakt needs your own Client ID (Preferences → Tracking)");
+    }
+    Ok(id)
+}
+
+/// Whether tokens were dropped at startup (once); the UI then tells the user.
+pub fn take_legacy_logout() -> bool {
+    LEGACY_LOGOUT.swap(false, Ordering::Relaxed)
+}
 
 #[derive(Debug, Clone)]
 pub struct DeviceCode {
@@ -57,14 +84,14 @@ struct TokenResponse {
 }
 
 /// Every Trakt call carries these headers (User-Agent comes from `http()`).
-fn headers(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-    request
+fn headers(request: reqwest::RequestBuilder) -> Result<reqwest::RequestBuilder> {
+    Ok(request
         .header("trakt-api-version", "2")
-        .header("trakt-api-key", CLIENT_ID)
-        .header("Content-Type", "application/json")
+        .header("trakt-api-key", client_id()?)
+        .header("Content-Type", "application/json"))
 }
 
-fn post(url: &str) -> reqwest::RequestBuilder {
+fn post(url: &str) -> Result<reqwest::RequestBuilder> {
     headers(http().post(url))
 }
 
@@ -83,8 +110,8 @@ async fn check(resp: reqwest::Response) -> Result<reqwest::Response> {
 
 /// Asks Trakt for a code to show the user.
 pub async fn request_code() -> Result<DeviceCode> {
-    let resp = post(DEVICE_CODE_URL)
-        .json(&json!({ "client_id": CLIENT_ID }))
+    let resp = post(DEVICE_CODE_URL)?
+        .json(&json!({ "client_id": client_id()? }))
         .send()
         .await?;
     let raw: RawDeviceCode = check(resp).await?.json().await?;
@@ -221,6 +248,7 @@ fn search_trakt_id(body: &Value) -> Option<u64> {
 }
 
 /// The completed episodes in a `/shows/<id>/progress/watched` answer.
+#[cfg(test)]
 pub(super) fn watched_from_progress(body: &Value) -> Watched {
     let number = |value: &Value| {
         value
@@ -257,7 +285,7 @@ pub(super) fn watched_from_progress(body: &Value) -> Watched {
 /// Trakt's (season, episode) for each episode id. Trakt numbers like TMDB,
 /// Emby like TVDB (Oshi no Ko: TVDB S1–S3 is one long Trakt season), so an
 /// Emby episode is translated through its own ids, never by its numbers.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EpisodeMap {
     tvdb: HashMap<u32, (u32, u32)>,
     tmdb: HashMap<u32, (u32, u32)>,
@@ -352,6 +380,160 @@ pub(super) fn movies_from_watched(body: &Value) -> WatchedMovies {
     movies
 }
 
+/// The shows Trakt lists as watched, by any of their ids.
+#[derive(Debug, Default)]
+pub struct WatchedShows {
+    shows: Vec<(u64, Arc<Watched>)>,
+    tvdb: HashMap<u32, usize>,
+    tmdb: HashMap<u32, usize>,
+    imdb: HashMap<String, usize>,
+}
+
+impl WatchedShows {
+    /// The show with these ids (tvdb first, then tmdb, then imdb): its Trakt
+    /// id and watched episodes.
+    fn find(&self, ids: &ShowIds) -> Option<(u64, Arc<Watched>)> {
+        let index = ids
+            .tvdb
+            .and_then(|id| self.tvdb.get(&id))
+            .or_else(|| ids.tmdb.and_then(|id| self.tmdb.get(&id)))
+            .or_else(|| ids.imdb.as_ref().and_then(|id| self.imdb.get(id)))?;
+        let (trakt_id, watched) = self.shows.get(*index)?;
+        Some((*trakt_id, watched.clone()))
+    }
+}
+
+/// The shows in a `/sync/watched/shows` answer. Plays at or before a show's
+/// `reset_at` don't count (both are ISO-8601 UTC, so string order is time order).
+pub(super) fn watched_shows_from_sync(body: &Value) -> WatchedShows {
+    let number = |value: &Value, key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+    };
+    let mut list = WatchedShows::default();
+    for entry in body.as_array().into_iter().flatten() {
+        let Some(trakt_id) = entry.pointer("/show/ids/trakt").and_then(Value::as_u64) else {
+            continue;
+        };
+        let reset_at = entry.get("reset_at").and_then(Value::as_str);
+        let mut watched = Watched::new();
+        for season in entry
+            .get("seasons")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(season_number) = number(season, "number") else {
+                continue;
+            };
+            for episode in season
+                .get("episodes")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let Some(episode_number) = number(episode, "number") else {
+                    continue;
+                };
+                let last = episode.get("last_watched_at").and_then(Value::as_str);
+                if let (Some(reset), Some(last)) = (reset_at, last)
+                    && last <= reset
+                {
+                    continue;
+                }
+                watched.insert((season_number, episode_number));
+            }
+        }
+        let index = list.shows.len();
+        list.shows.push((trakt_id, Arc::new(watched)));
+        if let Some(id) = number(&entry["show"]["ids"], "tvdb") {
+            list.tvdb.insert(id, index);
+        }
+        if let Some(id) = number(&entry["show"]["ids"], "tmdb") {
+            list.tmdb.insert(id, index);
+        }
+        if let Some(id) = entry.pointer("/show/ids/imdb").and_then(Value::as_str) {
+            list.imdb.insert(id.to_string(), index);
+        }
+    }
+    list
+}
+
+/// How long to wait after a 429: `Retry-After` in seconds (at least 1), else 2 s.
+fn retry_after(headers: &reqwest::header::HeaderMap) -> Duration {
+    let secs = headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map_or(2, |n| n.max(1));
+    Duration::from_secs(secs)
+}
+
+/// Trakt's `X-Ratelimit` header on a 429: which limit was hit and when it lifts.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RateLimitInfo {
+    /// The limit's name, e.g. `AUTHED_API_GET_LIMIT`.
+    pub name: Option<String>,
+    /// The window in seconds.
+    pub period: Option<u64>,
+    pub limit: Option<u64>,
+    pub remaining: Option<u64>,
+    /// When the limit resets (ISO-8601 UTC).
+    pub until: Option<String>,
+}
+
+impl RateLimitInfo {
+    /// Parses the header's JSON; `None` when it isn't a JSON object. Fields
+    /// that are missing or of another type are left out.
+    pub fn parse(text: &str) -> Option<Self> {
+        let value: Value = serde_json::from_str(text).ok()?;
+        let object = value.as_object()?;
+        let number = |key: &str| {
+            let v = object.get(key)?;
+            v.as_u64().or_else(|| v.as_str()?.trim().parse().ok())
+        };
+        let text = |key: &str| object.get(key).and_then(Value::as_str).map(str::to_string);
+        Some(RateLimitInfo {
+            name: text("name"),
+            period: number("period"),
+            limit: number("limit"),
+            remaining: number("remaining"),
+            until: text("until"),
+        })
+    }
+
+    fn from_headers(headers: &reqwest::header::HeaderMap) -> Option<Self> {
+        Self::parse(headers.get("x-ratelimit")?.to_str().ok()?)
+    }
+}
+
+/// Trakt keeps answering 429 for longer than we wait.
+#[derive(Debug)]
+pub struct RateLimited {
+    /// How long Trakt asked us to wait (`Retry-After`).
+    pub wait: Duration,
+    /// The limit that was hit, from `X-Ratelimit`.
+    pub info: Option<RateLimitInfo>,
+}
+
+impl std::fmt::Display for RateLimited {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Trakt rate limit")?;
+        if let Some(name) = self.info.as_ref().and_then(|i| i.name.as_deref()) {
+            write!(f, " {name}")?;
+        }
+        write!(f, ", retry in {} s", self.wait.as_secs())?;
+        if let Some(until) = self.info.as_ref().and_then(|i| i.until.as_deref()) {
+            write!(f, " (resets {until})")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for RateLimited {}
+
 /// What Trakt has on one show: the watched episodes and the numbering.
 #[derive(Clone)]
 pub struct ShowState {
@@ -403,14 +585,30 @@ fn rfc3339(secs: i64) -> String {
     )
 }
 
+/// The parts of the cache file not mirrored by another field of [`Trakt`].
+#[derive(Default)]
+struct DiskState {
+    loaded: bool,
+    /// `last_activities` fingerprint the stored shows match.
+    activity: Option<String>,
+    /// The raw `/sync/watched/shows` answer.
+    shows: Option<Value>,
+}
+
 pub struct Trakt {
     tokens: Mutex<Option<Tokens>>,
     refresh_lock: tokio::sync::Mutex<()>,
-    /// Show key → Trakt id (`None`: Trakt doesn't know the show); per session.
+    /// Show key → Trakt id (`None`: Trakt doesn't know the show, kept for
+    /// the session only); the found ones are in the cache file.
     show_ids: Mutex<HashMap<String, Option<u64>>>,
-    /// Trakt show id → its watched episodes; dropped after our own history writes.
-    progress: Mutex<HashMap<u64, Arc<Watched>>>,
-    /// Trakt show id → its episode numbering (stable, kept for the session).
+    /// The watched shows and when they were last checked against Trakt (`None`:
+    /// loaded from the cache file unchecked); dropped after our own writes.
+    shows: Mutex<Option<(Option<Instant>, Arc<WatchedShows>)>>,
+    /// Our own writes changed the list: the stored copy needs a check first.
+    dirty: AtomicBool,
+    /// The cache file's raw parts (the other parts live in `show_ids`, `numbering`).
+    disk: Mutex<DiskState>,
+    /// Trakt show id → its episode numbering (stable; in the cache file).
     numbering: Mutex<HashMap<u64, Arc<EpisodeMap>>>,
     /// The watched movies, read once per session; dropped after our own writes.
     movies: Mutex<Option<Arc<WatchedMovies>>>,
@@ -424,11 +622,29 @@ impl Default for Trakt {
 
 impl Trakt {
     pub fn new() -> Self {
+        set_client_id(
+            &crate::config::Settings::load()
+                .unwrap_or_default()
+                .tracking
+                .trakt_client_id,
+        );
+        let mut saved = tokens::load(ID);
+        if saved.is_some() && client_id().is_err() {
+            // Logins made with the shipped id before 1.32.0 belong to that app.
+            if let Err(e) = tokens::delete(ID) {
+                tracing::warn!("Trakt tokens not deleted: {e:#}");
+            }
+            saved = None;
+            trakt_cache::delete();
+            LEGACY_LOGOUT.store(true, Ordering::Relaxed);
+        }
         Trakt {
-            tokens: Mutex::new(tokens::load(ID)),
+            tokens: Mutex::new(saved),
             refresh_lock: tokio::sync::Mutex::new(()),
             show_ids: Mutex::new(HashMap::new()),
-            progress: Mutex::new(HashMap::new()),
+            shows: Mutex::new(None),
+            dirty: AtomicBool::new(false),
+            disk: Mutex::new(DiskState::default()),
             numbering: Mutex::new(HashMap::new()),
             movies: Mutex::new(None),
         }
@@ -454,6 +670,72 @@ impl Trakt {
             tracing::warn!("{} tokens not deleted: {e:#}", ID.label());
         }
         *self.lock() = None;
+        self.forget_account();
+    }
+
+    /// Drops everything we know about the account, in memory and on disk.
+    fn forget_account(&self) {
+        trakt_cache::delete();
+        *self.disk.lock().unwrap_or_else(|e| e.into_inner()) = DiskState {
+            loaded: true,
+            ..DiskState::default()
+        };
+        self.show_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.numbering
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.forget_watched();
+    }
+
+    /// Loads the cache file into memory, once.
+    fn ensure_loaded(&self) {
+        let mut disk = self.disk.lock().unwrap_or_else(|e| e.into_inner());
+        if disk.loaded {
+            return;
+        }
+        disk.loaded = true;
+        let Some(path) = trakt_cache::path() else {
+            return;
+        };
+        let stored: Disk<EpisodeMap> = trakt_cache::load(&path);
+        disk.activity = stored.activity;
+        disk.shows = stored.shows;
+        self.show_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(stored.show_ids.into_iter().filter(|(_, id)| id.is_some()));
+        self.numbering
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(
+                stored
+                    .numbering
+                    .into_iter()
+                    .map(|(id, map)| (id, Arc::new(map))),
+            );
+    }
+
+    /// Writes the cache file (a failure only costs calls after a restart).
+    fn save_cache(&self) {
+        let Some(path) = trakt_cache::path() else {
+            return;
+        };
+        let disk = self.disk.lock().unwrap_or_else(|e| e.into_inner());
+        let show_ids = self.show_ids.lock().unwrap_or_else(|e| e.into_inner());
+        let numbering = self.numbering.lock().unwrap_or_else(|e| e.into_inner());
+        let snapshot = Snapshot {
+            activity: disk.activity.as_deref(),
+            shows: disk.shows.as_ref(),
+            show_ids: &show_ids,
+            numbering: numbering.iter().map(|(id, map)| (*id, &**map)).collect(),
+        };
+        if let Err(e) = trakt_cache::save(&path, &snapshot) {
+            tracing::warn!("Trakt cache not saved: {e}");
+        }
     }
 
     /// Single-use refresh tokens: serialized, and the new pair is saved first.
@@ -471,10 +753,10 @@ impl Trakt {
             self.drop_tokens();
             return Err(LoggedOut(ID).into());
         };
-        let resp = post(TOKEN_URL)
+        let resp = post(TOKEN_URL)?
             .json(&json!({
                 "refresh_token": refresh,
-                "client_id": CLIENT_ID,
+                "client_id": client_id()?,
                 "redirect_uri": "urn:ietf:wg:oauth:2.0:oob",
                 "grant_type": "refresh_token",
             }))
@@ -497,16 +779,40 @@ impl Trakt {
         Ok(())
     }
 
-    /// Sends with the bearer token (refreshing first, and once on a 401).
-    /// The status is the caller's to judge, except 401.
+    /// Sends with the bearer token (refreshing first, and once on a 401) and
+    /// waits out Trakt's rate limit. The status is the caller's to judge,
+    /// except 401 and a 429 that lasts.
     async fn send(&self, build: impl Fn() -> reqwest::RequestBuilder) -> Result<reqwest::Response> {
+        let mut retries = 0;
+        loop {
+            let resp = self.send_once(&build).await?;
+            if resp.status().as_u16() != 429 {
+                return Ok(resp);
+            }
+            let wait = retry_after(resp.headers());
+            let info = RateLimitInfo::from_headers(resp.headers());
+            tracing::warn!("Trakt 429, rate limit: {info:?}");
+            if retries == MAX_429_RETRIES || wait > MAX_429_WAIT {
+                return Err(RateLimited { wait, info }.into());
+            }
+            retries += 1;
+            tracing::info!("Trakt rate limit, retrying in {} s", wait.as_secs());
+            tokio::time::sleep(wait).await;
+        }
+    }
+
+    /// One request with the bearer token (refreshing first, and once on a 401).
+    async fn send_once(
+        &self,
+        build: &impl Fn() -> reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response> {
         self.renew(None).await?;
         let access = self.access()?;
-        let mut resp = headers(build()).bearer_auth(&access).send().await?;
+        let mut resp = headers(build())?.bearer_auth(&access).send().await?;
         if resp.status().as_u16() == 401 {
             self.renew(Some(&access)).await?;
             let access = self.access()?;
-            resp = headers(build()).bearer_auth(&access).send().await?;
+            resp = headers(build())?.bearer_auth(&access).send().await?;
             if resp.status().as_u16() == 401 {
                 self.drop_tokens();
                 return Err(LoggedOut(ID).into());
@@ -527,8 +833,8 @@ impl Trakt {
             if Instant::now() >= deadline {
                 return Err(expired());
             }
-            let resp = match post(DEVICE_TOKEN_URL)
-                .json(&json!({ "code": code.device_code, "client_id": CLIENT_ID }))
+            let resp = match post(DEVICE_TOKEN_URL)?
+                .json(&json!({ "code": code.device_code, "client_id": client_id()? }))
                 .send()
                 .await
             {
@@ -550,7 +856,7 @@ impl Trakt {
             }
         };
         let settings: Value = check(
-            headers(http().get(format!("{API_URL}/users/settings")))
+            headers(http().get(format!("{API_URL}/users/settings")))?
                 .bearer_auth(&body.access_token)
                 .send()
                 .await?,
@@ -605,10 +911,8 @@ impl Trakt {
 
     /// Drops the session's copies of the watched lists (shows and movies).
     fn forget_watched(&self) {
-        self.progress
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
+        self.dirty.store(true, Ordering::Relaxed);
+        *self.shows.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.movies.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
@@ -631,6 +935,76 @@ impl Trakt {
         Ok(movies)
     }
 
+    /// The user's watched shows with their watched episodes. Served from
+    /// memory or the cache file; `fresh` checks them against Trakt when the
+    /// last check is older than two minutes, and so does the first read after
+    /// our own writes. A check is one small `last_activities` call, and the
+    /// list is downloaded only if the watched plays changed (or none is stored).
+    async fn watched_shows(&self, fresh: bool) -> Result<Arc<WatchedShows>> {
+        self.ensure_loaded();
+        let dirty = self.dirty.load(Ordering::Relaxed);
+        let cached = self.shows.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some((checked, list)) = &cached
+            && !dirty
+            && !(fresh && checked.is_none_or(|at| at.elapsed() > LIST_FRESH))
+        {
+            return Ok(list.clone());
+        }
+        let stored = {
+            let disk = self.disk.lock().unwrap_or_else(|e| e.into_inner());
+            disk.shows.is_some().then(|| disk.activity.clone())
+        };
+        if stored.is_some() && !fresh && !dirty {
+            // Nothing asks for a check: use the stored list as it is.
+            if let Some(list) = self.adopt_stored(None) {
+                return Ok(list);
+            }
+        }
+        let activity = match self.get_json("sync/last_activities").await {
+            Ok(body) => body.as_ref().and_then(trakt_cache::fingerprint),
+            Err(e) if is_network(&e) || e.chain().any(|c| c.is::<LoggedOut>()) => return Err(e),
+            Err(e) => {
+                tracing::warn!("Trakt last_activities unreadable: {e:#}");
+                None
+            }
+        };
+        if let (Some(activity), Some(Some(stored))) = (&activity, &stored)
+            && activity == stored
+            && let Some(list) = self.adopt_stored(Some(Instant::now()))
+        {
+            self.dirty.store(false, Ordering::Relaxed);
+            tracing::debug!("Trakt watched shows unchanged: {} stored", list.shows.len());
+            return Ok(list);
+        }
+        let body = self
+            .get_json("sync/watched/shows")
+            .await?
+            .unwrap_or(Value::Null);
+        let list = Arc::new(watched_shows_from_sync(&body));
+        tracing::debug!("Trakt watched shows: {}", list.shows.len());
+        {
+            let mut disk = self.disk.lock().unwrap_or_else(|e| e.into_inner());
+            disk.activity = activity;
+            disk.shows = Some(body);
+        }
+        self.dirty.store(false, Ordering::Relaxed);
+        *self.shows.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((Some(Instant::now()), list.clone()));
+        self.save_cache();
+        Ok(list)
+    }
+
+    /// Parses the stored watched shows into the memory copy, marked as checked
+    /// at `checked`.
+    fn adopt_stored(&self, checked: Option<Instant>) -> Option<Arc<WatchedShows>> {
+        let list = {
+            let disk = self.disk.lock().unwrap_or_else(|e| e.into_inner());
+            Arc::new(watched_shows_from_sync(disk.shows.as_ref()?))
+        };
+        *self.shows.lock().unwrap_or_else(|e| e.into_inner()) = Some((checked, list.clone()));
+        Some(list)
+    }
+
     /// GET with the bearer token; `None` on a 404.
     async fn get_json(&self, path: &str) -> Result<Option<Value>> {
         let url = format!("{API_URL}/{path}");
@@ -641,11 +1015,12 @@ impl Trakt {
         Ok(Some(check(resp).await?.json().await?))
     }
 
-    /// The show's Trakt id by its tvdb/tmdb/imdb id (cached for the session).
+    /// The show's Trakt id by its tvdb/tmdb/imdb id (cached on disk; a miss for the session).
     async fn show_id(&self, ids: &ShowIds) -> Result<Option<u64>> {
         let Some(key) = show_key(ids) else {
             return Ok(None);
         };
+        self.ensure_loaded();
         let cached = self
             .show_ids
             .lock()
@@ -668,47 +1043,37 @@ impl Trakt {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(key, found);
+        self.save_cache();
         Ok(found)
     }
 
     /// The show's watched episodes and numbering on Trakt; `None` when Trakt
-    /// doesn't know the show. `fresh` reads the watched list again instead
-    /// of using the session's copy.
+    /// doesn't know the show. `fresh` re-reads the watched list when the
+    /// session's copy is older than two minutes.
     pub async fn show_state(&self, ids: &ShowIds, fresh: bool) -> Result<Option<ShowState>> {
-        let Some(trakt_id) = self.show_id(ids).await? else {
-            return Ok(None);
+        let list = self.watched_shows(fresh).await?;
+        let (trakt_id, watched) = match list.find(ids) {
+            Some(found) => found,
+            None => match self.show_id(ids).await? {
+                Some(id) => (id, Arc::new(Watched::new())),
+                None => return Ok(None),
+            },
         };
-        let cached = self
-            .progress
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&trakt_id)
-            .cloned();
-        let watched = match cached {
-            Some(watched) if !fresh => watched,
-            _ => {
-                let Some(body) = self
-                    .get_json(&format!("shows/{trakt_id}/progress/watched?specials=true"))
-                    .await?
-                else {
-                    return Ok(None);
-                };
-                let watched = Arc::new(watched_from_progress(&body));
-                self.progress
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(trakt_id, watched.clone());
-                watched
-            }
-        };
+        let episodes = self.numbering(trakt_id).await?;
+        Ok(Some(ShowState { watched, episodes }))
+    }
+
+    /// The show's episode numbering on Trakt (stable, cached on disk).
+    async fn numbering(&self, trakt_id: u64) -> Result<Arc<EpisodeMap>> {
+        self.ensure_loaded();
         let known = self
             .numbering
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(&trakt_id)
             .cloned();
-        let episodes = match known {
-            Some(episodes) => episodes,
+        match known {
+            Some(episodes) => Ok(episodes),
             None => {
                 let body = self
                     .get_json(&format!("shows/{trakt_id}/seasons?extended=episodes"))
@@ -719,19 +1084,27 @@ impl Trakt {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .insert(trakt_id, episodes.clone());
-                episodes
+                self.save_cache();
+                Ok(episodes)
             }
-        };
-        Ok(Some(ShowState { watched, episodes }))
+        }
     }
 
-    /// Reads the progress of every show in the batch and drops the entries
-    /// Trakt already has. Only a lost connection or login fails the call; a
-    /// show whose read fails otherwise is added unchecked.
+    /// Drops the entries Trakt already lists, from one read of the watched
+    /// shows. Only a lost connection or login fails the call; a show whose
+    /// numbering is unreadable is added unchecked.
     async fn leave_out_known<'a>(
         &self,
         entries: Vec<&'a HistoryEntry>,
     ) -> Result<Vec<&'a HistoryEntry>> {
+        let list = match self.watched_shows(true).await {
+            Ok(list) => list,
+            Err(e) if is_network(&e) || e.chain().any(|c| c.is::<LoggedOut>()) => return Err(e),
+            Err(e) => {
+                tracing::warn!("Trakt watched shows unreadable, adding all: {e:#}");
+                return Ok(entries);
+            }
+        };
         let mut progress: HashMap<String, ShowState> = HashMap::new();
         let mut asked: HashSet<String> = HashSet::new();
         for entry in &entries {
@@ -744,15 +1117,17 @@ impl Trakt {
             if !asked.insert(key.clone()) {
                 continue;
             }
-            match self.show_state(&episode.show, true).await {
-                Ok(Some(state)) => {
-                    progress.insert(key, state);
+            let Some((trakt_id, watched)) = list.find(&episode.show) else {
+                continue;
+            };
+            match self.numbering(trakt_id).await {
+                Ok(episodes) => {
+                    progress.insert(key, ShowState { watched, episodes });
                 }
-                Ok(None) => {}
                 Err(e) if is_network(&e) || e.chain().any(|c| c.is::<LoggedOut>()) => {
                     return Err(e);
                 }
-                Err(e) => tracing::warn!("Trakt progress of {key} unreadable, adding all: {e:#}"),
+                Err(e) => tracing::warn!("Trakt numbering of {key} unreadable, adding all: {e:#}"),
             }
         }
         Ok(leave_out_watched(&entries, &progress))
@@ -829,6 +1204,7 @@ impl TrackingService for Trakt {
         Box::pin(async move {
             let result = tokens::delete(ID);
             *self.lock() = None;
+            self.forget_account();
             result
         })
     }
@@ -853,10 +1229,6 @@ impl TrackingService for Trakt {
         })
     }
 
-    fn show_progress<'a>(&'a self, ids: &'a ShowIds) -> BoxFuture<'a, Result<Option<ShowState>>> {
-        Box::pin(async move { self.show_state(ids, false).await })
-    }
-
     fn watched_movies(&self) -> BoxFuture<'_, Result<Arc<WatchedMovies>>> {
         Box::pin(Trakt::watched_movies(self))
     }
@@ -876,6 +1248,44 @@ mod tests {
                 ..Default::default()
             },
         }
+    }
+
+    #[test]
+    fn rate_limit_header_parsing() {
+        let info = RateLimitInfo::parse(
+            r#"{"name":"AUTHED_API_GET_LIMIT","period":300,"limit":1000,"remaining":0,"until":"2020-10-10T00:24:00Z"}"#,
+        )
+        .unwrap();
+        assert_eq!(info.name.as_deref(), Some("AUTHED_API_GET_LIMIT"));
+        assert_eq!(
+            (info.period, info.limit, info.remaining),
+            (Some(300), Some(1000), Some(0))
+        );
+        assert_eq!(info.until.as_deref(), Some("2020-10-10T00:24:00Z"));
+        let odd = RateLimitInfo::parse(r#"{"name":5,"limit":"7"}"#).unwrap();
+        assert_eq!((odd.name, odd.limit, odd.until), (None, Some(7), None));
+        assert_eq!(RateLimitInfo::parse("nope"), None);
+        assert_eq!(RateLimitInfo::parse("[1]"), None);
+        let error = RateLimited {
+            wait: Duration::from_secs(90),
+            info: Some(info),
+        };
+        assert_eq!(
+            error.to_string(),
+            "Trakt rate limit AUTHED_API_GET_LIMIT, retry in 90 s (resets 2020-10-10T00:24:00Z)"
+        );
+        let plain = RateLimited {
+            wait: Duration::from_secs(2),
+            info: None,
+        };
+        assert_eq!(plain.to_string(), "Trakt rate limit, retry in 2 s");
+    }
+
+    #[test]
+    fn episode_map_survives_json() {
+        let map = episode_map_from_seasons(&serde_json::from_str(SEASONS).unwrap());
+        let back: EpisodeMap = serde_json::from_str(&serde_json::to_string(&map).unwrap()).unwrap();
+        assert_eq!(back, map);
     }
 
     #[test]
@@ -1170,5 +1580,77 @@ mod tests {
         );
         assert_eq!(show_key(&ids).as_deref(), Some("tvdb:5"));
         assert_eq!(show_key(&ShowIds::default()), None);
+    }
+
+    #[test]
+    fn watched_shows_parse_and_match() {
+        let body = json!([
+            {"show": {"ids": {"trakt": 10, "tvdb": 100, "tmdb": 200, "imdb": "tt1"}},
+             "seasons": [
+                {"number": 0, "episodes": [{"number": 1}]},
+                {"number": 1, "episodes": [{"number": 1}, {"number": 2}]}]},
+            {"show": {"ids": {"trakt": 11, "tvdb": null, "tmdb": null, "imdb": "tt2"}},
+             "seasons": [{"number": 2, "episodes": [{"number": 5}]}]},
+            {"show": {"ids": {"tvdb": 1}}, "seasons": []},
+        ]);
+        let list = watched_shows_from_sync(&body);
+        let found = |tvdb, tmdb, imdb: Option<&str>| {
+            list.find(&ShowIds {
+                tvdb,
+                tmdb,
+                imdb: imdb.map(str::to_string),
+                ..ShowIds::default()
+            })
+            .map(|(id, watched)| (id, (*watched).clone()))
+        };
+        let first = Watched::from([(0, 1), (1, 1), (1, 2)]);
+        assert_eq!(found(Some(100), None, None), Some((10, first.clone())));
+        assert_eq!(found(Some(999), Some(200), None), Some((10, first)));
+        assert_eq!(
+            found(None, None, Some("tt2")),
+            Some((11, Watched::from([(2, 5)])))
+        );
+        assert_eq!(found(Some(1), None, None), None);
+        assert_eq!(found(Some(999), None, Some("tt9")), None);
+    }
+
+    #[test]
+    fn reset_progress_drops_older_plays() {
+        let shows = |reset: Value| {
+            json!([{"reset_at": reset, "show": {"ids": {"trakt": 1, "tvdb": 7}},
+                "seasons": [{"number": 1, "episodes": [
+                    {"number": 1, "last_watched_at": "2024-04-01T00:00:00.000Z"},
+                    {"number": 2, "last_watched_at": "2024-06-01T00:00:00.000Z"}]}]}])
+        };
+        let watched_of = |body: Value| {
+            let list = watched_shows_from_sync(&body);
+            let ids = ShowIds {
+                tvdb: Some(7),
+                ..ShowIds::default()
+            };
+            (*list.find(&ids).unwrap().1).clone()
+        };
+        assert_eq!(
+            watched_of(shows(json!("2024-05-01T00:00:00.000Z"))),
+            Watched::from([(1, 2)])
+        );
+        assert_eq!(
+            watched_of(shows(Value::Null)),
+            Watched::from([(1, 1), (1, 2)])
+        );
+    }
+
+    #[test]
+    fn retry_after_parsing() {
+        use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+        let with = |value: &str| {
+            let mut map = HeaderMap::new();
+            map.insert(RETRY_AFTER, HeaderValue::from_str(value).unwrap());
+            retry_after(&map)
+        };
+        assert_eq!(with("5"), Duration::from_secs(5));
+        assert_eq!(with("0"), Duration::from_secs(1));
+        assert_eq!(with("abc"), Duration::from_secs(2));
+        assert_eq!(retry_after(&HeaderMap::new()), Duration::from_secs(2));
     }
 }

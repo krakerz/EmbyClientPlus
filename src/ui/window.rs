@@ -580,6 +580,8 @@ pub fn build(app: &adw::Application, player: Player) -> adw::ApplicationWindow {
                 tracing::warn!("{e:#}");
             }
             crate::svp::stop_started();
+            // Queued Trakt updates wait for this (bounded, none queued: no call).
+            crate::tracking::tracker::get().flush_on_quit();
             glib::Propagation::Proceed
         }
     });
