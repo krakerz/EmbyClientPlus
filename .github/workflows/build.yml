@@ -195,7 +195,9 @@ jobs:
 
   macos:
     if: github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'macos'
-    runs-on: macos-14
+    # macos-14 is retired: jobs on it are cancelled before they start
+    # ("The configuration 'macos-14-arm64-us-default' is not supported").
+    runs-on: macos-15
     steps:
       - name: Install dependencies
         # Homebrew's mpv is built with vapoursynth, so no libmpv of our own;
