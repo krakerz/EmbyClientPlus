@@ -307,7 +307,7 @@ thread_local! {
 pub fn shut_down(window: &gtk::Window) {
     // Notifications come back even if the player never got to close.
     #[cfg(target_os = "linux")]
-    crate::dnd::set(false);
+    crate::dnd::release_blocking();
     // Every open dialog (About over Preferences, say): one left open keeps
     // the window from closing.
     if let Some(app_window) = window.downcast_ref::<adw::ApplicationWindow>() {
@@ -569,7 +569,7 @@ pub fn build(app: &adw::Application, player: Player) -> adw::ApplicationWindow {
             }
             // The player page's hidden handler may never run on close.
             #[cfg(target_os = "linux")]
-            crate::dnd::set(false);
+            crate::dnd::release_blocking();
             // SVP Manager learns right away that we're gone (closing the
             // socket and dropping its connection), rather than whenever the
             // process finally exits.
