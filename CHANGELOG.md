@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.33.1] — 2026-11-06
+
+### Fixed
+- The player no longer freezes on its first frame (audio still playing) when a notification tool doesn't answer, e.g. swaync installed but not running, as in a Sunshine stream session. Do-not-disturb is now switched in the background, and its commands give up after 3 seconds.
+
 ## [1.33.0] — 2026-11-05
 
 ### Added

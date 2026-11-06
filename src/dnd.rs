@@ -4,11 +4,27 @@
 //! (Preferences), KDE Plasma's notification inhibition, the caelestia
 //! shell, swaync, dunst, mako, or GNOME's banner setting. Whatever was
 //! already in do-not-disturb mode is left that way afterwards.
+//!
+//! All switching happens on a single background worker so a backend probe
+//! or a user command can never block the GTK main thread. `set()` just
+//! sends a request; `release_blocking()` sends "off" and waits for it.
 
+use std::io::read_to_string;
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::config::Settings;
+
+/// How long a backend probe or user command may run before we give up.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How long `release_blocking` waits for the worker to acknowledge "off".
+const RELEASE_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// How often to poll a running child.
+const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// How do-not-disturb was turned on, so it can be turned off the same way.
 enum Held {
@@ -25,9 +41,58 @@ enum Held {
 
 static HELD: Mutex<Option<Held>> = Mutex::new(None);
 
+/// A request for the background worker. `Release` carries a channel the
+/// caller waits on to learn when "off" has been applied.
+enum Msg {
+    Set(bool),
+    Release(mpsc::Sender<()>),
+}
+
+/// The worker thread, started lazily on the first `set` or
+/// `release_blocking` call. It applies requests one at a time, in order,
+/// so an "on" followed quickly by an "off" can't run out of order.
+static WORKER: OnceLock<mpsc::Sender<Msg>> = OnceLock::new();
+
+fn worker() -> &'static mpsc::Sender<Msg> {
+    WORKER.get_or_init(|| {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || loop_worker(rx));
+        tx
+    })
+}
+
+fn loop_worker(rx: mpsc::Receiver<Msg>) {
+    while let Ok(msg) = rx.recv() {
+        match msg {
+            Msg::Set(on) => apply(on),
+            Msg::Release(ack) => {
+                apply(false);
+                let _ = ack.send(());
+            }
+        }
+    }
+}
+
 /// Turns do-not-disturb on (`true`, if Preferences wants it and it isn't
-/// already) or back off (`false`).
+/// already) or back off (`false`). Non-blocking: the work is handed to the
+/// background worker and returns at once.
 pub fn set(on: bool) {
+    let _ = worker().send(Msg::Set(on));
+}
+
+/// Turns do-not-disturb off and waits for the worker to acknowledge it,
+/// giving up after `RELEASE_TIMEOUT`. Used on app/window close so the
+/// desktop isn't left in do-not-disturb mode.
+pub fn release_blocking() {
+    let (ack_tx, ack_rx) = mpsc::channel();
+    let _ = worker().send(Msg::Release(ack_tx));
+    let _ = ack_rx.recv_timeout(RELEASE_TIMEOUT);
+}
+
+/// Applies one request: enable, disable, or nothing if the state is
+/// already what was asked for. Keeps the previous backend cache and held
+/// state, just on the worker thread instead of the caller's.
+fn apply(on: bool) {
     let Ok(mut held) = HELD.lock() else { return };
     if on && held.is_none() {
         let settings = Settings::load().unwrap_or_default().playback;
@@ -216,32 +281,107 @@ fn shell(command: &str) -> bool {
     run(&["sh", "-c", command])
 }
 
+/// Runs `argv`, giving up after `COMMAND_TIMEOUT` if it doesn't answer.
+/// Returns true if the command exited successfully.
 fn run(argv: &[&str]) -> bool {
-    Command::new(argv[0])
+    let mut child = match Command::new(argv[0])
         .args(&argv[1..])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {
+                if start.elapsed() >= COMMAND_TIMEOUT {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    tracing::info!(
+                        "do not disturb: {} didn't answer in {} s",
+                        argv[0],
+                        COMMAND_TIMEOUT.as_secs()
+                    );
+                    return false;
+                }
+                std::thread::sleep(POLL_INTERVAL);
+            }
+            Err(_) => return false,
+        }
+    }
 }
 
-/// The command's output, if it exists and succeeds.
+/// The command's output, if it exists and succeeds. Stdout is read on a
+/// helper thread so a full pipe can't block the child; the whole probe
+/// gives up after `COMMAND_TIMEOUT`.
 fn output(argv: &[&str]) -> Option<String> {
-    let output = Command::new(argv[0])
+    let mut child = match Command::new(argv[0])
         .args(&argv[1..])
         .stdin(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return None,
+    };
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(read_to_string(&mut stdout).ok());
+    });
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let text = rx.recv_timeout(COMMAND_TIMEOUT).ok().flatten()?;
+                return status.success().then_some(text);
+            }
+            Ok(None) => {
+                if start.elapsed() >= COMMAND_TIMEOUT {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    tracing::info!(
+                        "do not disturb: {} didn't answer in {} s",
+                        argv[0],
+                        COMMAND_TIMEOUT.as_secs()
+                    );
+                    return None;
+                }
+                std::thread::sleep(POLL_INTERVAL);
+            }
+            Err(_) => return None,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn output_times_out_giving_none() {
+        let start = Instant::now();
+        let result = output(&["sh", "-c", "sleep 10"]);
+        assert!(result.is_none());
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn output_returns_stdout() {
+        assert_eq!(output(&["sh", "-c", "echo hi"]), Some("hi\n".to_string()));
+    }
+
+    #[test]
+    fn run_is_false_on_nonzero_exit() {
+        assert!(!run(&["sh", "-c", "exit 1"]));
+    }
+
     /// Switches this desktop's do-not-disturb on and back off (not run by
     /// default: it really does): `cargo test dnd -- --ignored --nocapture`
     #[test]

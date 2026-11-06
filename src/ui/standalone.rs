@@ -149,7 +149,7 @@ pub fn present(app: &adw::Application, player: Player, target: Option<&str>) {
             }
             // Playing the last video leaves do-not-disturb on otherwise.
             #[cfg(target_os = "linux")]
-            crate::dnd::set(false);
+            crate::dnd::release_blocking();
             if let Err(e) = state.player.quit() {
                 tracing::warn!("{e:#}");
             }
