@@ -74,19 +74,6 @@ impl Pad {
             .find(|pad| pad.name().eq_ignore_ascii_case(name.trim()))
     }
 
-    /// Label for the Preferences rows.
-    pub fn label(self) -> &'static str {
-        match self {
-            Pad::Up => "D-pad ↑",
-            Pad::Down => "D-pad ↓",
-            Pad::Left => "D-pad ←",
-            Pad::Right => "D-pad →",
-            Pad::Select => "Select / View",
-            Pad::Start => "Start / Menu",
-            other => other.name(),
-        }
-    }
-
     pub fn is_direction(self) -> bool {
         matches!(self, Pad::Up | Pad::Down | Pad::Left | Pad::Right)
     }

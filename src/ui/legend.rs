@@ -9,7 +9,7 @@ use std::cell::Cell;
 
 use adw::prelude::*;
 
-use super::Ui;
+use super::{Ui, icons};
 use crate::controller::{self, Action, Pad};
 
 const MARGIN: i32 = 12;
@@ -175,39 +175,62 @@ impl Legend {
             if pads.is_empty() {
                 continue;
             }
-            self.hints.append(&hint(pads.into_iter().map(glyph), text));
+            self.hints
+                .append(&hint(pads.into_iter().map(|pad| badge(glyph(pad))), text));
         }
         // The right stick isn't a button (nor remappable): its own hint.
         if panel.is_none() {
-            self.hints.append(&hint(["RS"], "Scroll"));
+            self.hints.append(&hint([badge("RS")], "Scroll"));
         }
     }
 }
 
-/// Button badges, then what they do.
-fn hint<'a>(glyphs: impl IntoIterator<Item = &'a str>, text: &str) -> gtk::Box {
+/// Button badges, then what they do. PlayStation face buttons render as
+/// symbolic icons so they sit at the same height as text badges like "L1".
+fn hint(glyphs: impl IntoIterator<Item = gtk::Widget>, text: &str) -> gtk::Box {
     let hint = gtk::Box::builder().spacing(6).build();
-    for glyph in glyphs {
-        hint.append(
-            &gtk::Label::builder()
-                .label(glyph)
-                .css_classes(["legend-key"])
-                .build(),
-        );
+    for badge in glyphs {
+        hint.append(&badge);
     }
     hint.append(&gtk::Label::new(Some(text)));
     hint
 }
 
+/// A single button badge: an icon for the PlayStation face buttons,
+/// otherwise a text label. Both carry `legend-key` so they size the same.
+fn badge(glyph: &str) -> gtk::Widget {
+    match glyph {
+        "✕" => icon_badge(icons::PAD_CROSS),
+        "○" => icon_badge(icons::PAD_CIRCLE),
+        "□" => icon_badge(icons::PAD_SQUARE),
+        "△" => icon_badge(icons::PAD_TRIANGLE),
+        _ => text_badge(glyph),
+    }
+}
+
+fn icon_badge(name: &str) -> gtk::Widget {
+    // Fills the row's height like the text badges; the icon centres in it.
+    let box_ = gtk::Box::builder()
+        .css_classes(["legend-key", "icon"])
+        .build();
+    let image = gtk::Image::from_icon_name(name);
+    image.set_pixel_size(12);
+    image.set_valign(gtk::Align::Center);
+    image.set_hexpand(true);
+    image.set_halign(gtk::Align::Center);
+    box_.append(&image);
+    box_.upcast::<gtk::Widget>()
+}
+
+fn text_badge(glyph: &str) -> gtk::Widget {
+    gtk::Label::builder()
+        .label(glyph)
+        .css_classes(["legend-key"])
+        .build()
+        .upcast::<gtk::Widget>()
+}
+
 /// The short name printed on a button badge.
 fn glyph(pad: Pad) -> &'static str {
-    match pad {
-        Pad::Select => "View",
-        Pad::Start => "Menu",
-        Pad::Up => "↑",
-        Pad::Down => "↓",
-        Pad::Left => "←",
-        Pad::Right => "→",
-        other => other.name(),
-    }
+    controller::label(pad, controller::style())
 }

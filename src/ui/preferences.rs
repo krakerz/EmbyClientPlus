@@ -1037,9 +1037,10 @@ fn refresh_bindings(rows: &[(Action, adw::ActionRow)]) {
         let text = if buttons.is_empty() {
             "Not set".to_string()
         } else {
+            let style = controller::style();
             buttons
                 .iter()
-                .map(|pad| pad.label())
+                .map(|pad| controller::long_label(*pad, style))
                 .collect::<Vec<_>>()
                 .join(", ")
         };
@@ -1060,7 +1061,10 @@ fn capture_binding(action: Action, row: &adw::ActionRow) {
             bindings.set(action, pad);
             controller::set_bindings(bindings);
             if let Some(row) = row.upgrade() {
-                row.set_subtitle(&glib::markup_escape_text(pad.label()));
+                row.set_subtitle(&glib::markup_escape_text(controller::long_label(
+                    pad,
+                    controller::style(),
+                )));
             }
         }
     });

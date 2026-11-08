@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [1.34.0] — 2026-11-08
+
+### Added
+- PlayStation controllers (DualShock 4, DualSense): the on-screen hints and Preferences → Controller show ✕ ○ □ △, L1/R1/L2/R2, Share and Options instead of the Xbox names. With an Xbox and a PlayStation pad connected together, the labels follow the pad you last pressed a button on.
+
+### Fixed
+- Opening an episode from a library's Upcoming tab no longer shows a broken page; an upcoming episode the server has no entry for opens its series instead.
+
 ## [1.33.1] — 2026-11-06
 
 ### Fixed

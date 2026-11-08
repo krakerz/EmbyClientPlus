@@ -101,6 +101,13 @@ fn step(ui: &Ui, view: &Rc<DetailsView>, target: &BaseItem, spot: Option<Spot>) 
 }
 
 fn load(ui: &Ui, view: &Rc<DetailsView>, item_id: &str) {
+    // An upcoming episode can arrive without an id: there's nothing to
+    // fetch, so keep whatever the page already shows.
+    if item_id.is_empty() {
+        let name = view.item.borrow().name.clone();
+        tracing::warn!("details: no item id for {name}");
+        return;
+    }
     let client = ui.client();
     let user_id = ui.user_id();
     let item_id = item_id.to_string();
@@ -131,6 +138,13 @@ fn load(ui: &Ui, view: &Rc<DetailsView>, item_id: &str) {
         }
         match result {
             Ok((item, episodes)) => {
+                // The server can't return an id for an unaired episode: keep
+                // the list item instead of replacing it with an id-less one.
+                if item.id.is_empty() {
+                    let name = view.item.borrow().name.clone();
+                    tracing::warn!("details: server returned no item id for {name}");
+                    return;
+                }
                 view.item.replace(item.clone());
                 if let Some(page) = view
                     .hero

@@ -71,6 +71,11 @@ pub const COLLAPSE: &str = "ecp-collapse-symbolic";
 pub const SLEEP: &str = "ecp-sleep-symbolic";
 pub const FILTER: &str = "ecp-filter-symbolic";
 pub const UPCOMING: &str = "ecp-upcoming-symbolic";
+/// PlayStation face-button badges for the controller legend (data/icons/).
+pub const PAD_CROSS: &str = "ecp-pad-cross-symbolic";
+pub const PAD_CIRCLE: &str = "ecp-pad-circle-symbolic";
+pub const PAD_SQUARE: &str = "ecp-pad-square-symbolic";
+pub const PAD_TRIANGLE: &str = "ecp-pad-triangle-symbolic";
 
 /// The placeholder for an item that has no artwork.
 pub fn placeholder(item_type: &str) -> &'static str {
@@ -173,6 +178,10 @@ mod tests {
             super::SUBTITLES,
             super::FOLDER,
             super::SORT_DESCENDING,
+            super::PAD_CROSS,
+            super::PAD_CIRCLE,
+            super::PAD_SQUARE,
+            super::PAD_TRIANGLE,
         ] {
             assert!(
                 ICONS.iter().any(|(icon, _)| *icon == name),
