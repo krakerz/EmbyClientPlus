@@ -7,7 +7,7 @@ pub mod bindings;
 use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
 
-use gilrs::{Axis, Button, EventType, Gilrs};
+use gilrs::{Axis, Button, EventType, GamepadId, Gilrs};
 use gtk::glib;
 
 use bindings::Repeater;
@@ -32,8 +32,22 @@ pub enum PadEvent {
     /// Right stick (x, y), each -1.0..=1.0 past the deadzone (0.0: let go);
     /// y is positive upwards.
     RightStick(f32, f32),
-    Connected(String),
+    Connected(String, PadStyle),
+    /// The user pressed a button on a different, already-connected pad:
+    /// the style follows it, but no new hardware was plugged in.
+    Active(String, PadStyle),
     Disconnected,
+}
+
+/// Whether the connected pad reports its buttons the Xbox way (`A`, `B`,
+/// `X`, `Y`, `LB`, `RB`, `LT`, `RT`, `View`, `Menu`) or the PlayStation way
+/// (`✕`, `○`, `□`, `△`, `L1`, `R1`, `L2`, `R2`, `Share`, `Options`). D-pad
+/// arrows are the same on both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PadStyle {
+    #[default]
+    Xbox,
+    PlayStation,
 }
 
 /// Gets each press; `true` for a held direction's repeats.
@@ -54,7 +68,7 @@ struct Hub {
     /// the token that cancels exactly this one.
     capture: RefCell<Option<(u64, Capture)>>,
     capture_token: Cell<u64>,
-    connected: RefCell<Option<String>>,
+    connected: RefCell<Option<(String, PadStyle)>>,
     bindings: RefCell<Bindings>,
     started: Cell<bool>,
     /// Run when a controller connects/disconnects or the mapping changes.
@@ -116,9 +130,17 @@ impl Hub {
 
     fn dispatch(&self, event: PadEvent) {
         match event {
-            PadEvent::Connected(name) => {
+            PadEvent::Connected(name, style) => {
                 tracing::info!("controller connected: {name}");
-                self.connected.replace(Some(name));
+                self.connected.replace(Some((name, style)));
+                self.changed();
+            }
+            PadEvent::Active(name, style) => {
+                // The user pressed a button on a pad that was already
+                // connected: the style follows it, but nothing new was
+                // plugged in, so this is a switch, not a connect.
+                tracing::debug!("controller active: {name}");
+                self.connected.replace(Some((name, style)));
                 self.changed();
             }
             PadEvent::Disconnected => {
@@ -188,7 +210,74 @@ pub fn on_change(listener: impl Fn() + 'static) {
 
 /// Name of the connected controller, if any.
 pub fn connected() -> Option<String> {
-    HUB.with(|hub| hub.connected.borrow().clone())
+    HUB.with(|hub| {
+        hub.connected
+            .borrow()
+            .as_ref()
+            .map(|(name, _)| name.clone())
+    })
+}
+
+/// Style of the connected controller (`Xbox` when nothing is connected).
+pub fn style() -> PadStyle {
+    HUB.with(|hub| {
+        hub.connected
+            .borrow()
+            .as_ref()
+            .map_or(PadStyle::Xbox, |(_, style)| *style)
+    })
+}
+
+const SONY_VENDOR_ID: u16 = 0x054c;
+
+/// Label for the Preferences rows: the badge text, spelled out for the
+/// d-pad and the two middle buttons.
+pub fn long_label(pad: Pad, style: PadStyle) -> &'static str {
+    match (pad, style) {
+        (Pad::Up, _) => "D-pad ↑",
+        (Pad::Down, _) => "D-pad ↓",
+        (Pad::Left, _) => "D-pad ←",
+        (Pad::Right, _) => "D-pad →",
+        (Pad::Select, PadStyle::Xbox) => "Select / View",
+        (Pad::Start, PadStyle::Xbox) => "Start / Menu",
+        _ => label(pad, style),
+    }
+}
+
+/// The short text printed on a button badge for `pad`, aware of the
+/// connected pad's style. D-pad arrows are the same on both styles.
+pub fn label(pad: Pad, style: PadStyle) -> &'static str {
+    match pad {
+        Pad::Select => match style {
+            PadStyle::Xbox => "View",
+            PadStyle::PlayStation => "Share",
+        },
+        Pad::Start => match style {
+            PadStyle::Xbox => "Menu",
+            PadStyle::PlayStation => "Options",
+        },
+        Pad::Up => "↑",
+        Pad::Down => "↓",
+        Pad::Left => "←",
+        Pad::Right => "→",
+        other => match style {
+            PadStyle::Xbox => other.name(),
+            PadStyle::PlayStation => match other {
+                Pad::A => "✕",
+                Pad::B => "○",
+                Pad::X => "□",
+                Pad::Y => "△",
+                Pad::LB => "L1",
+                Pad::RB => "R1",
+                Pad::LT => "L2",
+                Pad::RT => "R2",
+                Pad::L3 => "L3",
+                Pad::R3 => "R3",
+                // Select, Start and the d-pad are handled above.
+                _ => other.name(),
+            },
+        },
+    }
 }
 
 /// Sends the next press to `callback` instead of the normal handler.
@@ -206,6 +295,72 @@ fn load_bindings() -> Bindings {
     Bindings::from_config(&Settings::load().unwrap_or_default().controller.bindings)
 }
 
+/// Detects the pad's button style from what gilrs reports: Sony's vendor id
+/// wins, otherwise the name gives it away ("DualShock", "DualSense",
+/// "Wireless Controller", "PS4", "PS5", case-insensitive). Anything else is
+/// treated as Xbox-style.
+fn pad_style(name: &str, vendor_id: Option<u16>) -> PadStyle {
+    // A known vendor decides alone: other brands' pads are also called
+    // "Wireless Controller".
+    if let Some(id) = vendor_id {
+        return if id == SONY_VENDOR_ID {
+            PadStyle::PlayStation
+        } else {
+            PadStyle::Xbox
+        };
+    }
+    let lower = name.to_lowercase();
+    if lower.contains("dualshock")
+        || lower.contains("dualsense")
+        || lower.contains("wireless controller")
+        || lower.contains("ps4")
+        || lower.contains("ps5")
+    {
+        return PadStyle::PlayStation;
+    }
+    PadStyle::Xbox
+}
+
+/// Should the active controller change to `pressed`? Only when `pressed` is
+/// a different gamepad than the one we last announced (`current`). Pure in
+/// plain ids so it can be unit-tested without gilrs.
+fn switch_to(current: Option<usize>, pressed: usize) -> bool {
+    current != Some(pressed)
+}
+
+/// Announces `id` as the active pad when it differs from the last announced
+/// one and its name or style differs. Sends [`PadEvent::Active`] and updates
+/// `active`. Returns false if the channel closed (the thread should exit).
+fn announce_switch(
+    gilrs: &Gilrs,
+    active: &mut Option<(GamepadId, String, PadStyle)>,
+    id: GamepadId,
+    send: &impl Fn(PadEvent) -> bool,
+) -> bool {
+    if !switch_to(
+        active.as_ref().map(|(i, _, _)| usize::from(*i)),
+        usize::from(id),
+    ) {
+        return true;
+    }
+    let pad = gilrs.gamepad(id);
+    let name = pad.name().to_string();
+    let style = pad_style(pad.name(), pad.vendor_id());
+    // Two identical pads (same name and style) are indistinguishable: no
+    // announcement needed even though the id differs.
+    if let Some((_, cur_name, cur_style)) = active.as_ref()
+        && name == *cur_name
+        && style == *cur_style
+    {
+        return true;
+    }
+    if !send(PadEvent::Active(name.clone(), style)) {
+        return false;
+    }
+    *active = Some((id, name, style));
+    true
+}
+
 /// The gamepad thread. Gilrs isn't `Send`, so it lives here entirely.
 fn read_pads(sender: &tokio::sync::mpsc::UnboundedSender<PadEvent>) {
     let mut gilrs = match Gilrs::new() {
@@ -216,8 +371,14 @@ fn read_pads(sender: &tokio::sync::mpsc::UnboundedSender<PadEvent>) {
         }
     };
     let send = |event| sender.send(event).is_ok();
-    if let Some((_, pad)) = gilrs.gamepads().next() {
-        send(PadEvent::Connected(pad.name().to_string()));
+    // The pad whose style/name was last announced; the style follows the pad
+    // the user last pressed a button on.
+    let mut active: Option<(GamepadId, String, PadStyle)> = None;
+    if let Some((id, pad)) = gilrs.gamepads().next() {
+        let name = pad.name().to_string();
+        let style = pad_style(pad.name(), pad.vendor_id());
+        active = Some((id, name.clone(), style));
+        send(PadEvent::Connected(name, style));
     }
     let mut repeater = Repeater::default();
     let mut stick = StickState::default();
@@ -230,6 +391,11 @@ fn read_pads(sender: &tokio::sync::mpsc::UnboundedSender<PadEvent>) {
             match event.event {
                 EventType::ButtonPressed(button, _) => {
                     if let Some(pad) = pad_for(button) {
+                        // The style follows the pad the user last pressed a
+                        // button on: announce a switch before the press.
+                        if !announce_switch(&gilrs, &mut active, event.id, &send) {
+                            return;
+                        }
                         repeater.press(pad, now);
                         if !send(PadEvent::Pressed(pad)) {
                             return;
@@ -262,6 +428,11 @@ fn read_pads(sender: &tokio::sync::mpsc::UnboundedSender<PadEvent>) {
                 EventType::AxisChanged(axis, value, _) => {
                     for (pad, pressed) in stick.update(axis, value) {
                         if pressed {
+                            // The style follows the pad the user last pressed
+                            // a button on: announce a switch before the press.
+                            if !announce_switch(&gilrs, &mut active, event.id, &send) {
+                                return;
+                            }
                             repeater.press(pad, now);
                             if !send(PadEvent::Pressed(pad)) {
                                 return;
@@ -272,8 +443,13 @@ fn read_pads(sender: &tokio::sync::mpsc::UnboundedSender<PadEvent>) {
                     }
                 }
                 EventType::Connected => {
-                    let name = gilrs.gamepad(event.id).name().to_string();
-                    send(PadEvent::Connected(name));
+                    // "I just picked this up": switch to the new pad; the
+                    // next press on the other pad switches back.
+                    let pad = gilrs.gamepad(event.id);
+                    let name = pad.name().to_string();
+                    let style = pad_style(pad.name(), pad.vendor_id());
+                    active = Some((event.id, name.clone(), style));
+                    send(PadEvent::Connected(name, style));
                 }
                 EventType::Disconnected => {
                     // A held direction must not keep repeating with nothing
@@ -284,15 +460,26 @@ fn read_pads(sender: &tokio::sync::mpsc::UnboundedSender<PadEvent>) {
                         right = (0.0, 0.0);
                         send(PadEvent::RightStick(0.0, 0.0));
                     }
-                    // Another pad still plugged in keeps the legend.
-                    let remaining = gilrs
-                        .gamepads()
-                        .find(|(_, pad)| pad.is_connected())
-                        .map(|(_, pad)| pad.name().to_string());
-                    send(match remaining {
-                        Some(name) => PadEvent::Connected(name),
-                        None => PadEvent::Disconnected,
-                    });
+                    // Only the current pad going away changes the active
+                    // controller; another pad being unplugged is silent.
+                    if active.as_ref().is_none_or(|(i, _, _)| *i == event.id) {
+                        active = None;
+                        // Another pad still plugged in keeps the legend.
+                        let remaining = gilrs.gamepads().find(|(_, pad)| pad.is_connected()).map(
+                            |(id, pad)| {
+                                let name = pad.name().to_string();
+                                let style = pad_style(pad.name(), pad.vendor_id());
+                                (id, name, style)
+                            },
+                        );
+                        if let Some((id, name, style)) = &remaining {
+                            active = Some((*id, name.clone(), *style));
+                        }
+                        send(match remaining {
+                            Some((_, name, style)) => PadEvent::Connected(name, style),
+                            None => PadEvent::Disconnected,
+                        });
+                    }
                 }
                 _ => {}
             }
@@ -462,11 +649,87 @@ mod tests {
     }
 
     #[test]
+    fn switch_to_only_on_a_different_pad() {
+        // No pad announced yet: any pad switches in.
+        assert!(switch_to(None, 1));
+        // A different pad switches in.
+        assert!(switch_to(Some(1), 2));
+        // The same pad does not switch.
+        assert!(!switch_to(Some(1), 1));
+    }
+
+    #[test]
     fn xbox_layout_maps_to_pad_names() {
         assert_eq!(pad_for(Button::South), Some(Pad::A));
         assert_eq!(pad_for(Button::North), Some(Pad::Y));
         assert_eq!(pad_for(Button::LeftTrigger), Some(Pad::LB));
         assert_eq!(pad_for(Button::RightTrigger2), Some(Pad::RT));
         assert_eq!(pad_for(Button::Mode), None);
+    }
+
+    #[test]
+    fn label_is_style_aware() {
+        // Xbox keeps today's text.
+        assert_eq!(label(Pad::A, PadStyle::Xbox), "A");
+        assert_eq!(label(Pad::B, PadStyle::Xbox), "B");
+        assert_eq!(label(Pad::X, PadStyle::Xbox), "X");
+        assert_eq!(label(Pad::Y, PadStyle::Xbox), "Y");
+        assert_eq!(label(Pad::LB, PadStyle::Xbox), "LB");
+        assert_eq!(label(Pad::RB, PadStyle::Xbox), "RB");
+        assert_eq!(label(Pad::LT, PadStyle::Xbox), "LT");
+        assert_eq!(label(Pad::RT, PadStyle::Xbox), "RT");
+        assert_eq!(label(Pad::Select, PadStyle::Xbox), "View");
+        assert_eq!(label(Pad::Start, PadStyle::Xbox), "Menu");
+        assert_eq!(label(Pad::L3, PadStyle::Xbox), "L3");
+        assert_eq!(label(Pad::R3, PadStyle::Xbox), "R3");
+        // PlayStation: positional glyphs.
+        assert_eq!(label(Pad::A, PadStyle::PlayStation), "✕");
+        assert_eq!(label(Pad::B, PadStyle::PlayStation), "○");
+        assert_eq!(label(Pad::X, PadStyle::PlayStation), "□");
+        assert_eq!(label(Pad::Y, PadStyle::PlayStation), "△");
+        assert_eq!(label(Pad::LB, PadStyle::PlayStation), "L1");
+        assert_eq!(label(Pad::RB, PadStyle::PlayStation), "R1");
+        assert_eq!(label(Pad::LT, PadStyle::PlayStation), "L2");
+        assert_eq!(label(Pad::RT, PadStyle::PlayStation), "R2");
+        assert_eq!(label(Pad::Select, PadStyle::PlayStation), "Share");
+        assert_eq!(label(Pad::Start, PadStyle::PlayStation), "Options");
+        assert_eq!(label(Pad::L3, PadStyle::PlayStation), "L3");
+        assert_eq!(label(Pad::R3, PadStyle::PlayStation), "R3");
+        // D-pad arrows are the same on both styles.
+        assert_eq!(label(Pad::Up, PadStyle::Xbox), "↑");
+        assert_eq!(label(Pad::Up, PadStyle::PlayStation), "↑");
+        assert_eq!(label(Pad::Left, PadStyle::PlayStation), "←");
+    }
+
+    #[test]
+    fn name_based_pad_style_detection() {
+        assert_eq!(
+            pad_style("Wireless Controller", None),
+            PadStyle::PlayStation
+        );
+        assert_eq!(pad_style("DualShock 4", None), PadStyle::PlayStation);
+        assert_eq!(pad_style("DualSense", None), PadStyle::PlayStation);
+        assert_eq!(pad_style("PS4", None), PadStyle::PlayStation);
+        assert_eq!(pad_style("PS5", None), PadStyle::PlayStation);
+        // The Sony vendor id wins even with an unrecognisable name.
+        assert_eq!(
+            pad_style("Unknown Gamepad", Some(0x054c)),
+            PadStyle::PlayStation
+        );
+        // Anything else is Xbox-style.
+        assert_eq!(pad_style("Xbox Controller", None), PadStyle::Xbox);
+        // Another brand's "Wireless Controller": its vendor id decides.
+        assert_eq!(
+            pad_style("Wireless Controller", Some(0x2dc8)),
+            PadStyle::Xbox
+        );
+        assert_eq!(pad_style("XInput Gamepad", None), PadStyle::Xbox);
+        assert_eq!(pad_style("", None), PadStyle::Xbox);
+        // Case-insensitive name matching.
+        assert_eq!(
+            pad_style("WIRELESS CONTROLLER", None),
+            PadStyle::PlayStation
+        );
+        assert_eq!(pad_style("DualShock", None), PadStyle::PlayStation);
     }
 }

@@ -253,6 +253,19 @@ impl Ui {
     }
 
     fn page_for(&self, item: &BaseItem) -> adw::NavigationPage {
+        // An upcoming episode can have no id of its own; if we know its
+        // series, open the series instead of a broken details page.
+        if item.id.is_empty()
+            && let Some(series_id) = &item.series_id
+        {
+            let series = BaseItem {
+                id: series_id.clone(),
+                name: item.series_name.clone().unwrap_or_default(),
+                item_type: "Series".into(),
+                ..Default::default()
+            };
+            return series::page(self, &series);
+        }
         match item.item_type.as_str() {
             "Series" => series::page(self, item),
             "Person" => library_page::person(self, item),

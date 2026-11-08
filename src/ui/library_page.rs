@@ -1737,6 +1737,10 @@ fn upcoming(ui: &Ui, library_id: &str) -> gtk::Widget {
                 return;
             }
         };
+        let empty_ids = items.iter().filter(|item| item.id.is_empty()).count();
+        if empty_ids > 0 {
+            tracing::info!("upcoming: {empty_ids} of {} items have no id", items.len());
+        }
         if items.is_empty() {
             content.append(
                 &adw::StatusPage::builder()

@@ -361,6 +361,10 @@ const CAST_LIMIT: usize = 30;
 
 /// "Cast & Crew" and "More Like This" rows under a title, into `related`.
 pub fn show_related(ui: &Ui, related: &gtk::Box, item: &BaseItem) {
+    // An id-less item (an upcoming episode) has nothing similar to fetch.
+    if item.id.is_empty() {
+        return;
+    }
     // The rows are swapped in all at once, when everything has arrived:
     // clearing first shortened the page for a moment and it scrolled.
     // SAFETY: this key is only ever stored and read as `String`.
