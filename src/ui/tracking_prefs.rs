@@ -1,5 +1,6 @@
 //! Preferences → Tracking: log in to MyAnimeList, AniList, Kitsu and Trakt,
-//! switch each on or off, the Trakt Client ID and the "Also sync unwatched" option.
+//! switch each on or off, the Trakt Client ID and the "Also sync unwatched" option,
+//! and the one-time "Sync whole library to Trakt" button.
 
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
@@ -119,6 +120,11 @@ pub fn page(_parent: &gtk::Widget) -> adw::PreferencesPage {
         super::preferences::save(|s| s.tracking.trakt_sync_minutes = minutes);
     });
     trakt_group.add(&sync_minutes);
+    if tracker::get().service(ServiceId::Trakt).is_logged_in()
+        && !tracker::get().library_first_sync_done()
+    {
+        trakt_group.add(&library_sync_row(&trakt_group));
+    }
     page.add(&trakt_group);
 
     let options = adw::PreferencesGroup::builder().title("Options").build();
@@ -224,6 +230,81 @@ fn refresh_row(row: &adw::ActionRow, suffix: &gtk::Box, id: ServiceId) {
         move |button| log_in_to(id, button, &row, &suffix)
     ));
     row.set_activatable_widget(Some(&log_in));
+}
+
+/// The one-time "sync everything already played" row. It goes away for good
+/// once a run has finished without stopping early.
+fn library_sync_row(group: &adw::PreferencesGroup) -> adw::ActionRow {
+    let row = adw::ActionRow::builder()
+        .title("Sync whole library to Trakt")
+        .subtitle(
+            "One-time: adds everything already played on this Emby server to your Trakt \
+             history. Afterwards new plays sync automatically.",
+        )
+        .build();
+    let button = gtk::Button::builder()
+        .label("Sync")
+        .valign(gtk::Align::Center)
+        .build();
+    row.add_suffix(&button);
+    row.set_activatable_widget(Some(&button));
+    button.connect_clicked(glib::clone!(
+        #[weak]
+        row,
+        #[weak]
+        group,
+        move |button| {
+            button.set_sensitive(false);
+            let weak_row = row.downgrade();
+            let ticker =
+                glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+                    let Some(row) = weak_row.upgrade() else {
+                        return glib::ControlFlow::Break;
+                    };
+                    let progress = tracker::get().library_progress();
+                    if !progress.is_empty() {
+                        row.set_subtitle(&glib::markup_escape_text(&progress));
+                    }
+                    glib::ControlFlow::Continue
+                });
+            let (row, group, button) = (row.downgrade(), group.downgrade(), button.downgrade());
+            glib::spawn_future_local(async move {
+                let result =
+                    spawn_tokio_checked(async move { tracker::get().sync_library_now().await })
+                        .await
+                        .and_then(|result| result);
+                let (Some(row), Some(group), Some(button)) =
+                    (row.upgrade(), group.upgrade(), button.upgrade())
+                else {
+                    return;
+                };
+                ticker.remove();
+                match result {
+                    Ok(report) => {
+                        row.set_subtitle(&glib::markup_escape_text(&report.summary()));
+                        if report.stopped.is_some() {
+                            button.set_label("Continue");
+                        }
+                    }
+                    Err(e) => row.set_subtitle(&glib::markup_escape_text(&e.to_string())),
+                }
+                button.set_sensitive(true);
+                if tracker::get().library_first_sync_done() {
+                    // Hand the (gamepad) focus to the row above before this
+                    // one goes, so it isn't lost with it.
+                    let focused = row
+                        .root()
+                        .and_then(|root| root.focus())
+                        .is_some_and(|f| f == row || f.is_ancestor(&row));
+                    if focused && let Some(prev) = row.prev_sibling() {
+                        prev.grab_focus();
+                    }
+                    group.remove(&row);
+                }
+            });
+        }
+    ));
+    row
 }
 
 fn log_out_of(id: ServiceId, row: &adw::ActionRow, suffix: &gtk::Box) {

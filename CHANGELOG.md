@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [1.35.0] — 2026-11-14
+
+### Added
+- Trakt: one-time **Sync whole library to Trakt** in Preferences → Tracking adds everything already played on the Emby server; new plays, also from other apps, then sync automatically.
+
+### Fixed
+- Updates still queued when the app closes are now sent for every tracking service, and the log says what the closing sync did.
+
 ## [1.34.0] — 2026-11-08
 
 ### Added

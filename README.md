@@ -101,6 +101,11 @@ Changing the Client ID logs you out of Trakt. To spare your quota, watched episo
 sent together (every 15 minutes by default, or only when you quit; **Send updates**), and the live
 "watching now" status is off unless you turn on **Show 'watching now' on Trakt**.
 
+Plays made before you connected Trakt are added once with **Sync whole library to Trakt** (Preferences
+→ Tracking → Trakt); only what Trakt lacks is sent, and from then on new plays, also from other apps,
+sync automatically. With **Also sync unwatched** on, items you mark unplayed in Emby are also removed
+from your Trakt history (found by the weekly full check).
+
 ### Keyboard and controller
 
 Both are remappable (Preferences → Keyboard, Controller); the legend at the bottom left shows the

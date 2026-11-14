@@ -1,0 +1,26 @@
+{
+  "Items": [
+    {"Id": "m1", "Name": "Movie With Id", "Type": "Movie",
+     "ProviderIds": {"Tmdb": "557", "Imdb": "tt0145487"},
+     "UserData": {"Played": true, "LastPlayedDate": "2023-11-14T22:13:20.0000000Z"}},
+    {"Id": "m2", "Name": "Movie Without Ids", "Type": "Movie",
+     "ProviderIds": {},
+     "UserData": {"Played": true, "LastPlayedDate": "2023-11-13T22:13:20.0000000Z"}},
+    {"Id": "e1", "Name": "Episode One", "Type": "Episode", "SeriesId": "s1",
+     "ParentIndexNumber": 1, "IndexNumber": 1,
+     "ProviderIds": {"Tvdb": "1001"},
+     "UserData": {"Played": true, "LastPlayedDate": "2023-11-15T02:00:00.0000000Z"}},
+    {"Id": "e2", "Name": "Episode Two", "Type": "Episode", "SeriesId": "s1",
+     "ParentIndexNumber": 1, "IndexNumber": 2,
+     "ProviderIds": {"Tvdb": "1002"},
+     "UserData": {"Played": true, "LastPlayedDate": "2023-11-15T01:00:00.0000000Z"}},
+    {"Id": "e3", "Name": "Episode Without Play Date", "Type": "Episode", "SeriesId": "s2",
+     "ParentIndexNumber": 1, "IndexNumber": 1,
+     "ProviderIds": {"Tvdb": "2001"},
+     "UserData": {"Played": true}},
+    {"Id": "e4", "Name": "Two Episodes In One File", "Type": "Episode", "SeriesId": "s2",
+     "ParentIndexNumber": 1, "IndexNumber": 2, "IndexNumberEnd": 3,
+     "ProviderIds": {"Tvdb": "2002"},
+     "UserData": {"Played": true, "LastPlayedDate": "2023-11-10T10:00:00.0000000Z"}}
+  ]
+}
