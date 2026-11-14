@@ -11,6 +11,8 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::db::Db;
+
 use super::resolve::ShowIds;
 use super::tokens::{self, Tokens};
 use super::trakt_cache::{self, Disk, Snapshot};
@@ -573,6 +575,28 @@ fn leave_out_watched<'a>(
         .collect()
 }
 
+/// For each entry, `true` when it must be sent: an episode Trakt does not
+/// list as watched, a movie it does not list (a movie without usable ids, and
+/// every entry when its list is unknown, counts as missing).
+fn needs_sending(
+    entries: &[HistoryEntry],
+    progress: &HashMap<String, ShowState>,
+    movies: Option<&WatchedMovies>,
+) -> Vec<bool> {
+    entries
+        .iter()
+        .map(|entry| match &entry.episode {
+            Some(episode) => {
+                let state = show_key(&episode.show).and_then(|key| progress.get(&key));
+                let seen =
+                    state.and_then(|state| state.episode_watched(&episode.ids, episode.count));
+                seen != Some(true)
+            }
+            None => movies.and_then(|movies| movies.watched(&entry.item.ids)) != Some(true),
+        })
+        .collect()
+}
+
 /// Unix seconds as `YYYY-MM-DDTHH:MM:SSZ`.
 fn rfc3339(secs: i64) -> String {
     let (year, month, day) = crate::logging::civil_from_days(secs.div_euclid(86_400));
@@ -689,6 +713,10 @@ impl Trakt {
             .unwrap_or_else(|e| e.into_inner())
             .clear();
         self.forget_watched();
+        // The library mirror's "Trakt has it" marks belonged to the old account.
+        if let Err(e) = Db::open_default().and_then(|db| db.reset_library_trakt()) {
+            tracing::warn!("library sync marks not reset: {e:#}");
+        }
     }
 
     /// Loads the cache file into memory, once.
@@ -910,7 +938,7 @@ impl Trakt {
     }
 
     /// Drops the session's copies of the watched lists (shows and movies).
-    fn forget_watched(&self) {
+    pub(super) fn forget_watched(&self) {
         self.dirty.store(true, Ordering::Relaxed);
         *self.shows.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.movies.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -1090,24 +1118,25 @@ impl Trakt {
         }
     }
 
-    /// Drops the entries Trakt already lists, from one read of the watched
-    /// shows. Only a lost connection or login fails the call; a show whose
-    /// numbering is unreadable is added unchecked.
-    async fn leave_out_known<'a>(
+    /// The watched state of every show the episode entries belong to, from
+    /// one read of the watched shows. `None`: that read failed, nothing is
+    /// known. Only a lost connection or login fails the call; a show whose
+    /// numbering is unreadable is left out of the map.
+    async fn episode_progress(
         &self,
-        entries: Vec<&'a HistoryEntry>,
-    ) -> Result<Vec<&'a HistoryEntry>> {
+        entries: &[&HistoryEntry],
+    ) -> Result<Option<HashMap<String, ShowState>>> {
         let list = match self.watched_shows(true).await {
             Ok(list) => list,
             Err(e) if is_network(&e) || e.chain().any(|c| c.is::<LoggedOut>()) => return Err(e),
             Err(e) => {
                 tracing::warn!("Trakt watched shows unreadable, adding all: {e:#}");
-                return Ok(entries);
+                return Ok(None);
             }
         };
         let mut progress: HashMap<String, ShowState> = HashMap::new();
         let mut asked: HashSet<String> = HashSet::new();
-        for entry in &entries {
+        for entry in entries {
             let Some(episode) = &entry.episode else {
                 continue;
             };
@@ -1130,7 +1159,55 @@ impl Trakt {
                 Err(e) => tracing::warn!("Trakt numbering of {key} unreadable, adding all: {e:#}"),
             }
         }
-        Ok(leave_out_watched(&entries, &progress))
+        Ok(Some(progress))
+    }
+
+    /// Drops the entries Trakt already lists, from one read of the watched
+    /// shows. Only a lost connection or login fails the call; a show whose
+    /// numbering is unreadable is added unchecked.
+    async fn leave_out_known<'a>(
+        &self,
+        entries: Vec<&'a HistoryEntry>,
+    ) -> Result<Vec<&'a HistoryEntry>> {
+        match self.episode_progress(&entries).await? {
+            Some(progress) => Ok(leave_out_watched(&entries, &progress)),
+            None => Ok(entries),
+        }
+    }
+
+    /// For each entry, in order: `true` when Trakt lacks it and it must be
+    /// sent. Episodes follow `leave_out_known`'s rules; a movie is known by
+    /// its tmdb or imdb id. Anything unreadable counts as missing. Only a
+    /// lost connection or login fails the call.
+    pub(super) async fn missing_on_trakt(&self, entries: &[HistoryEntry]) -> Result<Vec<bool>> {
+        let episodes: Vec<&HistoryEntry> = entries.iter().filter(|e| e.episode.is_some()).collect();
+        let progress = if episodes.is_empty() {
+            HashMap::new()
+        } else {
+            self.episode_progress(&episodes).await?.unwrap_or_default()
+        };
+        let movies = if episodes.len() < entries.len() {
+            match self.watched_movies().await {
+                Ok(movies) => Some(movies),
+                Err(e) if is_network(&e) || e.chain().any(|c| c.is::<LoggedOut>()) => {
+                    return Err(e);
+                }
+                Err(e) => {
+                    tracing::warn!("Trakt watched movies unreadable, adding all: {e:#}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        Ok(needs_sending(entries, &progress, movies.as_deref()))
+    }
+
+    /// Adds the entries to the history as they are: no check against what
+    /// Trakt lists (see `missing_on_trakt`).
+    pub(super) async fn add_history(&self, entries: &[HistoryEntry]) -> Result<Outcome> {
+        let send: Vec<&HistoryEntry> = entries.iter().collect();
+        self.post_history(Direction::Watched, &send).await
     }
 
     async fn history_batch(
@@ -1151,18 +1228,29 @@ impl Trakt {
         if send.is_empty() {
             return Ok(Outcome::Unchanged);
         }
+        let outcome = self.post_history(direction, &send).await?;
+        self.forget_watched();
+        Ok(outcome)
+    }
+
+    /// One history call (add or remove) for the entries; the caller drops the
+    /// cached watched lists afterwards (`forget_watched`).
+    pub(super) async fn post_history(
+        &self,
+        direction: Direction,
+        send: &[&HistoryEntry],
+    ) -> Result<Outcome> {
         let path = match direction {
             Direction::Watched => "sync/history",
             Direction::Unwatched => "sync/history/remove",
         };
-        let body = history_batch_body(&send, direction);
+        let body = history_batch_body(send, direction);
         let url = format!("{API_URL}/{path}");
         let answer: Value = check(self.send(|| http().post(&url).json(&body)).await?)
             .await?
             .json()
             .await
             .unwrap_or(Value::Null);
-        self.forget_watched();
         if not_found_count(&answer) >= send.len() {
             return Ok(Outcome::Skipped(
                 "Trakt doesn't know this title".to_string(),
@@ -1366,6 +1454,42 @@ mod tests {
         {"number":2,"aired":2,"completed":0,"episodes":[
             {"number":1,"completed":false,"last_watched_at":null},
             {"number":2,"completed":false,"last_watched_at":null}]}]}"#;
+
+    #[test]
+    fn needs_sending_checks_episodes_and_movies() {
+        let mut progress = HashMap::new();
+        // The show's first episode (tvdb 901) is watched, 902 is not.
+        progress.insert(
+            "tvdb:9".to_string(),
+            state(r#"{"seasons":[{"number":1,"episodes":[{"number":1,"completed":true}]}]}"#),
+        );
+        let movies = movies_from_watched(&json!([
+            {"plays": 1, "movie": {"ids": {"trakt": 1, "tmdb": 557, "imdb": null}}}
+        ]));
+        let episode = |tvdb: u32, show: u32| entry(TraktKind::Episode, tvdb, show, 1, 1);
+        let movie = |tmdb: Option<u32>| HistoryEntry {
+            item: TraktItem {
+                kind: TraktKind::Movie,
+                ids: ids(None, tmdb, None),
+            },
+            watched_at: None,
+            episode: None,
+        };
+        let entries = [
+            episode(901, 9),
+            episode(902, 9),
+            episode(901, 8),
+            movie(Some(557)),
+            movie(Some(1)),
+            movie(None),
+        ];
+        assert_eq!(
+            needs_sending(&entries, &progress, Some(&movies)),
+            [false, true, true, false, true, true]
+        );
+        // Unknown movie list: every movie is sent.
+        assert_eq!(needs_sending(&entries[3..4], &progress, None), [true]);
+    }
 
     #[test]
     fn scrobble_guard_skips_what_trakt_rejects() {

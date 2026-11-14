@@ -44,6 +44,37 @@ impl EmbyClient {
         Ok(result.items)
     }
 
+    /// One page of everything the user has played (movies and episodes), with
+    /// ids and play dates, for mirroring the library to Trakt.
+    pub async fn played_page(
+        &self,
+        user_id: &str,
+        start: usize,
+        limit: usize,
+    ) -> Result<Vec<BaseItem>> {
+        let result: QueryResult<BaseItem> = self
+            .get(&format!(
+                "/emby/Users/{user_id}/Items?Recursive=true&IncludeItemTypes=Movie,Episode&Filters=IsPlayed&SortBy=DatePlayed,SortName&SortOrder=Descending&Fields=ProviderIds,UserDataLastPlayedDate&EnableImages=false&EnableTotalRecordCount=false&StartIndex={start}&Limit={limit}"
+            ))
+            .await?;
+        Ok(result.items)
+    }
+
+    /// The given items with ids and play dates. Items the server no longer
+    /// has are left out of the answer. Keep `ids` to about 100.
+    pub async fn items_by_ids(&self, user_id: &str, ids: &[String]) -> Result<Vec<BaseItem>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let result: QueryResult<BaseItem> = self
+            .get(&format!(
+                "/emby/Users/{user_id}/Items?Recursive=true&Ids={}&Fields=ProviderIds,UserDataLastPlayedDate&EnableImages=false&EnableTotalRecordCount=false",
+                ids.join(",")
+            ))
+            .await?;
+        Ok(result.items)
+    }
+
     /// The episodes of a series that exist as files: Emby lists unaired and
     /// missing ones too (`LocationType` "Virtual"), which can't be downloaded.
     pub async fn downloadable_episodes(

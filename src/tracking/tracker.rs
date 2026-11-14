@@ -3,6 +3,10 @@
 //! Every trigger (playback past the threshold, "Mark watched/unwatched")
 //! writes a `tracking_queue` row first, so nothing is lost on a quit or
 //! while offline; `flush` then sends the rows in order.
+//!
+//! Once the one-time library sync is done, `flush` also runs a small library
+//! pass at the Trakt cadence (see `library`): it mirrors what Emby lists as
+//! played and sends what Trakt lacks, so plays from other apps follow.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -20,8 +24,12 @@ use super::{
     tokens, trakt,
 };
 use crate::config::Settings;
-use crate::db::{Db, QueuedUpdate};
+use crate::db::{Db, LibraryScope, QueuedUpdate, TraktState};
 use crate::emby::models::BaseItem;
+
+mod library;
+
+use library::{Caps, Scan};
 
 /// Emby marks an item played at 90 % of its runtime by default.
 pub const PLAYED_PERCENT: f32 = 90.0;
@@ -31,7 +39,7 @@ const MAX_ATTEMPTS: i64 = 5;
 /// The retry loop ticks at least this often (also the cap on the Trakt interval).
 const TICK_MAX_MINUTES: u32 = 15;
 /// How long quitting waits for the final Trakt send.
-const QUIT_FLUSH_TIMEOUT: Duration = Duration::from_secs(10);
+const QUIT_FLUSH_TIMEOUT: Duration = Duration::from_secs(4);
 /// AniList's token lasts a year and can't be renewed.
 const ANILIST_WARN_DAYS: i64 = 14;
 /// Trakt allows one write per second.
@@ -59,6 +67,10 @@ pub struct Tracker {
     trakt: Arc<trakt::Trakt>,
     /// When queued Trakt updates last went out.
     last_trakt_send: Mutex<Option<Instant>>,
+    /// When the library mirror last ran an automatic pass.
+    last_library_pass: Mutex<Option<Instant>>,
+    /// What a running library pass is doing, for the settings row.
+    library_progress: Mutex<String>,
     session: Mutex<Option<SessionRef>>,
     cache: Mutex<HashMap<String, Arc<Vec<EpisodeResolution>>>>,
     /// The sync markers' reads: (service, entry id) → the entry. Dropped
@@ -163,6 +175,8 @@ impl Tracker {
             ],
             trakt,
             last_trakt_send: Mutex::new(None),
+            last_library_pass: Mutex::new(None),
+            library_progress: Mutex::new(String::new()),
             session: Mutex::new(None),
             cache: Mutex::new(HashMap::new()),
             lists: Mutex::new(HashMap::new()),
@@ -328,6 +342,10 @@ impl Tracker {
                         progress,
                     };
                     let Err(e) = self.service(ServiceId::Trakt).update(&update).await else {
+                        self.mark_library(
+                            std::slice::from_ref(&item_id),
+                            Some(TraktState::OnTrakt),
+                        );
                         if let Some((series_id, upto)) = anchor {
                             self.backfill_after_stop(&series_id, upto).await;
                         }
@@ -491,30 +509,67 @@ impl Tracker {
         sync_due(minutes, since)
     }
 
-    /// Quit: one last flush that sends the Trakt rows too, bounded in time.
-    /// Nothing queued for Trakt: no call, no wait.
+    /// Quit: one last flush that sends the queued rows of every service,
+    /// bounded in time. Logs each decision. Nothing queued: no call, no wait.
     pub fn flush_on_quit(&'static self) {
         let Some(session) = self.session() else {
+            tracing::info!("tracking: quit sync skipped, no Emby session");
             return;
         };
-        if !self.active().contains(&ServiceId::Trakt) {
+        if session.server_id.is_none() {
+            tracing::info!("tracking: quit sync skipped, the session has no server id");
+            return;
+        }
+        let active = self.active();
+        if active.is_empty() {
+            tracing::info!("tracking: quit sync skipped, no service is logged in and enabled");
             return;
         }
         let queued = crate::runtime::block_on_timeout(
-            async move {
-                queued_pairs(&session)
-                    .await
-                    .iter()
-                    .any(|(_, id)| *id == ServiceId::Trakt)
+            {
+                let active = active.clone();
+                async move {
+                    queued_pairs(&session)
+                        .await
+                        .iter()
+                        .filter(|(_, id)| active.contains(id))
+                        .count()
+                }
             },
             Duration::from_secs(2),
         );
-        if queued != Some(true) {
-            return;
+        match queued {
+            None => {
+                tracing::info!("tracking: quit sync skipped, the queue could not be read in 2 s");
+                return;
+            }
+            Some(0) if active.contains(&ServiceId::Trakt) && self.library_first_sync_done() => {
+                tracing::info!("tracking: quit sync, nothing queued, checking the library");
+            }
+            Some(0) => {
+                tracing::info!(
+                    "tracking: quit sync, nothing queued (active: {})",
+                    keys(&active)
+                );
+                return;
+            }
+            Some(n) => {
+                tracing::info!(
+                    "tracking: quit sync, {n} queued update(s) for {}",
+                    keys(&active)
+                );
+            }
         }
+        let started = Instant::now();
         let sent = crate::runtime::block_on_timeout(self.flush_with(true), QUIT_FLUSH_TIMEOUT);
-        if sent.is_none() {
-            tracing::debug!("Trakt: final send timed out");
+        match sent {
+            Some(()) => tracing::info!(
+                "tracking: quit sync finished in {:.1} s",
+                started.elapsed().as_secs_f32()
+            ),
+            None => tracing::warn!(
+                "tracking: quit sync timed out after 4 s; what is left goes out on the next start"
+            ),
         }
     }
 
@@ -552,11 +607,13 @@ impl Tracker {
         let mut shows: HashMap<String, ShowIds> = HashMap::new();
         let mut deferred: Vec<TraktRow> = Vec::new();
         let mut stopped = false;
+        let mut held = 0usize;
         let sent = !rows.is_empty();
         for row in rows {
             // Only Trakt left and not due: leave the row queued, no Emby call.
             let left = row_services(&row, &active);
             if !trakt_due && !left.is_empty() && left.iter().all(|&id| id == ServiceId::Trakt) {
+                held += 1;
                 continue;
             }
             let item = match session.client.item(&session.user_id, &row.item_id).await {
@@ -598,6 +655,9 @@ impl Tracker {
                 break;
             }
         }
+        if held > 0 {
+            tracing::info!("Trakt: {held} update(s) wait for the next send (interval or quit)");
+        }
         let extra = if stopped {
             Vec::new()
         } else {
@@ -608,8 +668,67 @@ impl Tracker {
         if sending && let Ok(mut last) = self.last_trakt_send.lock() {
             *last = Some(Instant::now());
         }
+        if !stopped && active.contains(&ServiceId::Trakt) && self.library_due(force_trakt) {
+            if let Ok(mut last) = self.last_library_pass.lock() {
+                *last = Some(Instant::now());
+            }
+            // Only the quit passes `force_trakt`: it has seconds, no full read.
+            let scan = if force_trakt {
+                Scan::Quick
+            } else {
+                Scan::Incremental
+            };
+            let report = self.library_pass(&session, scan, Caps::Automatic).await;
+            if report.sent > 0 || report.removed > 0 {
+                self.invalidate_lists();
+            }
+        }
         if sent {
             self.invalidate_lists();
+        }
+    }
+
+    /// Whether the library mirror's automatic pass runs in this flush: the
+    /// one-time first sync is done, and the Trakt interval has passed since
+    /// the last pass (a quit forces it).
+    fn library_due(&self, force: bool) -> bool {
+        if !self.library_first_sync_done() {
+            return false;
+        }
+        let minutes = Settings::load()
+            .unwrap_or_default()
+            .tracking
+            .trakt_sync_minutes;
+        let since = self
+            .last_library_pass
+            .lock()
+            .ok()
+            .and_then(|last| last.map(|at| at.elapsed()));
+        force || sync_due(minutes, since)
+    }
+
+    /// Records in the library mirror that Trakt has the items (`Some`) or
+    /// that they are no longer in its history (`None`). Skipped without a
+    /// session or server id.
+    fn mark_library(&self, item_ids: &[String], state: Option<TraktState>) {
+        let Some(session) = self.session() else {
+            return;
+        };
+        let Some(server_id) = session.server_id.as_deref() else {
+            return;
+        };
+        let scope = LibraryScope {
+            server_id,
+            user_id: &session.user_id,
+        };
+        let result = Db::open_default().and_then(|db| match state {
+            Some(state) => db.set_library_state(scope, item_ids, state, tokens::now()),
+            None => item_ids
+                .iter()
+                .try_for_each(|id| db.forget_library_item(scope, id)),
+        });
+        if let Err(e) = result {
+            tracing::warn!("library mirror not updated: {e:#}");
         }
     }
 
@@ -642,13 +761,35 @@ impl Tracker {
                 if direction == Direction::Watched {
                     entries.append(&mut extra);
                 }
+                let count = entries.len();
                 let update = Update::HistoryBatch { direction, entries };
                 let result = self.service(ServiceId::Trakt).update(&update).await;
                 last = Some(Instant::now());
                 match result {
                     Ok(outcome) => {
-                        if let Outcome::Skipped(reason) = &outcome {
-                            tracing::info!("Trakt skipped {} episodes: {reason}", end - at);
+                        match &outcome {
+                            Outcome::Skipped(reason) => {
+                                tracing::info!("Trakt skipped {} episodes: {reason}", end - at);
+                            }
+                            Outcome::Done => {
+                                let verb = match direction {
+                                    Direction::Watched => "added",
+                                    Direction::Unwatched => "removed",
+                                };
+                                tracing::info!("Trakt: {verb} {count} history entries");
+                            }
+                            Outcome::Unchanged => {
+                                tracing::info!("Trakt: {count} already in the history");
+                            }
+                        }
+                        if !matches!(outcome, Outcome::Skipped(_)) {
+                            let ids: Vec<String> = deferred[at..end]
+                                .iter()
+                                .map(|r| r.row.item_id.clone())
+                                .collect();
+                            let state =
+                                (direction == Direction::Watched).then_some(TraktState::OnTrakt);
+                            self.mark_library(&ids, state);
                         }
                         for r in &mut deferred[at..end] {
                             r.state.remaining.retain(|&id| id != ServiceId::Trakt);
@@ -1285,12 +1426,7 @@ fn backfill_entries(
             let count = episode_count(e);
             (state.episode_watched(&ids, count) == Some(false)).then(|| HistoryEntry {
                 item,
-                watched_at: e
-                    .user_data
-                    .as_ref()
-                    .and_then(|data| data.last_played_date.as_deref())
-                    .and_then(|text| gtk::glib::DateTime::from_iso8601(text, None).ok())
-                    .map(|date| date.to_unix()),
+                watched_at: last_played(e),
                 episode: Some(ShowEpisode {
                     show: show.clone(),
                     ids,
@@ -1299,6 +1435,15 @@ fn backfill_entries(
             })
         })
         .collect()
+}
+
+/// When Emby says the item was last played (unix seconds).
+fn last_played(item: &BaseItem) -> Option<i64> {
+    item.user_data
+        .as_ref()
+        .and_then(|data| data.last_played_date.as_deref())
+        .and_then(|text| gtk::glib::DateTime::from_iso8601(text, None).ok())
+        .map(|date| date.to_unix())
 }
 
 /// The episode as Trakt's watched list wants it: the series' ids and the

@@ -119,7 +119,9 @@ impl Db {
 
     /// Brings the file to the current schema (`PRAGMA user_version`). Version
     /// 1 scopes every row by server and user; older files are rebuilt, their
-    /// rows kept under [`LEGACY_SCOPE`]. Version 2 adds `tracking_queue`.
+    /// rows kept under [`LEGACY_SCOPE`]. Version 2 adds `tracking_queue`. Version 3
+    /// adds `library_watched` (what is played on the server and whether Trakt
+    /// has it) and `library_scans` (when each scope was last read in full).
     fn init_schema(conn: &Connection) -> Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if version < 1 {
@@ -141,6 +143,32 @@ impl Db {
                  COMMIT;",
             )
             .context("failed to create tracking_queue")?;
+        }
+        if version < 3 {
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE IF NOT EXISTS library_watched (
+                     server_id   TEXT NOT NULL,
+                     user_id     TEXT NOT NULL,
+                     item_id     TEXT NOT NULL,
+                     series_id   TEXT,
+                     played_at   INTEGER,
+                     seen_scan   INTEGER NOT NULL DEFAULT 0,
+                     trakt_state INTEGER NOT NULL DEFAULT 0,
+                     trakt_at    INTEGER,
+                     PRIMARY KEY (server_id, user_id, item_id)
+                 );
+                 CREATE TABLE IF NOT EXISTS library_scans (
+                     server_id     TEXT NOT NULL,
+                     user_id       TEXT NOT NULL,
+                     full_scan_at  INTEGER NOT NULL,
+                     first_sync_at INTEGER,
+                     PRIMARY KEY (server_id, user_id)
+                 );
+                 PRAGMA user_version = 3;
+                 COMMIT;",
+            )
+            .context("failed to create the library tables")?;
         }
         Ok(())
     }
@@ -420,6 +448,232 @@ impl Db {
             .execute("DELETE FROM tracking_queue WHERE id = ?1", [id])?;
         Ok(())
     }
+
+    /// Stores one page of the played listing under scan stamp `scan`. A new
+    /// row starts as [`TraktState::Pending`]; a known one keeps its state and
+    /// gets the fresh stamp, series and play date. Returns the new rows.
+    pub fn record_played(
+        &self,
+        scope: LibraryScope<'_>,
+        rows: &[PlayedRow],
+        scan: i64,
+    ) -> Result<usize> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut added = 0;
+        {
+            let mut insert = tx.prepare(
+                "INSERT INTO library_watched (server_id, user_id, item_id, series_id, played_at, seen_scan)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT (server_id, user_id, item_id) DO NOTHING",
+            )?;
+            let mut update = tx.prepare(
+                "UPDATE library_watched SET series_id = ?4, played_at = ?5, seen_scan = ?6
+                 WHERE server_id = ?1 AND user_id = ?2 AND item_id = ?3",
+            )?;
+            for row in rows {
+                let params = rusqlite::params![
+                    scope.server_id,
+                    scope.user_id,
+                    row.item_id,
+                    row.series_id,
+                    row.played_at,
+                    scan
+                ];
+                if insert.execute(params)? > 0 {
+                    added += 1;
+                } else {
+                    update.execute(params)?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(added)
+    }
+
+    /// Deletes the scope's rows that the scan with stamp `scan` did not see.
+    pub fn prune_library(&self, scope: LibraryScope<'_>, scan: i64) -> Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM library_watched WHERE server_id = ?1 AND user_id = ?2 AND seen_scan < ?3",
+            rusqlite::params![scope.server_id, scope.user_id, scan],
+        )?)
+    }
+
+    /// Rows Trakt has but the scan with stamp `scan` did not list: candidates
+    /// for "no longer played".
+    pub fn library_unseen_on_trakt(
+        &self,
+        scope: LibraryScope<'_>,
+        scan: i64,
+    ) -> Result<Vec<String>> {
+        let mut statement = self.conn.prepare(
+            "SELECT item_id FROM library_watched
+             WHERE server_id = ?1 AND user_id = ?2 AND seen_scan < ?3 AND trakt_state = ?4
+             ORDER BY item_id",
+        )?;
+        let rows = statement.query_map(
+            rusqlite::params![
+                scope.server_id,
+                scope.user_id,
+                scan,
+                TraktState::OnTrakt as i64
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Rows not yet sent to Trakt, series by series.
+    pub fn library_pending(&self, scope: LibraryScope<'_>) -> Result<Vec<PlayedRow>> {
+        let mut statement = self.conn.prepare(
+            "SELECT item_id, series_id, played_at FROM library_watched
+             WHERE server_id = ?1 AND user_id = ?2 AND trakt_state = ?3
+             ORDER BY series_id, item_id",
+        )?;
+        let rows = statement.query_map(
+            rusqlite::params![scope.server_id, scope.user_id, TraktState::Pending as i64],
+            |row| {
+                Ok(PlayedRow {
+                    item_id: row.get(0)?,
+                    series_id: row.get(1)?,
+                    played_at: row.get(2)?,
+                })
+            },
+        )?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Sets the Trakt state of the items (a missing row is inserted with
+    /// `seen_scan = 0`).
+    pub fn set_library_state(
+        &self,
+        scope: LibraryScope<'_>,
+        item_ids: &[String],
+        state: TraktState,
+        at: i64,
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut upsert = tx.prepare(
+                "INSERT INTO library_watched (server_id, user_id, item_id, seen_scan, trakt_state, trakt_at)
+                 VALUES (?1, ?2, ?3, 0, ?4, ?5)
+                 ON CONFLICT (server_id, user_id, item_id)
+                 DO UPDATE SET trakt_state = ?4, trakt_at = ?5",
+            )?;
+            for id in item_ids {
+                upsert.execute(rusqlite::params![
+                    scope.server_id,
+                    scope.user_id,
+                    id,
+                    state as i64,
+                    at
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn forget_library_item(&self, scope: LibraryScope<'_>, item_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM library_watched WHERE server_id = ?1 AND user_id = ?2 AND item_id = ?3",
+            rusqlite::params![scope.server_id, scope.user_id, item_id],
+        )?;
+        Ok(())
+    }
+
+    /// Gives the items Trakt could not match another chance (ids may have
+    /// been added since). Returns how many.
+    pub fn retry_library_no_ids(&self, scope: LibraryScope<'_>) -> Result<usize> {
+        Ok(self.conn.execute(
+            "UPDATE library_watched SET trakt_state = ?3
+             WHERE server_id = ?1 AND user_id = ?2 AND trakt_state = ?4",
+            rusqlite::params![
+                scope.server_id,
+                scope.user_id,
+                TraktState::Pending as i64,
+                TraktState::NoIds as i64
+            ],
+        )?)
+    }
+
+    /// Trakt account changed or logged out: every row is unsent again and
+    /// every scope's first sync is open again. Returns the rows reset.
+    pub fn reset_library_trakt(&self) -> Result<usize> {
+        let tx = self.conn.unchecked_transaction()?;
+        let rows = tx.execute(
+            "UPDATE library_watched SET trakt_state = ?1, trakt_at = NULL",
+            [TraktState::Pending as i64],
+        )?;
+        tx.execute("UPDATE library_scans SET first_sync_at = NULL", [])?;
+        tx.commit()?;
+        Ok(rows)
+    }
+
+    pub fn library_counts(&self, scope: LibraryScope<'_>) -> Result<LibraryCounts> {
+        let mut statement = self.conn.prepare(
+            "SELECT trakt_state, COUNT(*) FROM library_watched
+             WHERE server_id = ?1 AND user_id = ?2 GROUP BY trakt_state",
+        )?;
+        let rows = statement
+            .query_map(rusqlite::params![scope.server_id, scope.user_id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)? as usize))
+            })?;
+        let mut counts = LibraryCounts::default();
+        for row in rows {
+            let (state, n) = row?;
+            match TraktState::from_i64(state) {
+                Some(TraktState::Pending) => counts.pending = n,
+                Some(TraktState::OnTrakt) => counts.on_trakt = n,
+                Some(TraktState::NoIds) => counts.no_ids = n,
+                None => {}
+            }
+        }
+        Ok(counts)
+    }
+
+    /// When the scope's played list was last read completely.
+    pub fn library_full_scan_at(&self, scope: LibraryScope<'_>) -> Result<Option<i64>> {
+        self.scan_column("full_scan_at", scope)
+    }
+
+    pub fn set_library_full_scan(&self, scope: LibraryScope<'_>, at: i64) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO library_scans (server_id, user_id, full_scan_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT (server_id, user_id) DO UPDATE SET full_scan_at = ?3",
+            rusqlite::params![scope.server_id, scope.user_id, at],
+        )?;
+        Ok(())
+    }
+
+    /// When the one-time full library sync to Trakt finished (None: not yet).
+    pub fn library_first_sync_at(&self, scope: LibraryScope<'_>) -> Result<Option<i64>> {
+        self.scan_column("first_sync_at", scope)
+    }
+
+    pub fn set_library_first_sync(&self, scope: LibraryScope<'_>, at: i64) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO library_scans (server_id, user_id, full_scan_at, first_sync_at)
+             VALUES (?1, ?2, 0, ?3)
+             ON CONFLICT (server_id, user_id) DO UPDATE SET first_sync_at = ?3",
+            rusqlite::params![scope.server_id, scope.user_id, at],
+        )?;
+        Ok(())
+    }
+
+    fn scan_column(&self, column: &str, scope: LibraryScope<'_>) -> Result<Option<i64>> {
+        let sql =
+            format!("SELECT {column} FROM library_scans WHERE server_id = ?1 AND user_id = ?2");
+        let found = self.conn.query_row(
+            &sql,
+            rusqlite::params![scope.server_id, scope.user_id],
+            |row| row.get::<_, Option<i64>>(0),
+        );
+        match found {
+            Ok(value) => Ok(value),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
 }
 
 /// A watched/unwatched change waiting to reach the tracking services.
@@ -432,6 +686,49 @@ pub struct QueuedUpdate {
     pub services: String,
     pub created_at: i64,
     pub attempts: i64,
+}
+
+/// One user on one server: the key of the library mirror.
+#[derive(Debug, Clone, Copy)]
+pub struct LibraryScope<'a> {
+    pub server_id: &'a str,
+    pub user_id: &'a str,
+}
+
+/// Whether Trakt has a played item (stored as the integer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraktState {
+    Pending = 0,
+    OnTrakt = 1,
+    /// Trakt cannot match the item (no usable ids).
+    NoIds = 2,
+}
+
+impl TraktState {
+    fn from_i64(value: i64) -> Option<TraktState> {
+        match value {
+            0 => Some(TraktState::Pending),
+            1 => Some(TraktState::OnTrakt),
+            2 => Some(TraktState::NoIds),
+            _ => None,
+        }
+    }
+}
+
+/// A played movie or episode as the server lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayedRow {
+    pub item_id: String,
+    pub series_id: Option<String>,
+    /// Unix seconds of the last play, when the server says.
+    pub played_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LibraryCounts {
+    pub pending: usize,
+    pub on_trakt: usize,
+    pub no_ids: usize,
 }
 
 fn default_db_path() -> Result<PathBuf> {
@@ -694,7 +991,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         old_database(&path);
         let db = Db::open(&path).unwrap();
-        assert_eq!(user_version(&db), 2);
+        assert_eq!(user_version(&db), 3);
         let old = db.get_override("", "old").unwrap().unwrap();
         assert_eq!(old.audio_language.as_deref(), Some("jpn"));
         assert_eq!(old.volume, Some(80.0));
@@ -733,7 +1030,7 @@ mod tests {
         old_database(&path);
         drop(Db::open(&path).unwrap());
         let db = Db::open(&path).unwrap();
-        assert_eq!(user_version(&db), 2);
+        assert_eq!(user_version(&db), 3);
         assert!(db.get_override("", "old").unwrap().is_some());
         let _ = std::fs::remove_file(&path);
     }
@@ -756,5 +1053,160 @@ mod tests {
         assert_eq!(rows[0].attempts, 1);
         db.delete_tracking(rows[0].id).unwrap();
         assert_eq!(db.tracking_queue("srv-a").unwrap().len(), 1);
+    }
+
+    const SCOPE: LibraryScope<'static> = LibraryScope {
+        server_id: "srv",
+        user_id: "user",
+    };
+
+    fn played(id: &str, series: Option<&str>) -> PlayedRow {
+        PlayedRow {
+            item_id: id.to_string(),
+            series_id: series.map(str::to_string),
+            played_at: Some(100),
+        }
+    }
+
+    fn ids(list: &[&str]) -> Vec<String> {
+        list.iter().map(|id| id.to_string()).collect()
+    }
+
+    #[test]
+    fn a_v2_file_upgrades_to_v3_and_keeps_its_queue() {
+        let path =
+            std::env::temp_dir().join(format!("embyclientplus-v3-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = Connection::open(&path).unwrap();
+            Db::init_schema(&conn).unwrap();
+            conn.execute_batch(
+                "DROP TABLE library_watched; DROP TABLE library_scans; PRAGMA user_version = 2;",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO tracking_queue (server_id, item_id, watched, services, created_at)
+                 VALUES ('srv', 'i1', 1, 'trakt', 5)",
+                [],
+            )
+            .unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        assert_eq!(user_version(&db), 3);
+        assert_eq!(db.tracking_queue("srv").unwrap().len(), 1);
+        assert_eq!(db.record_played(SCOPE, &[played("a", None)], 1).unwrap(), 1);
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn recording_twice_adds_nothing_and_keeps_the_state() {
+        let db = Db::open_in_memory().unwrap();
+        let rows = [played("a", Some("s")), played("b", Some("s"))];
+        assert_eq!(db.record_played(SCOPE, &rows, 1).unwrap(), 2);
+        db.set_library_state(SCOPE, &ids(&["a"]), TraktState::OnTrakt, 9)
+            .unwrap();
+        assert_eq!(db.record_played(SCOPE, &rows, 2).unwrap(), 0);
+        let pending = db.library_pending(SCOPE).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].item_id, "b");
+    }
+
+    #[test]
+    fn prune_removes_only_older_stamps_of_the_scope() {
+        let db = Db::open_in_memory().unwrap();
+        let other = LibraryScope {
+            server_id: "srv",
+            user_id: "other",
+        };
+        db.record_played(SCOPE, &[played("old", None)], 1).unwrap();
+        db.record_played(SCOPE, &[played("new", None)], 2).unwrap();
+        db.record_played(other, &[played("old", None)], 1).unwrap();
+        assert_eq!(db.prune_library(SCOPE, 2).unwrap(), 1);
+        let left: Vec<_> = db
+            .library_pending(SCOPE)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.item_id)
+            .collect();
+        assert_eq!(left, ["new"]);
+        assert_eq!(db.library_pending(other).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn pending_comes_series_by_series() {
+        let db = Db::open_in_memory().unwrap();
+        let rows = [
+            played("m", None),
+            played("e2", Some("s2")),
+            played("e1", Some("s1")),
+            played("e3", Some("s1")),
+        ];
+        db.record_played(SCOPE, &rows, 1).unwrap();
+        let order: Vec<_> = db
+            .library_pending(SCOPE)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.item_id)
+            .collect();
+        assert_eq!(order, ["m", "e1", "e3", "e2"]);
+    }
+
+    #[test]
+    fn states_counts_unseen_and_retry() {
+        let db = Db::open_in_memory().unwrap();
+        let rows = [played("a", None), played("b", None), played("c", None)];
+        db.record_played(SCOPE, &rows, 1).unwrap();
+        db.set_library_state(SCOPE, &ids(&["a"]), TraktState::OnTrakt, 9)
+            .unwrap();
+        db.set_library_state(SCOPE, &ids(&["b"]), TraktState::NoIds, 9)
+            .unwrap();
+        // A row that was never listed is inserted.
+        db.set_library_state(SCOPE, &ids(&["z"]), TraktState::OnTrakt, 9)
+            .unwrap();
+        let counts = db.library_counts(SCOPE).unwrap();
+        assert_eq!(
+            counts,
+            LibraryCounts {
+                pending: 1,
+                on_trakt: 2,
+                no_ids: 1
+            }
+        );
+        assert_eq!(db.library_unseen_on_trakt(SCOPE, 2).unwrap(), ["a", "z"]);
+        assert_eq!(db.retry_library_no_ids(SCOPE).unwrap(), 1);
+        db.forget_library_item(SCOPE, "a").unwrap();
+        assert_eq!(db.library_counts(SCOPE).unwrap().pending, 2);
+    }
+
+    #[test]
+    fn reset_makes_everything_pending_and_reopens_the_first_sync() {
+        let db = Db::open_in_memory().unwrap();
+        db.record_played(SCOPE, &[played("a", None)], 1).unwrap();
+        db.set_library_state(SCOPE, &ids(&["a"]), TraktState::OnTrakt, 9)
+            .unwrap();
+        db.set_library_full_scan(SCOPE, 50).unwrap();
+        assert_eq!(db.library_first_sync_at(SCOPE).unwrap(), None);
+        db.set_library_first_sync(SCOPE, 60).unwrap();
+        assert_eq!(db.library_first_sync_at(SCOPE).unwrap(), Some(60));
+        assert_eq!(db.library_full_scan_at(SCOPE).unwrap(), Some(50));
+        assert_eq!(db.reset_library_trakt().unwrap(), 1);
+        assert_eq!(db.library_counts(SCOPE).unwrap().pending, 1);
+        assert_eq!(db.library_first_sync_at(SCOPE).unwrap(), None);
+        assert_eq!(db.library_full_scan_at(SCOPE).unwrap(), Some(50));
+    }
+
+    #[test]
+    fn two_users_keep_their_library_apart() {
+        let db = Db::open_in_memory().unwrap();
+        let other = LibraryScope {
+            server_id: "srv",
+            user_id: "other",
+        };
+        db.record_played(SCOPE, &[played("a", None)], 1).unwrap();
+        assert!(db.library_pending(other).unwrap().is_empty());
+        db.set_library_full_scan(other, 5).unwrap();
+        assert_eq!(db.library_full_scan_at(SCOPE).unwrap(), None);
+        assert_eq!(db.library_counts(other).unwrap(), LibraryCounts::default());
     }
 }
