@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [1.37.0] — 2026-11-18
+
+### Changed
+- Linux: the tar.gz now carries the player's own libraries (FFmpeg, libplacebo, libass, …), so it only needs GTK 4.12+ and libadwaita 1.6+ from the system and runs on current Fedora and openSUSE Tumbleweed too
+- Linux: the tar.gz and the main AppImage now say when the system's glibc is too old and point to the compat AppImage
+
+### Fixed
+- Linux: the main AppImage no longer fails to start on systems without fontconfig, HarfBuzz, FriBidi or JACK installed
+
 ## [1.36.1] — 2026-11-18
 
 ### Changed

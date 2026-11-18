@@ -7,8 +7,9 @@ Two ways to run it:
    chmod +x EmbyClientPlus-*-x86_64.AppImage
    ./EmbyClientPlus-*-x86_64.AppImage
 
-2. This archive (needs GTK 4.12+, libadwaita 1.6+, FFmpeg and libplacebo
-   from your distro, e.g. a current Arch/CachyOS/Fedora)
+2. This archive (needs GTK 4.12+ and libadwaita 1.6+ from your distro and a
+   current glibc, e.g. Arch/CachyOS, Fedora, openSUSE Tumbleweed; on older
+   systems such as Debian or Ubuntu LTS use the compat AppImage)
    Install:    ./install.sh    (to ~/.local/share/embyclientplus, adds a menu
                                 entry and ~/.local/bin/embyclientplus)
    Uninstall:  ./uninstall.sh  (keeps your settings)
