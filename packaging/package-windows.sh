@@ -55,7 +55,13 @@ for dll in $(deps "$EXE" "$libmpv") "$libmpv"; do
 done
 # Python comes with SVP's VapourSynth too; drop it if it slipped in.
 rm -f "$root"/bin/libpython*.dll
-[ "${#vs_names[@]}" -gt 0 ] || { echo "libmpv links no VapourSynth DLL — no SVP support?" >&2; exit 1; }
+if [ "${#vs_names[@]}" -eq 0 ]; then
+    # mpv 0.42+ links no VSScript: it loads one at run time from
+    # VSSCRIPT_PATH, which the app points at this stand-in.
+    grep -aq "VSSCRIPT_PATH" "$libmpv" \
+        || { echo "libmpv neither links nor loads VapourSynth — no SVP support?" >&2; exit 1; }
+    vs_names=(VSScript.dll)
+fi
 for name in "${vs_names[@]}"; do
     echo "VapourSynth stand-in: $name"
     gcc -shared -O2 -o "$root/bin/$name" packaging/vsshim/vsshim.c

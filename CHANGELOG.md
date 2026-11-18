@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [1.36.1] — 2026-11-18
+
+### Changed
+- Windows and macOS: the player now uses mpv 0.42.0 too (the release builds had kept 0.41.0)
+
+### Fixed
+- Windows: with mpv 0.42 the VapourSynth preference (System or SVP's, with the fallback) still applies
+
 ## [1.36.0] — 2026-11-18
 
 ### Changed
