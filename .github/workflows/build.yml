@@ -5,8 +5,10 @@ on:
     branches: [main]
     paths-ignore: [README.md, CHANGELOG.md, LICENSE, INSTALL.txt, .gitignore]
   # Run by hand from the Actions tab: one platform only, and a quick mode
-  # that skips the checks, for testing a build. Such runs make no release;
-  # the package is on the run's page under Artifacts.
+  # that skips the checks, for testing a build. Such runs make no release, and
+  # neither does any run on a branch other than main (pick dev under "Use
+  # workflow from" to test CI there); the packages are on the run's page under
+  # Artifacts.
   workflow_dispatch:
     inputs:
       platform:
@@ -53,6 +55,11 @@ jobs:
       # doesn't re-upload the cache; only dependency builds are kept.
       - uses: Swatinem/rust-cache@v2
 
+      # libmpv links these by soname; a cached build against older ones breaks packaging.
+      - name: libmpv dependency versions
+        id: mpvdeps
+        run: echo "hash=$(pacman -Q ffmpeg libplacebo libass | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
       - name: Cache libmpv
         uses: actions/cache@v4
         with:
@@ -60,7 +67,7 @@ jobs:
             third_party/mpv-src
             third_party/mpv-build
             third_party/mpv-prefix
-          key: libmpv-${{ hashFiles('scripts/build-libmpv.sh') }}
+          key: libmpv-${{ hashFiles('scripts/build-libmpv.sh') }}-${{ steps.mpvdeps.outputs.hash }}
 
       - name: Build libmpv
         run: scripts/build-libmpv.sh
@@ -274,13 +281,49 @@ jobs:
             echo "::endgroup::"
           done
 
+  # Runs every Linux package on four common distros (docker on the hosted
+  # runner), alongside the Windows/macOS builds: each plays the smoke test or,
+  # where the distro's glibc is too old, shows the launcher's compat hint.
+  # Never blocks the release (it only warns).
+  distro-test:
+    needs: build
+    if: needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["ubuntu:24.04", "fedora:latest", "archlinux:latest", "opensuse/tumbleweed:latest"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux
+          path: artifacts
+
+      - name: Test on ${{ matrix.image }}
+        env:
+          LOG_DIR: ${{ runner.temp }}/distro-logs
+        run: scripts/test-linux-packages.sh artifacts "${{ matrix.image }}"
+
+      - name: Logs
+        if: failure()
+        run: |
+          for log in "${{ runner.temp }}"/distro-logs/*.log; do
+            echo "::group::$log"
+            cat "$log"
+            echo "::endgroup::"
+          done
+
   release:
-    needs: [build, windows, macos, compat-test]
-    # Only full runs publish (a push, or a manual run of everything, checked).
+    needs: [build, windows, macos, compat-test, distro-test]
+    # Only full runs on main publish (a push, or a manual run of everything,
+    # checked); a run on any other branch (e.g. testing CI on dev) only builds.
     # compat-test may fail (or be skipped) without stopping the release, so
     # the other jobs are checked by hand.
     if: >-
       ${{ !cancelled()
+      && github.ref == 'refs/heads/main'
       && needs.build.result == 'success'
       && needs.windows.result == 'success'
       && needs.macos.result == 'success'
@@ -293,6 +336,10 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+
+      - name: Distro test result
+        if: needs.distro-test.result != 'success'
+        run: echo "::warning::Linux package tests on common distros ended as '${{ needs.distro-test.result }}'; check them before announcing the release"
 
       - name: Resolve version
         id: version

@@ -19,7 +19,7 @@ fi
 
 mkdir -p "$root" "$bin_dir" "$apps_dir" "$icon_dir"
 # Replace bin/ and lib/ wholesale so no stale files from older versions stay.
-rm -rf "$root/bin" "$root/lib"
+rm -rf "${root:?}/bin" "${root:?}/lib"
 cp -a "$dir/bin" "$dir/lib" "$root/"
 ln -sfn "$root/bin/embyclientplus" "$bin_dir/embyclientplus"
 install -m 644 "$dir/$app_id.svg" "$icon_dir/$app_id.svg"

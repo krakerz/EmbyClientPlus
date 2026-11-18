@@ -52,7 +52,61 @@ install -Dm644 packaging/INSTALL.txt "$archive_root/INSTALL.txt"
 install -Dm755 packaging/install.sh "$archive_root/install.sh"
 install -Dm755 packaging/uninstall.sh "$archive_root/uninstall.sh"
 cp -r packaging/steam-library "$archive_root/steam-library"
+
+# libmpv's dependencies, since their sonames differ between distros. lib/ holds
+# what only it uses (FFmpeg, libplacebo, libass, codecs): always ours.
+# lib/fallback/ holds what systems usually have too (what GTK loads, audio,
+# X11/Wayland, GnuTLS, libstdc++): the launcher uses one only when the system
+# lacks that soname, so a newer system copy wins. glibc and the GPU driver
+# stack always come from the system.
+lib_paths() { ldd "$@" 2>/dev/null | awk '$2 == "=>" && $1 !~ /\// && $3 ~ /^\// { print $1, $3 }' | LC_ALL=C sort -u; }
+# shellcheck disable=SC2046 # library paths have no spaces
+gtk_libs="$(lib_paths $(ldd "$BIN" | awk '/libgtk-4|libadwaita-1/ { print $3 }') | cut -d' ' -f1)"
+# skip: never bundled; fallback: only where the system lacks it; own: always ours.
+lib_kind() {
+    case "$1" in
+    libc.so* | libm.so* | libdl.so* | libpthread.so* | librt.so* | libresolv.so* | libutil.so* | \
+        ld-linux* | libEGL* | libGL* | libOpenGL* | libgbm* | libdrm* | libvulkan* | \
+        libmvec* | libvsscript* | libvapoursynth* | \
+        libpulsecommon*) echo skip ;; # private to libpulse, outside the loader cache
+    libva* | libvdpau* | libwayland* | libX* | libxcb* | libxkbcommon* | libpipewire* | \
+        libpulse* | libasound* | libjack* | libsystemd* | libdbus* | libudev* | libgnutls* | \
+        libp11-kit* | libtasn1* | libnettle* | libhogweed* | libgmp* | libidn2* | \
+        libunistring* | libstdc++* | libgcc_s*) echo fallback ;;
+    *) echo own ;;
+    esac
+}
+# Newest symbol version with prefix $1 the given files need.
+max_ver() {
+    local prefix="$1"
+    shift
+    objdump -T "$@" 2>/dev/null | grep -o "${prefix}_[0-9][0-9.]*" | sed "s/^${prefix}_//" |
+        sort -Vu | tail -n 1
+}
+# The launcher reads these from lib dir $1: a too-old glibc gets a clear message,
+# and the system's libstdc++ is used only when it has what the bundled files need.
+write_needs() {
+    local lib="$1"
+    shift
+    mkdir -p "$lib/fallback"
+    max_ver GLIBC "$@" >"$lib/glibc.needs"
+    max_ver GLIBCXX "$@" >"$lib/fallback/libstdc++.needs"
+}
+mkdir -p "$archive_root/lib/fallback"
+while read -r name path; do
+    kind="$(lib_kind "$name")"
+    if [ "$kind" = own ] && grep -qxF "$name" <<<"$gtk_libs"; then kind=fallback; fi
+    case "$kind" in
+    own) install -m755 "$path" "$archive_root/lib/$name" ;;
+    fallback) install -m755 "$path" "$archive_root/lib/fallback/$name" ;;
+    esac
+done < <(lib_paths "$(readlink -f "$LIBMPV")")
+write_needs "$archive_root/lib" "$archive_root/bin/embyclientplus-bin" "$archive_root"/lib/*.so*
+echo "tar.gz: $(find "$archive_root/lib" -maxdepth 1 -name '*.so*' | wc -l) own libraries," \
+    "$(find "$archive_root/lib/fallback" -name '*.so*' | wc -l) fallbacks," \
+    "needs glibc $(cat "$archive_root/lib/glibc.needs")"
 tar -C "$DIST" -czf "$DIST/embyclientplus-$VERSION-linux-x86_64.tar.gz" "$bundle"
+rm -rf "$archive_root"
 
 # The main AppImage runs on the host's glibc: report when any of its ELF files
 # needs a newer one than MAX_GLIBC (2.41 by default). A warning unless
@@ -91,6 +145,8 @@ fetch() {
 }
 fetch linuxdeploy-x86_64.AppImage \
     https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+fetch appimagetool-x86_64.AppImage \
+    https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
 # Containers have no FUSE; the tools can unpack themselves instead.
 export APPIMAGE_EXTRACT_AND_RUN=1
 
@@ -122,10 +178,32 @@ export PATH="$REPO_ROOT/$TOOLS:$PATH"
     --icon-file "packaging/$APP_ID.svg" \
     --custom-apprun packaging/AppRun \
     --exclude-library 'libvsscript*' \
-    --exclude-library 'libvapoursynth*' \
-    --output appimage
+    --exclude-library 'libvapoursynth*'
+# linuxdeploy's excludelist leaves out libraries most systems have (fontconfig,
+# freetype, harfbuzz, fribidi, jack, …): they go in as fallbacks, like the
+# archive's, and the shared launcher handles them and the glibc check.
+mkdir -p "$appdir/usr/lib/fallback"
+elfs=("$appdir/usr/bin/embyclientplus-bin" "$appdir"/usr/lib/*.so*)
+while read -r name path; do
+    if [ "$(lib_kind "$name")" != skip ] && [ ! -e "$appdir/usr/lib/$name" ]; then
+        install -m755 "$path" "$appdir/usr/lib/fallback/$name"
+    fi
+done < <(lib_paths "${elfs[@]}")
+# linuxdeploy made the binary's search path a RUNPATH, which doesn't reach the
+# fallbacks' own dependencies: those in usr/lib get a link in fallback/ too.
+while read -r name _; do
+    if [ -e "$appdir/usr/lib/$name" ] && [ ! -e "$appdir/usr/lib/fallback/$name" ]; then
+        ln -s "../$name" "$appdir/usr/lib/fallback/$name"
+    fi
+done < <(lib_paths "$appdir"/usr/lib/fallback/*.so*)
+write_needs "$appdir/usr/lib" "${elfs[@]}"
+echo "AppImage: $(find "$appdir/usr/lib/fallback" -name '*.so*' | wc -l) fallbacks," \
+    "needs glibc $(cat "$appdir/usr/lib/glibc.needs")"
+# Packed by appimagetool, not linuxdeploy again: that would set RUNPATH=$ORIGIN
+# on the fallbacks, hiding their dependencies in usr/lib.
+ARCH=x86_64 "$TOOLS/appimagetool-x86_64.AppImage" --no-appstream "$appdir" "$LDAI_OUTPUT"
 check_glibc "$appdir"
-rm -rf "$appdir" "$archive_root"
+rm -rf "$appdir"
 
 # 3. Steam library artwork on its own, for AppImage users.
 bsdtar -a -cf "$DIST/EmbyClientPlus-$VERSION-steam-library.zip" -C packaging steam-library
