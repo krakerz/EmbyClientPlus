@@ -399,10 +399,18 @@ pub fn expose_vapoursynth() {
                         unsafe { std::env::set_var("PATH", path) };
                     }
                 }
+                // mpv 0.42+ on Windows loads VSScript itself from
+                // VSSCRIPT_PATH: give it the packaged stand-in, which picks
+                // the System or SVP's VapourSynth (with the fallback), as
+                // older mpv got it by linking VSScript.dll.
+                #[cfg(windows)]
+                let for_mpv = windows_stand_in().unwrap_or_else(|| library.clone());
+                #[cfg(not(windows))]
+                let for_mpv = library.clone();
                 // Logging isn't up yet; this is reported by `log_vapoursynth`.
                 // SAFETY: called first thing in main, while single-threaded.
                 unsafe {
-                    std::env::set_var(MPV_VAR, &library);
+                    std::env::set_var(MPV_VAR, &for_mpv);
                     std::env::set_var(VAR, &library);
                 }
                 #[cfg(windows)]
@@ -430,6 +438,14 @@ pub fn expose_vapoursynth() {
             }
         }
     }
+}
+
+/// The VapourSynth stand-in packaged next to the app (`bin/VSScript.dll`,
+/// packaging/package-windows.sh); `None` in a development build.
+#[cfg(windows)]
+fn windows_stand_in() -> Option<PathBuf> {
+    let path = std::env::current_exe().ok()?.parent()?.join("VSScript.dll");
+    path.is_file().then_some(path)
 }
 
 /// Set instead of `EMBYCLIENTPLUS_VSSCRIPT` when no VSScript library was

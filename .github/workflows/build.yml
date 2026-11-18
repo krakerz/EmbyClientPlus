@@ -153,9 +153,9 @@ jobs:
       - uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
-          # No full package update: it cost ~2 min a run, and a fresh
-          # runner's MSYS2 is recent enough.
-          update: false
+          # Full package update (~2 min): without it the runner image's old
+          # package list pins mpv (0.41 while MSYS2 had 0.42).
+          update: true
           # MSYS2's mpv is built with vapoursynth, so no libmpv of our own.
           pacboy: >-
             rust:p pkgconf:p gcc:p gtk4:p libadwaita:p mpv:p
@@ -201,8 +201,11 @@ jobs:
     steps:
       - name: Install dependencies
         # Homebrew's mpv is built with vapoursynth, so no libmpv of our own;
-        # bash 5 for the packaging script (macOS ships 3.2).
-        run: brew install rust pkgconf gtk4 libadwaita adwaita-icon-theme hicolor-icon-theme mpv librsvg bash
+        # bash 5 for the packaging script (macOS ships 3.2). `brew update`
+        # first: the runner image's formulae pin old versions (mpv 0.41).
+        run: |
+          brew update
+          brew install rust pkgconf gtk4 libadwaita adwaita-icon-theme hicolor-icon-theme mpv librsvg bash
 
       - uses: actions/checkout@v4
 
