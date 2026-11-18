@@ -4,7 +4,7 @@
 # without vapoursynth, which SVP needs. Nothing is installed outside the repo.
 set -euo pipefail
 
-MPV_VERSION="${MPV_VERSION:-v0.41.0}"
+MPV_VERSION="${MPV_VERSION:-v0.42.0}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 THIRD_PARTY="$REPO_ROOT/third_party"
 SRC_DIR="$THIRD_PARTY/mpv-src"
@@ -19,7 +19,7 @@ mkdir -p "$THIRD_PARTY" "$SHIM_PC_DIR"
 
 # Pip-era VapourSynth (R74+) ships its headers inside the Python package, a
 # vapoursynth.pc with no Libs and a prefix that resolves to the wrong place,
-# and no vapoursynth-script.pc at all — while mpv v0.41.0's meson requires
+# and no vapoursynth-script.pc at all — while mpv's meson (v0.41+) requires
 # both .pc files. So locate the real headers/libraries and write our own pair
 # of .pc files, shadowing the system ones for this build only.
 vs_header="$(find /usr/include /usr/lib -name VSScript4.h -print -quit 2>/dev/null)"
@@ -58,6 +58,10 @@ export PKG_CONFIG_PATH="$SHIM_PC_DIR${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 
 if [ ! -d "$SRC_DIR/.git" ]; then
     git clone --depth 1 --branch "$MPV_VERSION" https://github.com/mpv-player/mpv.git "$SRC_DIR"
+elif [ "$(git -C "$SRC_DIR" describe --tags --exact-match 2>/dev/null)" != "$MPV_VERSION" ]; then
+    # An older checkout (a version bump): move the shallow clone to the new tag.
+    git -C "$SRC_DIR" fetch --depth 1 origin tag "$MPV_VERSION"
+    git -C "$SRC_DIR" checkout --detach "$MPV_VERSION"
 fi
 
 # Only what the app uses: features that drag in extra libraries (and, for

@@ -283,6 +283,21 @@ mod tests {
     }
 
     #[test]
+    fn kitsu_reads_an_anilist_only_match_by_the_tagged_id() {
+        let found = matched(None, Some((200, 3)));
+        let list = entries(
+            200 | crate::tracking::KITSU_ANILIST_TAG,
+            Some(3),
+            ListStatus::Watching,
+        );
+        let chip = mapping_chip(ServiceId::Kitsu, &found, false, Read::Entries(&list));
+        assert_eq!(chip.state, ChipState::OnList);
+        assert!(chip.tooltip.starts_with("Kitsu: Dr. Stone · ep 3"));
+        let chip = mapping_chip(ServiceId::Mal, &found, false, Read::Entries(&list));
+        assert_eq!(chip.state, ChipState::Unmatched);
+    }
+
+    #[test]
     fn queued_wins_and_unmatched_says_why() {
         let found = matched(Some((100, 5)), None);
         let list = entries(100, Some(5), ListStatus::Watching);

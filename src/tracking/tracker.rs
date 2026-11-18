@@ -19,9 +19,9 @@ use anyhow::{Context, Result};
 use super::markers::{self, Chip, MovieRead, Read, TraktRead};
 use super::resolve::{self, EpisodeResolution, Match, Resolution, Route, ShowIds, Target};
 use super::{
-    Direction, EntryInfo, EntryKey, HistoryEntry, LoggedOut, Outcome, ScrobbleAction, ServiceId,
-    ShowEpisode, TrackingService, TraktItem, Update, anilist, is_network, kitsu, mal, mapping,
-    tokens, trakt,
+    Direction, EntryInfo, EntryKey, HistoryEntry, KITSU_ANILIST_TAG, LoggedOut, Outcome,
+    ScrobbleAction, ServiceId, ShowEpisode, TrackingService, TraktItem, Update, anilist,
+    is_network, kitsu, mal, mapping, tokens, trakt,
 };
 use crate::config::Settings;
 use crate::db::{Db, LibraryScope, QueuedUpdate, TraktState};
@@ -1574,10 +1574,17 @@ fn unmatched_text(item: &BaseItem) -> String {
     )
 }
 
-/// What a service entry's target is for a match (Kitsu goes by MAL's).
+/// What a service entry's target is for a match (Kitsu goes by MAL's, else
+/// AniList's with a tagged id, see `KITSU_ANILIST_TAG`).
 pub(super) fn target_of(id: ServiceId, found: &Match) -> Option<Target> {
     match id {
-        ServiceId::Mal | ServiceId::Kitsu => found.mal,
+        ServiceId::Mal => found.mal,
+        ServiceId::Kitsu => found.mal.or_else(|| {
+            found.anilist.map(|t| Target {
+                id: t.id | KITSU_ANILIST_TAG,
+                ..t
+            })
+        }),
         ServiceId::AniList => found.anilist,
         ServiceId::Trakt => None,
     }
@@ -1899,6 +1906,22 @@ mod tests {
             status_line(&[found], &[ServiceId::Mal, ServiceId::AniList]).as_deref(),
             Some("Tracking: MAL ✓ (item IDs) · AniList ✗ · S1 AniDB 14087 ignored")
         );
+    }
+
+    #[test]
+    fn kitsu_target_falls_back_to_a_tagged_anilist_one() {
+        let found = |mal, anilist| match matched(1, 1, mal, anilist).resolution {
+            Resolution::Matched(m) => m,
+            Resolution::Skipped { .. } => unreachable!("matched() builds a match"),
+        };
+        let both = found(t(100, 5), t(200, 3));
+        assert_eq!(target_of(ServiceId::Kitsu, &both), t(100, 5));
+        let anilist_only = found(None, t(200, 3));
+        assert_eq!(target_of(ServiceId::Mal, &anilist_only), None);
+        let kitsu = target_of(ServiceId::Kitsu, &anilist_only).expect("anilist fallback");
+        assert_eq!(kitsu.id, 200 | KITSU_ANILIST_TAG);
+        assert_eq!((kitsu.episode, kitsu.extrapolated), (3, false));
+        assert_eq!(target_of(ServiceId::Kitsu, &found(None, None)), None);
     }
 
     #[test]

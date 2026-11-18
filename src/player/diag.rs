@@ -17,6 +17,7 @@ use std::time::Duration;
 use libmpv2::Mpv;
 
 use crate::config::{DisplayRate, Settings};
+use crate::svp_profile::{self, Target};
 
 /// What `EMBYCLIENTPLUS_DISPLAY_FPS` asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -118,11 +119,70 @@ pub fn note_monitor(millihertz: i32) {
     MONITOR_MHZ.store(u32::try_from(millihertz).unwrap_or(0), Relaxed);
 }
 
+/// The monitor's refresh rate in Hz, as last noted.
+pub fn monitor_hz() -> Option<f64> {
+    match MONITOR_MHZ.load(Relaxed) {
+        0 => None,
+        mhz => Some(f64::from(mhz) / 1000.0),
+    }
+}
+
+/// Game Mode's display rate: SVP's output rate, so that mpv's idea of the
+/// display never differs from what SVP produces (a mismatch microstutters).
+/// `None`: tell mpv nothing. The saved Preferences rate plays no part here.
+fn game_mode_fps(
+    svp_on: bool,
+    target: Option<Target>,
+    monitor_hz: Option<f64>,
+    movie_fps: Option<f64>,
+) -> Option<f64> {
+    if !svp_on {
+        return None;
+    }
+    target
+        .and_then(|t| svp_profile::output_fps(t, monitor_hz.unwrap_or(0.0), movie_fps))
+        .filter(|fps| *fps > 0.0)
+        .or(monitor_hz)
+}
+
+/// What the last Game Mode decision was, in millihertz (0: none), to log
+/// only changes. `u64::MAX`: nothing decided yet.
+static LAST_GAME_MODE: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// The rate Game Mode wants, logged when it changes.
+/// SVP's target is the one from startup: SVP applies changes only after a
+/// restart, and following a newer choice would recreate the mismatch.
+fn game_mode_rate() -> Option<f64> {
+    let svp_on = super::SVP_ON.load(Relaxed);
+    let hz = monitor_hz();
+    let movie = super::Player::current().and_then(super::Player::movie_fps);
+    let target = svp_on.then(crate::gamescope::startup_target).flatten();
+    let fps = game_mode_fps(svp_on, target, hz, movie);
+    let milli = fps.map_or(0, |f| (f * 1000.0).round() as u64);
+    if LAST_GAME_MODE.swap(milli, Relaxed) != milli {
+        match fps {
+            Some(fps) => tracing::info!(
+                "game mode: display rate {fps:.3} fps (SVP target {}, screen {} Hz, movie {movie:?})",
+                target.map_or_else(|| "unknown".to_owned(), |t| t.to_string()),
+                hz.map_or_else(|| "n/a".to_owned(), |h| format!("{h:.3}")),
+            ),
+            None => tracing::info!("game mode: display rate not set (SVP off)"),
+        }
+    }
+    fps
+}
+
 /// Tells mpv the display rate the setting (and env switch) ask for; the
 /// monitor's rate is the one last noted. No override clears a previous one.
+/// In Game Mode the rate follows SVP's output instead of the setting.
 pub fn apply_display_rate(player: super::Player) {
-    let chosen = Settings::load().ok().and_then(|s| s.video.display_rate);
-    let rate = DisplayRate::resolve(chosen, crate::gamescope::detected());
+    let settings = Settings::load().ok();
+    let rate = if crate::gamescope::detected() {
+        game_mode_rate().map_or(DisplayRate::Off, DisplayRate::Fixed)
+    } else {
+        let chosen = settings.and_then(|s| s.video.display_rate);
+        DisplayRate::resolve(chosen, false)
+    };
     let mhz = i32::try_from(MONITOR_MHZ.load(Relaxed)).unwrap_or(0);
     let fps = switches().display_fps_for(rate, mhz).unwrap_or(0.0);
     if let Err(e) = player.set_display_fps(fps) {
@@ -262,8 +322,41 @@ pub fn spawn_stats_thread(mpv: &'static Mpv) {
 
 #[cfg(test)]
 mod tests {
-    use super::{DisplayFps, Switches};
+    use super::{DisplayFps, Switches, game_mode_fps};
     use crate::config::DisplayRate;
+    use crate::svp_profile::Target;
+
+    #[test]
+    fn game_mode_rate_follows_svp_output() {
+        let hz = Some(119.88);
+        // SVP off: nothing.
+        assert_eq!(game_mode_fps(false, Some(Target::Screen), hz, None), None);
+        assert_eq!(
+            game_mode_fps(true, Some(Target::Screen), hz, None),
+            Some(119.88)
+        );
+        assert_eq!(
+            game_mode_fps(true, Some(Target::ScreenHalf), Some(120.0), None),
+            Some(60.0)
+        );
+        assert_eq!(
+            game_mode_fps(true, Some(Target::Fixed(90)), hz, None),
+            Some(90.0)
+        );
+        assert_eq!(
+            game_mode_fps(true, Some(Target::Movie5), hz, Some(24.0)),
+            Some(120.0)
+        );
+        // Not computable: the monitor's rate.
+        assert_eq!(game_mode_fps(true, Some(Target::Movie5), hz, None), hz);
+        assert_eq!(game_mode_fps(true, None, hz, Some(24.0)), hz);
+        // Monitor unknown: only rates that don't need it.
+        assert_eq!(game_mode_fps(true, Some(Target::Screen), None, None), None);
+        assert_eq!(
+            game_mode_fps(true, Some(Target::Fixed(60)), None, None),
+            Some(60.0)
+        );
+    }
 
     fn parse(pairs: &[(&str, &str)]) -> Switches {
         Switches::parse(|name| {

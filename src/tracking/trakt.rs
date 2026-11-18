@@ -34,6 +34,9 @@ const ID: ServiceId = ServiceId::Trakt;
 const REFRESH_MARGIN: i64 = 86_400;
 /// The watched shows are re-read when a flush finds the copy older than this.
 const LIST_FRESH: Duration = Duration::from_secs(120);
+/// Any read (the sync markers too) checks the copy again past this age, so
+/// plays from other devices or apps show up while the app stays open.
+const LIST_STALE: Duration = Duration::from_secs(30 * 60);
 const MAX_429_RETRIES: u32 = 2;
 const MAX_429_WAIT: Duration = Duration::from_secs(30);
 
@@ -415,11 +418,13 @@ pub(super) fn watched_shows_from_sync(body: &Value) -> WatchedShows {
             .and_then(|n| u32::try_from(n).ok())
     };
     let mut list = WatchedShows::default();
+    let mut with_seasons = 0usize;
     for entry in body.as_array().into_iter().flatten() {
         let Some(trakt_id) = entry.pointer("/show/ids/trakt").and_then(Value::as_u64) else {
             continue;
         };
         let reset_at = entry.get("reset_at").and_then(Value::as_str);
+        with_seasons += usize::from(entry.get("seasons").is_some_and(Value::is_array));
         let mut watched = Watched::new();
         for season in entry
             .get("seasons")
@@ -460,7 +465,34 @@ pub(super) fn watched_shows_from_sync(body: &Value) -> WatchedShows {
             list.imdb.insert(id.to_string(), index);
         }
     }
+    if !list.shows.is_empty() && with_seasons == 0 {
+        tracing::warn!("Trakt watched shows came without season progress");
+    }
     list
+}
+
+/// Most pages one list is read in (a guard against a wrong page count).
+const MAX_PAGES: u32 = 200;
+
+/// `X-Pagination-Page-Count`; 1 when missing or unreadable.
+fn page_count_from(headers: &reqwest::header::HeaderMap) -> u32 {
+    headers
+        .get("X-Pagination-Page-Count")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(1)
+}
+
+/// The array bodies of all pages as one array; a page that isn't an array is an error.
+fn merge_pages(pages: Vec<Value>) -> Result<Value> {
+    let mut all = Vec::new();
+    for page in pages {
+        match page {
+            Value::Array(items) => all.extend(items),
+            other => bail!("Trakt list page is not an array: {other}"),
+        }
+    }
+    Ok(Value::Array(all))
 }
 
 /// How long to wait after a 429: `Retry-After` in seconds (at least 1), else 2 s.
@@ -628,7 +660,8 @@ pub struct Trakt {
     /// The watched shows and when they were last checked against Trakt (`None`:
     /// loaded from the cache file unchecked); dropped after our own writes.
     shows: Mutex<Option<(Option<Instant>, Arc<WatchedShows>)>>,
-    /// Our own writes changed the list: the stored copy needs a check first.
+    /// Our own writes changed the list, or this run hasn't checked it yet:
+    /// the stored copy needs a check first.
     dirty: AtomicBool,
     /// The cache file's raw parts (the other parts live in `show_ids`, `numbering`).
     disk: Mutex<DiskState>,
@@ -667,7 +700,9 @@ impl Trakt {
             refresh_lock: tokio::sync::Mutex::new(()),
             show_ids: Mutex::new(HashMap::new()),
             shows: Mutex::new(None),
-            dirty: AtomicBool::new(false),
+            // The cache file may predate the last run's quit sync or plays
+            // from elsewhere: the first read checks it (one small call).
+            dirty: AtomicBool::new(true),
             disk: Mutex::new(DiskState::default()),
             numbering: Mutex::new(HashMap::new()),
             movies: Mutex::new(None),
@@ -756,6 +791,7 @@ impl Trakt {
         let show_ids = self.show_ids.lock().unwrap_or_else(|e| e.into_inner());
         let numbering = self.numbering.lock().unwrap_or_else(|e| e.into_inner());
         let snapshot = Snapshot {
+            shows_format: trakt_cache::SHOWS_FORMAT,
             activity: disk.activity.as_deref(),
             shows: disk.shows.as_ref(),
             show_ids: &show_ids,
@@ -955,7 +991,7 @@ impl Trakt {
             return Ok(movies);
         }
         let body = self
-            .get_json("sync/watched/movies")
+            .get_all_pages("sync/watched/movies", 250)
             .await?
             .unwrap_or(Value::Null);
         let movies = Arc::new(movies_from_watched(&body));
@@ -975,6 +1011,7 @@ impl Trakt {
         if let Some((checked, list)) = &cached
             && !dirty
             && !(fresh && checked.is_none_or(|at| at.elapsed() > LIST_FRESH))
+            && !checked.is_some_and(|at| at.elapsed() > LIST_STALE)
         {
             return Ok(list.clone());
         }
@@ -1005,7 +1042,7 @@ impl Trakt {
             return Ok(list);
         }
         let body = self
-            .get_json("sync/watched/shows")
+            .get_all_pages("sync/watched/shows?extended=progress", 100)
             .await?
             .unwrap_or(Value::Null);
         let list = Arc::new(watched_shows_from_sync(&body));
@@ -1041,6 +1078,40 @@ impl Trakt {
             return Ok(None);
         }
         Ok(Some(check(resp).await?.json().await?))
+    }
+
+    /// GET of a paginated list: every page (`page`/`limit` appended to the
+    /// path) joined into one array; `None` on a 404 for the first page.
+    async fn get_all_pages(&self, path_with_query: &str, limit: u32) -> Result<Option<Value>> {
+        let separator = if path_with_query.contains('?') {
+            '&'
+        } else {
+            '?'
+        };
+        let mut pages = Vec::new();
+        let mut page_count = 1;
+        let mut page = 1;
+        while page <= page_count {
+            if page > MAX_PAGES {
+                tracing::warn!("Trakt {path_with_query}: stopped after {MAX_PAGES} pages");
+                break;
+            }
+            let url = format!("{API_URL}/{path_with_query}{separator}page={page}&limit={limit}");
+            let resp = self.send(|| http().get(&url)).await?;
+            if resp.status().as_u16() == 404 && page == 1 {
+                return Ok(None);
+            }
+            let resp = check(resp).await?;
+            if page == 1 {
+                page_count = page_count_from(resp.headers());
+            }
+            pages.push(resp.json().await?);
+            page += 1;
+        }
+        let merged = merge_pages(pages)?;
+        let items = merged.as_array().map_or(0, Vec::len);
+        tracing::debug!("Trakt {path_with_query}: {} pages, {items} items", page - 1);
+        Ok(Some(merged))
     }
 
     /// The show's Trakt id by its tvdb/tmdb/imdb id (cached on disk; a miss for the session).
@@ -1736,6 +1807,40 @@ mod tests {
         );
         assert_eq!(found(Some(1), None, None), None);
         assert_eq!(found(Some(999), None, Some("tt9")), None);
+    }
+
+    #[test]
+    fn progress_shaped_entry_marks_episodes_watched() {
+        let body = json!([{
+            "plays": 3, "last_watched_at": "2025-01-01T00:00:00.000Z",
+            "show": {"title": "X", "ids": {"trakt": 5, "tvdb": 50}},
+            "seasons": [{"number": 2, "episodes": [
+                {"number": 4, "plays": 1, "last_watched_at": "2025-01-01T00:00:00.000Z"}]}]
+        }]);
+        let list = watched_shows_from_sync(&body);
+        let (id, watched) = list
+            .find(&ShowIds {
+                tvdb: Some(50),
+                ..ShowIds::default()
+            })
+            .expect("show found");
+        assert_eq!(id, 5);
+        assert_eq!(*watched, Watched::from([(2, 4)]));
+    }
+
+    #[test]
+    fn pages_merge_and_count_header() {
+        let merged = merge_pages(vec![json!([1, 2]), json!([3])]).unwrap();
+        assert_eq!(merged, json!([1, 2, 3]));
+        assert_eq!(merge_pages(vec![]).unwrap(), json!([]));
+        assert!(merge_pages(vec![json!([1]), json!({"error": 1})]).is_err());
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        assert_eq!(page_count_from(&headers), 1);
+        headers.insert("X-Pagination-Page-Count", "7".parse().unwrap());
+        assert_eq!(page_count_from(&headers), 7);
+        headers.insert("X-Pagination-Page-Count", "x".parse().unwrap());
+        assert_eq!(page_count_from(&headers), 1);
     }
 
     #[test]

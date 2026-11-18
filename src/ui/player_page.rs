@@ -1456,6 +1456,8 @@ impl Inner {
                     session.apply_initial_tracks();
                 }
                 self.keep_screen_on(!self.player.is_paused());
+                // Game Mode's display rate depends on the video's frame rate.
+                crate::player::diag::apply_display_rate(self.player);
                 // Paused or not: notifications wait until the player closes.
                 #[cfg(target_os = "linux")]
                 crate::dnd::set(self.session().is_some_and(|s| !s.item.is_audio()));

@@ -90,6 +90,17 @@ pub(super) fn group() -> adw::PreferencesGroup {
     connect_choice(&rows.target, Target::choices(), &loading, |o, v| {
         o.target = v
     });
+    if crate::gamescope::detected() {
+        // After the choice is saved (connected before this).
+        let loading = loading.clone();
+        let missing = snapshot.target.is_missing();
+        rows.target.connect_selected_notify(move |row| {
+            if loading.get() {
+                return;
+            }
+            show_pacing_hint(row, missing);
+        });
+    }
     connect_choice(&rows.smoothness, Smoothness::choices(), &loading, |o, v| {
         o.smoothness = v
     });
@@ -286,6 +297,9 @@ fn show(rows: &Rows, snapshot: &Snapshot, chosen: &Overrides, loading: &Cell<boo
         edit,
         "",
     );
+    if crate::gamescope::detected() {
+        show_pacing_hint(&rows.target, snapshot.target.is_missing());
+    }
     show_choice(
         &rows.smoothness,
         &Smoothness::choices(),
@@ -311,6 +325,52 @@ fn show(rows: &Rows, snapshot: &Snapshot, chosen: &Overrides, loading: &Cell<boo
         "",
     );
     loading.set(false);
+}
+
+/// Game Mode: tells what the video is paced to under the target row, and
+/// whether a restart is needed for the no-vsync drawing to match.
+fn show_pacing_hint(row: &adw::ComboRow, missing: bool) {
+    let target = svp_profile::effective_target(&Settings::load().unwrap_or_default());
+    let hz = crate::player::diag::monitor_hz();
+    // Short: a long subtitle squeezes the chosen value to "1…".
+    let screen = hz.map_or_else(String::new, |hz| format!(" · screen {} Hz", fps_text(hz)));
+    let mut hint = match target {
+        None => "Plays at SVP's frame rate".to_string(),
+        Some(target) => match target.movie_times() {
+            Some(times) => format!(
+                "Plays at {} fps for 24 fps films{screen}",
+                fps_text(23.976 * times)
+            ),
+            None => match svp_profile::output_fps(target, hz.unwrap_or(0.0), None)
+                .filter(|fps| *fps > 0.0)
+            {
+                Some(fps) => format!("Plays at {} fps{screen}", fps_text(fps)),
+                None => "Plays at SVP's frame rate".to_string(),
+            },
+        },
+    };
+    // SVP and the display rate keep the startup target until a restart.
+    if target != crate::gamescope::startup_target()
+        || crate::gamescope::needs_no_vsync(target) != crate::gamescope::no_vsync_applied()
+    {
+        hint.push_str(" · restart to apply");
+    }
+    if missing {
+        hint = format!("{MISSING_NOTE}. {hint}");
+    }
+    // The row shows its subtitle as plain text: escaping would show `&apos;`.
+    row.set_subtitle(&hint);
+}
+
+/// A rate without needless decimals: 75, 119.9, 59.94.
+fn fps_text(fps: f64) -> String {
+    if (fps - fps.round()).abs() < 0.005 {
+        format!("{fps:.0}")
+    } else if (fps * 10.0 - (fps * 10.0).round()).abs() < 0.05 {
+        format!("{fps:.1}")
+    } else {
+        format!("{fps:.2}")
+    }
 }
 
 fn show_switch(

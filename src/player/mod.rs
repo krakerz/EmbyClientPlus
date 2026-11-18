@@ -276,6 +276,7 @@ const VIDEO_PROPERTIES: [&str; 14] = [
     "deinterlace",
     "hwdec",
 ];
+static CURRENT: OnceLock<Player> = OnceLock::new();
 static STARTED_VIDEO: OnceLock<Vec<(&'static str, String)>> = OnceLock::new();
 
 thread_local! {
@@ -345,7 +346,22 @@ impl Player {
         diag::switches();
         spawn_event_thread(mpv);
         diag::spawn_stats_thread(mpv);
-        Ok(Self { mpv })
+        let player = Self { mpv };
+        let _ = CURRENT.set(player);
+        Ok(player)
+    }
+
+    /// The app's player, once created.
+    pub fn current() -> Option<Self> {
+        CURRENT.get().copied()
+    }
+
+    /// The video's frame rate: mpv's `container-fps`, else the estimate the
+    /// filters see. `None` before a file is playing.
+    pub fn movie_fps(self) -> Option<f64> {
+        ["container-fps", "estimated-vf-fps"]
+            .into_iter()
+            .find_map(|name| self.mpv.get_property::<f64>(name).ok().filter(|f| *f > 0.0))
     }
 
     pub(crate) fn mpv(self) -> &'static Mpv {
@@ -575,6 +591,8 @@ impl Player {
     /// filter SVP already added; turning it on lets SVP Manager find us.
     pub fn set_svp(self, socket: &str, enabled: bool) -> Result<()> {
         SVP_ON.store(enabled, std::sync::atomic::Ordering::Relaxed);
+        // Game Mode's display rate follows SVP's output (see `diag`).
+        diag::apply_display_rate(self);
         self.update_video_sync()?;
         if enabled {
             self.switch_hwdec(HWDEC_DIRECT, HWDEC_COPY);

@@ -80,6 +80,19 @@ impl Target {
         }
     }
 
+    /// N of a "Movie × N" target.
+    pub fn movie_times(self) -> Option<f64> {
+        match self {
+            Self::Movie2 => Some(2.0),
+            Self::Movie2Half => Some(2.5),
+            Self::Movie3 => Some(3.0),
+            Self::Movie4 => Some(4.0),
+            Self::Movie5 => Some(5.0),
+            Self::Movie6 => Some(6.0),
+            Self::Screen | Self::ScreenHalf | Self::ScreenThird | Self::Fixed(_) => None,
+        }
+    }
+
     /// The number as SVP writes it.
     fn svp_value(self) -> String {
         match self {
@@ -104,6 +117,36 @@ impl Target {
                     .map(Self::Fixed)
             })
     }
+}
+
+/// The frame rate SVP outputs for `target`, or `None` when it can't be told:
+/// a Movie × N target needs the video's own frame rate.
+pub fn output_fps(target: Target, screen_hz: f64, movie_fps: Option<f64>) -> Option<f64> {
+    match target {
+        Target::Screen => Some(screen_hz),
+        Target::ScreenHalf => Some(screen_hz / 2.0),
+        Target::ScreenThird => Some(screen_hz / 3.0),
+        Target::Fixed(fps) => Some(f64::from(fps)),
+        movie => {
+            let times = movie.movie_times()?;
+            movie_fps.filter(|fps| *fps > 0.0).map(|fps| fps * times)
+        }
+    }
+}
+
+/// The target SVP interpolates to: the app's override when it's on and sets
+/// one, else the Automatic profile's in SVP's profiles.cfg. `None` when
+/// neither is known.
+pub fn effective_target(settings: &Settings) -> Option<Target> {
+    let text = profiles_path().and_then(|path| std::fs::read_to_string(path).ok());
+    effective_target_in(&settings.frame_gen.svp_override, text.as_deref())
+}
+
+fn effective_target_in(overrides: &Overrides, profiles: Option<&str>) -> Option<Target> {
+    overrides
+        .target
+        .filter(|_| overrides.enabled)
+        .or_else(|| read(profiles?).ok()?.target.known())
 }
 
 impl fmt::Display for Target {
@@ -744,6 +787,44 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n")
             + "\n"
+    }
+
+    #[test]
+    fn output_fps_follows_the_target() {
+        let hz = 119.88;
+        assert_eq!(output_fps(Target::Screen, hz, None), Some(hz));
+        assert_eq!(output_fps(Target::ScreenHalf, 120.0, None), Some(60.0));
+        assert_eq!(output_fps(Target::ScreenThird, 120.0, None), Some(40.0));
+        assert_eq!(output_fps(Target::Fixed(90), hz, None), Some(90.0));
+        assert_eq!(output_fps(Target::Movie2, hz, Some(24.0)), Some(48.0));
+        assert_eq!(output_fps(Target::Movie2Half, hz, Some(24.0)), Some(60.0));
+        assert_eq!(output_fps(Target::Movie5, hz, Some(24.0)), Some(120.0));
+        assert_eq!(output_fps(Target::Movie3, hz, None), None);
+        assert_eq!(output_fps(Target::Movie3, hz, Some(0.0)), None);
+    }
+
+    #[test]
+    fn effective_target_prefers_an_enabled_override() {
+        let profile = effective_target_in(&Overrides::default(), Some(SAMPLE));
+        assert_eq!(profile, Some(Target::Fixed(165)));
+        let mut overrides = Overrides {
+            target: Some(Target::Movie4),
+            ..Default::default()
+        };
+        // Off: the override's target is ignored.
+        assert_eq!(
+            effective_target_in(&overrides, Some(SAMPLE)),
+            Some(Target::Fixed(165))
+        );
+        overrides.enabled = true;
+        assert_eq!(
+            effective_target_in(&overrides, Some(SAMPLE)),
+            Some(Target::Movie4)
+        );
+        assert_eq!(effective_target_in(&overrides, None), Some(Target::Movie4));
+        overrides.target = None;
+        assert_eq!(effective_target_in(&overrides, None), None);
+        assert_eq!(effective_target_in(&overrides, Some("junk")), None);
     }
 
     #[test]

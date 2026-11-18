@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [1.36.0] — 2026-11-18
+
+### Changed
+- Linux: the player is now built on mpv 0.42.0 (was 0.41.0)
+- Steam Game Mode: the video's display rate now always matches SVP's output frame rate, so mismatches can't cause microstutter; the separate Refresh rate setting is hidden there
+- Steam Game Mode: Draw past 60 fps is now automatic (on when SVP's target can exceed 60 fps); the switch is gone
+
+### Fixed
+- Steam Game Mode: playback no longer stutters while the player controls are open or navigated when drawing past 60 fps (animations are off in that mode)
+- Kitsu tracking now works for shows matched only on AniList (no MyAnimeList ID)
+- Trakt markers now show plays sent by the sync on quit, the library sync, or other devices and apps: the stored watched list is checked once per start and again after 30 minutes
+- Linux: building the app's libmpv works again after Arch's libplacebo update, and a version bump in `scripts/build-libmpv.sh` now moves an existing mpv checkout to the new tag
+- Trakt: watched markers and the duplicate check work again with Trakt's paginated watched lists (all shows are read, with their watched episodes)
+
 ## [1.35.0] — 2026-11-14
 
 ### Added

@@ -265,7 +265,33 @@ fn shim_loaded_fn() -> Option<LoadedFn> {
 
 #[cfg(target_os = "linux")]
 fn shim_present() -> bool {
+    preload_shim();
     shim_loaded_fn().is_some()
+}
+
+/// mpv 0.42+ no longer links VSScript: its vapoursynth filter dlopens
+/// `libvsscript.so` when SVP first attaches. Load the stand-in now, from the
+/// same search path (our rpath, or the launcher's LD_LIBRARY_PATH), so the
+/// log and Preferences see it from the start; mpv's own dlopen then gets
+/// this same copy. Anything else under that name is closed again and left
+/// to mpv.
+#[cfg(target_os = "linux")]
+fn preload_shim() {
+    if shim_loaded_fn().is_some() {
+        return;
+    }
+    // SAFETY: a NUL-terminated name; the stand-in has no initialisers that
+    // read anything but the environment, which is final by now.
+    let handle = unsafe {
+        libc::dlopen(
+            c"libvsscript.so".as_ptr(),
+            libc::RTLD_NOW | libc::RTLD_GLOBAL,
+        )
+    };
+    if !handle.is_null() && shim_loaded_fn().is_none() {
+        // SAFETY: the handle we just opened, not used afterwards.
+        unsafe { libc::dlclose(handle) };
+    }
 }
 
 /// The VSScript library the stand-in loaded, once SVP's filter has run in

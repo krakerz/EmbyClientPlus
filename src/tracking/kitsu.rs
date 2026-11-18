@@ -17,8 +17,8 @@ use super::mal::plan;
 use super::rules::{self, Entry, ListStatus, Plan};
 use super::tokens::{self, Tokens};
 use super::{
-    Account, BoxFuture, EntryInfo, EntryKey, LoggedOut, LoginInput, Outcome, ServiceId,
-    TrackingService, Update, http,
+    Account, BoxFuture, EntryInfo, EntryKey, KITSU_ANILIST_TAG, LoggedOut, LoginInput, Outcome,
+    ServiceId, TrackingService, Update, http,
 };
 
 pub const API_URL: &str = "https://kitsu.app/api/edge";
@@ -305,9 +305,13 @@ impl Kitsu {
     }
 
     /// The Kitsu anime of a MAL id, else of the AniList id of the same show
-    /// (cached under both; misses aren't).
-    async fn kitsu_anime(&self, mal: u32, anilist: Option<u32>) -> Result<Option<KitsuAnime>> {
-        let sources: Vec<(&'static str, u32)> = [(MAL_SITE, Some(mal)), (ANILIST_SITE, anilist)]
+    /// (cached under every id given; misses aren't).
+    async fn kitsu_anime(
+        &self,
+        mal: Option<u32>,
+        anilist: Option<u32>,
+    ) -> Result<Option<KitsuAnime>> {
+        let sources: Vec<(&'static str, u32)> = [(MAL_SITE, mal), (ANILIST_SITE, anilist)]
             .into_iter()
             .filter_map(|(site, id)| Some((site, id?)))
             .collect();
@@ -335,8 +339,11 @@ impl Kitsu {
                 .await?;
             if let Some(found) = parse_mapping(&body) {
                 let mut cache = self.kitsu_ids.lock().unwrap_or_else(|e| e.into_inner());
-                cache.insert((site, id), found.clone());
-                cache.insert((MAL_SITE, mal), found.clone());
+                for source in [(MAL_SITE, mal), (ANILIST_SITE, anilist)] {
+                    if let (site, Some(id)) = source {
+                        cache.insert((site, id), found.clone());
+                    }
+                }
                 return Ok(Some(found));
             }
         }
@@ -437,7 +444,13 @@ impl TrackingService for Kitsu {
             };
             let mut found = HashMap::new();
             for key in keys {
-                let Some(anime) = self.kitsu_anime(key.id, key.anilist).await? else {
+                let looked_up = if key.id & KITSU_ANILIST_TAG != 0 {
+                    self.kitsu_anime(None, Some(key.id & !KITSU_ANILIST_TAG))
+                        .await?
+                } else {
+                    self.kitsu_anime(Some(key.id), key.anilist).await?
+                };
+                let Some(anime) = looked_up else {
                     continue;
                 };
                 let existing = self.read(&user, &anime.id).await?;
@@ -465,15 +478,18 @@ impl TrackingService for Kitsu {
             else {
                 return Ok(Outcome::Unchanged);
             };
-            let Some(t) = target.mal else {
-                tracing::debug!("Kitsu: no MAL target in the match");
+            let Some(t) = target.mal.or(target.anilist) else {
+                tracing::debug!("Kitsu: no MAL or AniList target in the match");
                 return Ok(Outcome::Unchanged);
             };
             let Some(user) = self.snapshot().and_then(|tk| tk.user_id) else {
                 self.drop_tokens();
                 return Err(LoggedOut(ID).into());
             };
-            let Some(anime) = self.kitsu_anime(t.id, target.anilist.map(|a| a.id)).await? else {
+            let Some(anime) = self
+                .kitsu_anime(target.mal.map(|m| m.id), target.anilist.map(|a| a.id))
+                .await?
+            else {
                 return Ok(Outcome::Skipped("not on Kitsu".to_string()));
             };
             if t.extrapolated
