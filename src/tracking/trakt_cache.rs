@@ -11,9 +11,15 @@ use serde_json::Value;
 
 const FILE_NAME: &str = "trakt-cache.json";
 
+/// Format of the stored watched shows. 1 (unversioned) held only the first
+/// page of Trakt's now paginated list, without season progress; 2 holds all
+/// pages with `extended=progress`.
+pub(super) const SHOWS_FORMAT: u32 = 2;
+
 /// The persisted data, borrowed for writing (same shape as [`Disk`]).
 #[derive(Debug, Serialize)]
 pub(super) struct Snapshot<'a, E> {
+    pub shows_format: u32,
     pub activity: Option<&'a str>,
     pub shows: Option<&'a Value>,
     pub show_ids: &'a HashMap<String, Option<u64>>,
@@ -24,6 +30,9 @@ pub(super) struct Snapshot<'a, E> {
 #[derive(Debug, Deserialize)]
 #[serde(bound(deserialize = "E: Deserialize<'de>"))]
 pub(super) struct Disk<E> {
+    /// [`SHOWS_FORMAT`] the `shows` were stored with (0: written before versioning).
+    #[serde(default)]
+    pub shows_format: u32,
     /// `last_activities` fingerprint the watched shows were read at.
     #[serde(default)]
     pub activity: Option<String>,
@@ -41,6 +50,7 @@ pub(super) struct Disk<E> {
 impl<E> Default for Disk<E> {
     fn default() -> Self {
         Disk {
+            shows_format: SHOWS_FORMAT,
             activity: None,
             shows: None,
             show_ids: HashMap::new(),
@@ -54,7 +64,9 @@ pub(super) fn path() -> Option<PathBuf> {
     crate::config::cache_dir().map(|dir| dir.join(FILE_NAME))
 }
 
-/// Reads the file; a missing or unreadable one is an empty cache.
+/// Reads the file; a missing or unreadable one is an empty cache. Shows
+/// (and their fingerprint) stored in an older format are dropped so they are
+/// downloaded again; the ids and numbering stay.
 pub(super) fn load<E: DeserializeOwned>(path: &Path) -> Disk<E> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
@@ -65,10 +77,16 @@ pub(super) fn load<E: DeserializeOwned>(path: &Path) -> Disk<E> {
             return Disk::default();
         }
     };
-    serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+    let mut disk: Disk<E> = serde_json::from_slice(&bytes).unwrap_or_else(|e| {
         tracing::warn!("Trakt cache ignored: {e}");
         Disk::default()
-    })
+    });
+    if disk.shows_format != SHOWS_FORMAT {
+        disk.shows = None;
+        disk.activity = None;
+        disk.shows_format = SHOWS_FORMAT;
+    }
+    disk
 }
 
 /// Writes the file atomically, creating the folder.
@@ -131,6 +149,7 @@ mod tests {
     fn round_trip() {
         let path = temp_file("round");
         let disk: Disk<Vec<u32>> = Disk {
+            shows_format: SHOWS_FORMAT,
             activity: Some("a|b".to_string()),
             shows: Some(json!([{"show": {"ids": {"trakt": 1}}}])),
             show_ids: HashMap::from([
@@ -140,6 +159,7 @@ mod tests {
             numbering: HashMap::from([(5, vec![1, 2])]),
         };
         let snapshot = Snapshot {
+            shows_format: SHOWS_FORMAT,
             activity: disk.activity.as_deref(),
             shows: disk.shows.as_ref(),
             show_ids: &disk.show_ids,
@@ -151,6 +171,33 @@ mod tests {
         assert_eq!(back.shows, disk.shows);
         assert_eq!(back.show_ids, disk.show_ids);
         assert_eq!(back.numbering, disk.numbering);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn old_format_drops_shows_but_keeps_ids() {
+        let path = temp_file("format");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let old = json!({
+            "activity": "a|b",
+            "shows": [{"show": {"ids": {"trakt": 1}}}],
+            "show_ids": {"tvdb:1": 5},
+            "numbering": {"5": [1, 2]},
+        });
+        std::fs::write(&path, old.to_string()).unwrap();
+        let back: Disk<Vec<u32>> = load(&path);
+        assert!(back.shows.is_none() && back.activity.is_none());
+        assert_eq!(back.show_ids.get("tvdb:1"), Some(&Some(5)));
+        assert_eq!(back.numbering.get(&5), Some(&vec![1, 2]));
+
+        let current = json!({
+            "shows_format": SHOWS_FORMAT,
+            "activity": "a|b",
+            "shows": [],
+        });
+        std::fs::write(&path, current.to_string()).unwrap();
+        let kept: Disk<Vec<u32>> = load(&path);
+        assert!(kept.shows.is_some() && kept.activity.is_some());
         let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
     }
 

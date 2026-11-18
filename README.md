@@ -60,6 +60,10 @@ scripts/build-libmpv.sh && cargo build --release && target/release/embyclientplu
 EMBYCLIENTPLUS_PORTABLE=1 cargo build --release && packaging/package.sh   # release packages → dist/
 ```
 
+`scripts/build-libmpv.sh` builds mpv 0.42.0 into `third_party/`. Run it again after your distribution
+updates FFmpeg or libplacebo (a "Could not find dependency: libplacebo.so.N" error when packaging
+means the old build is linked against a library that's gone).
+
 Windows (MSYS2 UCRT64) and macOS (Homebrew) use their packaged `mpv`; see the `windows` and
 `macos` jobs in `.github/workflows/build.yml` and `packaging/package-{windows,macos}.sh`.
 
@@ -84,6 +88,10 @@ menu → **Preferences**; your account's settings are on **Profile** (the avatar
 - **Steam Game Mode:** add the AppImage (or `~/.local/bin/embyclientplus`) as a non-Steam game with
   the **Gamepad** layout. Artwork is in `EmbyClientPlus-<version>-steam-library.zip` on the
   release page (and the archive's `steam-library/`); set it from the shortcut's library page.
+  In Game Mode the display rate follows SVP's output frame rate and drawing past 60 fps turns on by
+  itself when SVP's target can exceed 60 fps; pick the target in Preferences → SVP (restart the app
+  after changing it). While drawing past 60 fps, the interface's animations are off so they can't
+  take the GPU from playback.
 
 ### Trakt: use your own Client ID
 
@@ -138,13 +146,14 @@ embyclientplus --help | --version
 **SVP doesn't kick in?** The SVP button shows why: green interpolating, amber waiting for SVP
 Manager, red SVP Manager not running, grey SVP not found.
 
-**Choppy playback or dropped frames?** The log carries a timing line every 10 seconds while playing.
+**Choppy playback or dropped frames?** The log notes the timing setup at each playback start; with
+`EMBYCLIENTPLUS_STATS=1` it also carries a timing line every 10 seconds while playing.
 For troubleshooting, these environment variables change the timing setup (read at startup):
 
 - `EMBYCLIENTPLUS_VIDEO_SYNC=<mode>`: use this mpv `video-sync` mode instead of the app's choice (e.g. `audio`).
 - `EMBYCLIENTPLUS_DISPLAY_FPS=<number>|off`: use this refresh rate for display timing, or `off` to set none.
-  By default the app starts with the screen's rate and follows the rate frames are actually shown at
-  when the two differ; this switch makes the value final.
+  By default the app uses Preferences → General → Playback → Display refresh rate (in Steam Game Mode: SVP's output
+  frame rate); this switch overrides both.
 - `EMBYCLIENTPLUS_REPORT_SWAP=0`: stop reporting presented frames to mpv (also turns that check off).
 
 **Where are settings and logs?** `config.toml` and `logs/` are in `~/.config/embyclientplus/`

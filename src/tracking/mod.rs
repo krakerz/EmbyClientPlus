@@ -160,7 +160,7 @@ impl TraktItem {
 }
 
 pub enum Update {
-    /// MAL / AniList / Kitsu: the resolver's match (Kitsu maps the MAL id).
+    /// MAL / AniList / Kitsu: the resolver's match (Kitsu goes by the MAL id, else the AniList id).
     Progress {
         target: resolve::Match,
         direction: Direction,
@@ -246,6 +246,11 @@ pub struct EntryInfo {
     pub airing: bool,
 }
 
+/// Set on the id of a Kitsu target that comes from AniList (the show has no
+/// MAL id). MAL and AniList ids share the `u32` key space of the entry maps,
+/// so the tag keeps the two namespaces from colliding.
+pub const KITSU_ANILIST_TAG: u32 = 1 << 31;
+
 /// An entry to read for the sync markers: the id the match gives for the
 /// service, and the AniList id of the same show (Kitsu looks it up when it
 /// has no MAL mapping).
@@ -267,7 +272,7 @@ pub trait TrackingService: Send + Sync {
     fn refresh(&self) -> BoxFuture<'_, Result<()>>;
     /// Updates the service doesn't handle return `Outcome::Unchanged`.
     fn update<'a>(&'a self, update: &'a Update) -> BoxFuture<'a, Result<Outcome>>;
-    /// MAL / AniList / Kitsu (by MAL id): the entries with these ids, for the
+    /// MAL / AniList / Kitsu (by MAL id, else AniList's tagged one): the entries with these ids, for the
     /// sync markers, keyed by `EntryKey::id`. Ids the service doesn't know
     /// are left out.
     fn entries<'a>(

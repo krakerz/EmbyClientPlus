@@ -1210,7 +1210,11 @@ const RATE_PRESETS_AT: usize = 2;
 /// "Display refresh rate", plus a Hz row that shows only for Custom.
 fn add_display_rate_rows(group: &adw::PreferencesGroup, settings: &Settings) {
     use crate::config::DisplayRate;
-    let current = DisplayRate::resolve(settings.video.display_rate, crate::gamescope::detected());
+    // Game Mode ties the display rate to SVP's output (see `player::diag`).
+    if crate::gamescope::detected() {
+        return;
+    }
+    let current = DisplayRate::resolve(settings.video.display_rate, false);
     let preset_labels: Vec<String> = DisplayRate::PRESETS
         .iter()
         .map(|hz| format!("{hz} Hz"))
@@ -1228,9 +1232,7 @@ fn add_display_rate_rows(group: &adw::PreferencesGroup, settings: &Settings) {
             .map_or(custom_at, |i| i + RATE_PRESETS_AT),
     };
     let row = choice_row("Display refresh rate", &labels, selected);
-    row.set_subtitle(
-        "Tells the video player how often the screen shows a frame. In Steam Game Mode with a frame limit, pick the limit or Don't tell the player.",
-    );
+    row.set_subtitle("Tells the video player how often the screen shows a frame.");
     let custom = adw::SpinRow::with_range(DisplayRate::MIN_HZ, DisplayRate::MAX_HZ, 1.0);
     custom.set_title("Custom refresh rate (Hz)");
     custom.set_value(match current {
@@ -1261,20 +1263,6 @@ fn add_display_rate_rows(group: &adw::PreferencesGroup, settings: &Settings) {
     });
     group.add(&row);
     group.add(&custom);
-    if crate::gamescope::detected() {
-        let no_vsync = adw::SwitchRow::builder()
-            .title("Draw past 60 fps")
-            .subtitle(
-                "Under gamescope the app otherwise draws at most 60 frames a second, even with Steam's frame limit off. For 90–120 fps video; uses more power. Restart the app to apply.",
-            )
-            .active(settings.video.game_mode_no_vsync)
-            .build();
-        no_vsync.connect_active_notify(|row| {
-            let on = row.is_active();
-            save(|s| s.video.game_mode_no_vsync = on);
-        });
-        group.add(&no_vsync);
-    }
 }
 
 fn svp_folder_row(parent: &gtk::Widget) -> adw::ActionRow {

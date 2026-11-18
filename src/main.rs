@@ -78,6 +78,7 @@ fn main() -> glib::ExitCode {
     gamescope::prepare_environment();
     svp::expose_vapoursynth();
     logging::init();
+    gamescope::log_startup();
     svp::log_vapoursynth();
     update::clean_up_previous();
     let server = config::Settings::load().unwrap_or_default().server;
@@ -114,6 +115,7 @@ fn main() -> glib::ExitCode {
             return;
         }
         ui::icons::install();
+        gamescope::calm_animations();
         ui::app_menu::install(app, player_only.is_none());
         let result = match &player_only {
             Some(target) => player::Player::new(mpv_config_dir().as_deref()).map(|player| {
