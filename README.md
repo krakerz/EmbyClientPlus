@@ -131,7 +131,7 @@ current screen's buttons.
 | F / F11 | Fullscreen | Select | Search | Skip intro/credits |
 | Q | Skip intro/credits | Start | Preferences | On-screen controls |
 | Esc | Leave fullscreen, then the player | D-pad | Move | Seek (←/→), volume (↑/↓) |
-| Ctrl+F / / | Search (browsing only) |  |  |  |
+| Ctrl+F (Cmd+F on macOS) or / | Search (outside the player) |  |  |  |
 |  |  | Right stick | Scroll the row (←/→) or page (↑/↓) under the cursor | Scrub along the bar (seeks 2 s after you let go) |
 
 ### Command line
