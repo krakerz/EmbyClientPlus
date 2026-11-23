@@ -396,6 +396,12 @@ const SVP_WAIT_MAX: std::time::Duration = std::time::Duration::from_secs(10);
 pub fn build(app: &adw::Application, player: Player) -> adw::ApplicationWindow {
     load_css();
     images::prune_disk_cache();
+    crate::emby::browse::set_image_quality(
+        crate::config::Settings::load()
+            .unwrap_or_default()
+            .storage
+            .image_quality,
+    );
     let stack = gtk::Stack::builder()
         .transition_type(gtk::StackTransitionType::Crossfade)
         .build();
@@ -553,6 +559,8 @@ pub fn build(app: &adw::Application, player: Player) -> adw::ApplicationWindow {
         }
     });
     window.add_controller(clicked);
+    super::drag_scroll::attach(&window);
+    attach_search_key(&window, &state);
     window.connect_visible_dialog_notify({
         let state = Rc::downgrade(&state);
         move |_| {
@@ -795,4 +803,46 @@ pub(super) fn load_css() {
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
     }
+}
+
+/// The Search shortcut (Preferences → Keyboard) on every browsing page. On
+/// the window in the capture phase, like the player's keys, so it works
+/// wherever the focus is; the player keeps its own keys.
+fn attach_search_key(window: &adw::ApplicationWindow, state: &Rc<State>) {
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    keys.connect_key_pressed({
+        let state = Rc::downgrade(state);
+        let window = window.downgrade();
+        move |_, key, _, modifiers| {
+            let (Some(state), Some(window)) = (state.upgrade(), window.upgrade()) else {
+                return glib::Propagation::Proceed;
+            };
+            let Some(name) = crate::keys::key_press_name(key, modifiers) else {
+                return glib::Propagation::Proceed;
+            };
+            if crate::keys::bindings().action_for(&name) != Some(crate::keys::KeyAction::Search) {
+                return glib::Propagation::Proceed;
+            }
+            let ui = state.ui.borrow().clone();
+            let Some(ui) = ui.filter(|ui| !ui.player_visible()) else {
+                return glib::Propagation::Proceed;
+            };
+            if window.visible_dialog().is_some() {
+                return glib::Propagation::Proceed;
+            }
+            // A bare key is the user typing; only a Ctrl/Alt/Super combo
+            // may fire from inside a text field.
+            let typing = gtk::prelude::GtkWindowExt::focus(&window)
+                .is_some_and(|focus| focus.is::<gtk::Editable>() || focus.is::<gtk::TextView>());
+            if typing && !name.starts_with('<') {
+                return glib::Propagation::Proceed;
+            }
+            super::legend::keyboard_used();
+            ui.start_search();
+            state.refresh_legend();
+            glib::Propagation::Stop
+        }
+    });
+    window.add_controller(keys);
 }

@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [1.38.0] — 2026-11-23
+
+### Added
+- Touch: a tap on the video shows or hides the player controls; a double tap on the left or right side (40% of the width each) seeks 10 s back or forward, in the middle strip it toggles fullscreen (Steam Game Mode included)
+- Preferences → Storage: choose how big the image cache may grow on disk (256 MB to 10 GB, default 2 GB) and in memory (128 MB to 2 GB, default 256 MB); a smaller size frees the space right away
+- Preferences → Storage: artwork quality (60 to 100, or follow the server's own setting); the default goes back to 90 for sharper posters, so artwork downloads once more after updating
+- TV libraries have an Episodes tab listing every episode, newest first, sortable by name, date added, air date or series
+- Keyboard: Ctrl+F (Cmd+F on macOS) or / opens search from any page outside the player; remappable in Preferences → Keyboard, which now also accepts Ctrl/Alt combinations
+
+### Changed
+- Every scrolling list and page, Preferences and other dialogs and menus included, can now be dragged with the mouse (or a finger in Steam Game Mode), up/down and sideways, and keeps gliding briefly after you let go (was: Home rows only, sideways)
+- Search also finds movies, shows and episodes whose title contains the text in the middle of a word (e.g. "aru" finds "Haruhi")
+
 ## [1.37.0] — 2026-11-18
 
 ### Changed

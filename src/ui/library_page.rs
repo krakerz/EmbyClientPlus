@@ -22,7 +22,7 @@ const RECOMMENDATION_ITEMS: usize = 12;
 
 /// Sort choices: label, Emby `SortBy`, and whether it defaults to
 /// descending (newest/highest first).
-const SORTS: [(&str, &str, bool); 7] = [
+const SORTS: [(&str, &str, bool); 8] = [
     ("Name", "SortName", false),
     ("Date Added", "DateCreated", true),
     ("Last Episode Added", LAST_EPISODE_ADDED, true),
@@ -30,7 +30,46 @@ const SORTS: [(&str, &str, bool); 7] = [
     ("Rating", "CommunityRating", true),
     ("Runtime", "Runtime", false),
     ("Random", "Random", false),
+    ("Series", SERIES_ORDER, false),
 ];
+
+/// Episodes only: grouped by show, then in season and episode order.
+const SERIES_ORDER: &str = "SeriesSortName,ParentIndexNumber,IndexNumber";
+
+/// The sorts a grid of `include_types` offers. Episodes get a short list
+/// (their air date is called "Air Date"); only series have a last episode
+/// added; only episodes can be ordered by series.
+fn sorts_for(include_types: Option<&str>) -> Vec<(&'static str, &'static str, bool)> {
+    if include_types == Some("Episode") {
+        return SORTS
+            .into_iter()
+            .filter(|(_, s, _)| {
+                matches!(
+                    *s,
+                    "SortName" | "DateCreated" | "PremiereDate" | SERIES_ORDER
+                )
+            })
+            .map(|(label, s, desc)| {
+                if s == "PremiereDate" {
+                    ("Air Date", s, desc)
+                } else {
+                    (label, s, desc)
+                }
+            })
+            .collect();
+    }
+    let only_series = include_types == Some("Series");
+    SORTS
+        .into_iter()
+        .filter(|(_, s, _)| (only_series || *s != LAST_EPISODE_ADDED) && *s != SERIES_ORDER)
+        .collect()
+}
+
+/// The sort and direction a grid starts on when nothing is remembered for
+/// it: newest first for episodes, the first sort otherwise.
+fn default_sort(include_types: Option<&str>) -> Option<(&'static str, bool)> {
+    (include_types == Some("Episode")).then_some(("DateCreated", true))
+}
 
 /// Series only: when a series last got a new episode.
 const LAST_EPISODE_ADDED: &str = "DateLastContentAdded";
@@ -434,6 +473,15 @@ fn tabbed(ui: &Ui, folder: &BaseItem, kind: Kind) -> adw::NavigationPage {
         },
         Box::new(move |ui| sortable_grid(ui, items).upcast()),
     ));
+    if kind == Kind::Shows {
+        let episodes = in_library(Some("Episode"), true);
+        tabs.push((
+            "episodes",
+            "Episodes",
+            crate::ui::icons::EPISODE,
+            Box::new(move |ui| sortable_grid_of(ui, episodes, Shape::for_episodes()).upcast()),
+        ));
+    }
     let suggestions_folder = folder.clone();
     tabs.push((
         "suggestions",
@@ -754,13 +802,7 @@ fn sortable_grid_of(ui: &Ui, mut base: ItemQuery, shape: Shape) -> gtk::Box {
     let labels: Vec<&str> = filters.iter().map(|(label, _)| *label).collect();
     let filter = gtk::DropDown::from_strings(&labels);
     filter.set_tooltip_text(Some("Filter"));
-    let only_series = base.include_types == Some("Series");
-    let sorts: Rc<Vec<(&'static str, &'static str, bool)>> = Rc::new(
-        SORTS
-            .into_iter()
-            .filter(|(_, s, _)| only_series || *s != LAST_EPISODE_ADDED)
-            .collect(),
-    );
+    let sorts: Rc<Vec<(&'static str, &'static str, bool)>> = Rc::new(sorts_for(base.include_types));
     let labels: Vec<&str> = sorts.iter().map(|(label, _, _)| *label).collect();
     let sort = gtk::DropDown::from_strings(&labels);
     sort.set_tooltip_text(Some("Sort by"));
@@ -796,19 +838,32 @@ fn sortable_grid_of(ui: &Ui, mut base: ItemQuery, shape: Shape) -> gtk::Box {
     // More filters, on Movies and Shows grids only.
     let item_type = base
         .include_types
-        .filter(|t| matches!(*t, "Movie" | "Series"));
+        .filter(|t| matches!(*t, "Movie" | "Series" | "Episode"));
     let library_id = base.parent_id.clone();
     let extra = Rc::new(RefCell::new(Extra::default()));
 
     // The last sort/filter used here, before any handler is connected.
     let key = view_key(&base);
-    if let Some(prefs) = crate::db::Db::open_default()
+    let saved = crate::db::Db::open_default()
         .and_then(|db| db.get_view_prefs(&crate::account::scope(), &key))
         .unwrap_or_else(|e| {
             tracing::warn!("couldn't read view settings: {e:#}");
             None
-        })
+        });
+    // Nothing remembered yet: this grid's own starting sort.
+    if saved.is_none()
+        && let Some((by, desc)) = default_sort(base.include_types)
+        && let Some(index) = sorts.iter().position(|(_, s, _)| *s == by)
     {
+        sort.set_selected(index as u32);
+        descending.set_active(desc);
+        descending.set_icon_name(if desc {
+            crate::ui::icons::SORT_DESCENDING
+        } else {
+            crate::ui::icons::SORT_ASCENDING
+        });
+    }
+    if let Some(prefs) = saved {
         if let Some(index) = sorts.iter().position(|(_, s, _)| *s == prefs.sort_by) {
             sort.set_selected(index as u32);
         }
@@ -1121,12 +1176,22 @@ fn extra_filters(
         .margin_start(12)
         .margin_end(12)
         .build();
-    for row in [&decade_row, &res_row, &subs_row, &rating_row, &added_row] {
-        content.append(row);
+    // Episodes: just resolution and subtitles (decade and rating belong to
+    // the show, and "Added" looks at movies or whole series).
+    let rows: &[&gtk::Box] = if item_type == "Episode" {
+        &[&res_row, &subs_row]
+    } else {
+        &[&decade_row, &res_row, &subs_row, &rating_row, &added_row]
+    };
+    for row in rows {
+        content.append(*row);
     }
     content.append(&clear);
     button.set_popover(Some(&gtk::Popover::builder().child(&content).build()));
 
+    if item_type == "Episode" {
+        return button;
+    }
     // This library's ratings, for the Rating row; no row without any.
     let (client, user_id) = (ui.client(), ui.user_id());
     let (weak_row, weak_rating) = (rating_row.downgrade(), rating.downgrade());
@@ -1797,7 +1862,10 @@ fn air_date(item: &BaseItem) -> Option<glib::DateTime> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Extra, IdRestriction, civil, fresh, intersect, iso, top_genres};
+    use super::{
+        Extra, IdRestriction, SERIES_ORDER, civil, default_sort, fresh, intersect, iso, sorts_for,
+        top_genres,
+    };
     use crate::emby::browse::ItemQuery;
     use crate::emby::models::{BaseItem, NameId, UserItemData};
 
@@ -1813,6 +1881,49 @@ mod tests {
                 .collect(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn episode_sorts_are_a_short_list_with_air_date() {
+        let sorts = sorts_for(Some("Episode"));
+        let labels: Vec<_> = sorts.iter().map(|(label, _, _)| *label).collect();
+        assert_eq!(labels, ["Name", "Date Added", "Air Date", "Series"]);
+        assert!(sorts.iter().any(|(_, s, _)| *s == SERIES_ORDER));
+        assert!(sorts.iter().any(|(_, s, _)| *s == "PremiereDate"));
+    }
+
+    #[test]
+    fn other_grids_keep_their_sorts() {
+        for kind in [Some("Movie"), Some("Series"), Some("BoxSet"), None] {
+            let sorts = sorts_for(kind);
+            assert!(sorts.iter().all(|(_, s, _)| *s != SERIES_ORDER));
+            assert!(sorts.iter().any(|(label, _, _)| *label == "Release Date"));
+            assert!(sorts.iter().any(|(_, s, _)| *s == "Random"));
+        }
+        assert!(
+            sorts_for(Some("Series"))
+                .iter()
+                .any(|(_, s, _)| *s == "DateLastContentAdded")
+        );
+        assert!(
+            !sorts_for(Some("Movie"))
+                .iter()
+                .any(|(_, s, _)| *s == "DateLastContentAdded")
+        );
+    }
+
+    #[test]
+    fn only_episodes_start_on_date_added_newest_first() {
+        assert_eq!(default_sort(Some("Episode")), Some(("DateCreated", true)));
+        assert_eq!(default_sort(Some("Series")), None);
+        assert_eq!(default_sort(Some("Movie")), None);
+        assert_eq!(default_sort(None), None);
+        // The default is one of the offered sorts.
+        assert!(
+            sorts_for(Some("Episode"))
+                .iter()
+                .any(|(_, s, d)| (*s, *d) == ("DateCreated", true))
+        );
     }
 
     #[test]

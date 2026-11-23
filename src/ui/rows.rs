@@ -1,20 +1,14 @@
 //! Horizontal card rows with a "Title >" heading, used by Home and the
 //! library Suggestions tab.
 
-use std::cell::Cell;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use gtk::gdk;
 
 use super::Ui;
 use super::card::{self, Shape};
 use super::library;
 use crate::emby::models::BaseItem;
-
-/// Pointer travel before a press on a card turns into a drag (and stops
-/// counting as a click).
-const DRAG_THRESHOLD: f64 = 8.0;
 
 /// Gap between cards in a row.
 pub const CARD_SPACING: i32 = 12;
@@ -127,7 +121,6 @@ pub fn row_ending(
         .vscrollbar_policy(gtk::PolicyType::Never)
         .child(&cards)
         .build();
-    drag_to_scroll(&scroller);
 
     let section = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -136,47 +129,6 @@ pub fn row_ending(
     section.append(&section_title(ui, title, more));
     section.append(&scroller);
     section
-}
-
-/// Lets a mouse drag the row sideways, like a touch swipe. Runs in the
-/// capture phase so it sees presses on the cards; once the pointer moves
-/// past the threshold it claims the sequence, which cancels the card's click.
-fn drag_to_scroll(scroller: &gtk::ScrolledWindow) {
-    let drag = gtk::GestureDrag::builder()
-        .button(gdk::BUTTON_PRIMARY)
-        .propagation_phase(gtk::PropagationPhase::Capture)
-        .build();
-    let start = Rc::new(Cell::new(0.0));
-    let dragging = Rc::new(Cell::new(false));
-    drag.connect_drag_begin({
-        let scroller = scroller.clone();
-        let start = start.clone();
-        let dragging = dragging.clone();
-        move |_, _, _| {
-            start.set(scroller.hadjustment().value());
-            dragging.set(false);
-        }
-    });
-    drag.connect_drag_update({
-        let scroller = scroller.clone();
-        let dragging = dragging.clone();
-        move |gesture, offset_x, _| {
-            if !dragging.get() {
-                if offset_x.abs() < DRAG_THRESHOLD {
-                    return;
-                }
-                dragging.set(true);
-                gesture.set_state(gtk::EventSequenceState::Claimed);
-                scroller.set_cursor_from_name(Some("grabbing"));
-            }
-            scroller.hadjustment().set_value(start.get() - offset_x);
-        }
-    });
-    drag.connect_drag_end({
-        let scroller = scroller.clone();
-        move |_, _, _| scroller.set_cursor(None::<&gdk::Cursor>)
-    });
-    scroller.add_controller(drag);
 }
 
 /// The row heading; a flat "Title >" button when it leads somewhere.

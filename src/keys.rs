@@ -1,6 +1,7 @@
 //! Keyboard shortcuts in the player, remappable in Preferences → Keyboard.
-//! Keys are stored by their GDK names (`space`, `Left`, `k`, `F11`); only
-//! actions changed from their defaults are written to config.
+//! Keys are stored by their GDK names (`space`, `Left`, `k`, `F11`), with
+//! Ctrl/Alt/Super as GTK accelerator prefixes (`<Control>f`); only actions
+//! changed from their defaults are written to config.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -22,10 +23,11 @@ pub enum KeyAction {
     Fullscreen,
     Leave,
     Skip,
+    Search,
 }
 
 impl KeyAction {
-    pub const ALL: [KeyAction; 13] = [
+    pub const ALL: [KeyAction; 14] = [
         KeyAction::PlayPause,
         KeyAction::SeekBack,
         KeyAction::SeekForward,
@@ -39,6 +41,7 @@ impl KeyAction {
         KeyAction::Fullscreen,
         KeyAction::Leave,
         KeyAction::Skip,
+        KeyAction::Search,
     ];
 
     /// Config name.
@@ -57,6 +60,7 @@ impl KeyAction {
             KeyAction::Fullscreen => "fullscreen",
             KeyAction::Leave => "leave",
             KeyAction::Skip => "skip",
+            KeyAction::Search => "search",
         }
     }
 
@@ -75,6 +79,7 @@ impl KeyAction {
             KeyAction::Fullscreen => "Fullscreen",
             KeyAction::Leave => "Leave fullscreen, then the player",
             KeyAction::Skip => "Skip intro / credits",
+            KeyAction::Search => "Search (outside the player)",
         }
     }
 
@@ -97,6 +102,7 @@ impl KeyAction {
             KeyAction::Fullscreen => &["f", "F11"],
             KeyAction::Leave => &["Escape"],
             KeyAction::Skip => &["q"],
+            KeyAction::Search => &["<Control>f", "slash"],
         }
     }
 }
@@ -190,8 +196,67 @@ pub fn key_name(key: gtk::gdk::Key) -> Option<String> {
     key.to_lower().name().map(|name| name.to_string())
 }
 
+/// `key_name` with the held Ctrl/Alt/Super as `<Control>`-style prefixes.
+/// Shift is left out, so `/` stays "slash" on layouts that need it.
+pub fn key_press_name(key: gtk::gdk::Key, modifiers: gtk::gdk::ModifierType) -> Option<String> {
+    use gtk::gdk::ModifierType as M;
+    // On macOS Cmd plays Ctrl's part (Cmd+F), so it's stored as `<Control>` too.
+    let primary = modifiers.contains(M::CONTROL_MASK)
+        || (cfg!(target_os = "macos") && modifiers.contains(M::META_MASK));
+    Some(with_modifiers(
+        &key_name(key)?,
+        primary,
+        modifiers.contains(M::ALT_MASK),
+        modifiers.contains(M::SUPER_MASK),
+    ))
+}
+
+fn with_modifiers(name: &str, control: bool, alt: bool, super_: bool) -> String {
+    let mut out = String::new();
+    for (held, prefix) in [(control, "<Control>"), (alt, "<Alt>"), (super_, "<Super>")] {
+        if held {
+            out.push_str(prefix);
+        }
+    }
+    out + name
+}
+
+/// Shift, Ctrl, Alt, Super, Caps Lock...: pressed alone they aren't a shortcut.
+pub fn is_modifier_key(key: gtk::gdk::Key) -> bool {
+    key.name().is_some_and(|name| {
+        [
+            "Shift",
+            "Control",
+            "Alt",
+            "Super",
+            "Meta",
+            "Hyper",
+            "Caps_Lock",
+            "ISO_Level",
+        ]
+        .iter()
+        .any(|m| name.starts_with(m))
+    })
+}
+
+/// How `<Control>` reads: Cmd stands in for it on macOS.
+const PRIMARY_LABEL: &str = if cfg!(target_os = "macos") {
+    "Cmd+"
+} else {
+    "Ctrl+"
+};
+
 /// How a stored key name is shown: "Space", "←", "Page Up", "K".
 pub fn key_label(name: &str) -> String {
+    for (prefix, label) in [
+        ("<Control>", PRIMARY_LABEL),
+        ("<Alt>", "Alt+"),
+        ("<Super>", "Super+"),
+    ] {
+        if let Some(rest) = name.strip_prefix(prefix) {
+            return format!("{label}{}", key_label(rest));
+        }
+    }
     match name {
         "space" => "Space".into(),
         "Left" => "←".into(),
@@ -204,6 +269,7 @@ pub fn key_label(name: &str) -> String {
         "Return" => "Enter".into(),
         "comma" => ",".into(),
         "period" => ".".into(),
+        "slash" => "/".into(),
         other if other.chars().count() == 1 => other.to_uppercase(),
         other => other.replace('_', " "),
     }
@@ -249,5 +315,43 @@ mod tests {
         assert_eq!(key_label("k"), "K");
         assert_eq!(key_label("Page_Down"), "Page Down");
         assert_eq!(key_label("comma"), ",");
+        assert_eq!(key_label("<Control>f"), format!("{PRIMARY_LABEL}F"));
+        assert_eq!(
+            key_label("<Control><Alt>Left"),
+            format!("{PRIMARY_LABEL}Alt+←")
+        );
+        assert_eq!(key_label("slash"), "/");
+    }
+
+    #[test]
+    fn search_defaults() {
+        let bindings = KeyBindings::default();
+        assert_eq!(
+            bindings.keys(KeyAction::Search),
+            vec!["<Control>f".to_string(), "slash".to_string()]
+        );
+        assert_eq!(bindings.action_for("<Control>f"), Some(KeyAction::Search));
+        assert_eq!(bindings.action_for("slash"), Some(KeyAction::Search));
+        // Plain "f" is still Fullscreen.
+        assert_eq!(bindings.action_for("f"), Some(KeyAction::Fullscreen));
+    }
+
+    #[test]
+    fn modifier_names() {
+        assert_eq!(with_modifiers("f", false, false, false), "f");
+        assert_eq!(with_modifiers("f", true, false, false), "<Control>f");
+        assert_eq!(
+            with_modifiers("f", true, true, true),
+            "<Control><Alt><Super>f"
+        );
+        assert_eq!(with_modifiers("slash", false, true, false), "<Alt>slash");
+    }
+
+    #[test]
+    fn old_config_without_modifiers_loads() {
+        let config = BTreeMap::from([("mute".to_string(), vec!["x".to_string()])]);
+        let bindings = KeyBindings::from_config(&config);
+        assert_eq!(bindings.action_for("x"), Some(KeyAction::Mute));
+        assert_eq!(bindings.action_for("<Control>f"), Some(KeyAction::Search));
     }
 }

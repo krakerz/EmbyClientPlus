@@ -35,6 +35,43 @@ pub struct Settings {
     pub downloads: DownloadSettings,
     #[serde(default)]
     pub tracking: TrackingSettings,
+    #[serde(default)]
+    pub storage: StorageSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageSettings {
+    /// Oldest-used cached images are deleted past this size (MiB).
+    #[serde(default = "default_image_cache_mb")]
+    pub image_cache_mb: u32,
+    /// Decoded artwork kept in memory, least recently used dropped past this (MiB).
+    #[serde(default = "default_image_memory_mb")]
+    pub image_memory_mb: u32,
+    /// JPEG quality (1–100) the server encodes artwork at; 0 leaves it to the server.
+    #[serde(default = "default_image_quality")]
+    pub image_quality: u32,
+}
+
+impl Default for StorageSettings {
+    fn default() -> Self {
+        StorageSettings {
+            image_cache_mb: default_image_cache_mb(),
+            image_memory_mb: default_image_memory_mb(),
+            image_quality: default_image_quality(),
+        }
+    }
+}
+
+fn default_image_quality() -> u32 {
+    crate::emby::browse::DEFAULT_IMAGE_QUALITY
+}
+
+fn default_image_cache_mb() -> u32 {
+    2048
+}
+
+fn default_image_memory_mb() -> u32 {
+    256
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1025,6 +1062,14 @@ pub fn write_atomic(path: &std::path::Path, contents: &[u8]) -> std::io::Result<
 #[cfg(test)]
 mod tests {
     use super::DisplayRate;
+
+    #[test]
+    fn storage_defaults_when_missing() {
+        let settings: super::Settings = toml::from_str("").unwrap();
+        assert_eq!(settings.storage.image_cache_mb, 2048);
+        assert_eq!(settings.storage.image_memory_mb, 256);
+        assert_eq!(settings.storage.image_quality, 90);
+    }
 
     #[test]
     fn display_rate_default_follows_the_mode() {

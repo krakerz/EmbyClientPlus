@@ -21,12 +21,28 @@ const MAX_CONCURRENT_FETCHES: usize = 6;
 /// slow response for a recycled grid cell doesn't overwrite a newer one.
 const REQUESTED_KEY: &str = "embyclientplus-requested-image";
 
-/// Decoded textures are kept up to this many bytes (width x height x 4);
-/// a poster is ~0.5 MB but a hero backdrop can be tens of MB.
-const CACHE_BUDGET: usize = 256 * 1024 * 1024;
+/// Decoded textures are kept up to the user's budget (width x height x 4
+/// bytes each); a poster is ~0.5 MB but a hero backdrop can be tens of MB.
+fn memory_budget(mb: u32) -> usize {
+    (mb as usize).saturating_mul(1024 * 1024)
+}
+
+fn configured_memory_budget() -> usize {
+    let mb = crate::config::Settings::load()
+        .unwrap_or_default()
+        .storage
+        .image_memory_mb;
+    memory_budget(mb)
+}
 
 thread_local! {
-    static CACHE: RefCell<TextureCache> = RefCell::new(TextureCache::default());
+    static CACHE: RefCell<TextureCache> =
+        RefCell::new(TextureCache::with_budget(configured_memory_budget()));
+}
+
+/// Applies a new memory budget now; a smaller one drops the oldest textures.
+pub fn set_memory_budget(mb: u32) {
+    CACHE.with(|cache| cache.borrow_mut().set_budget(memory_budget(mb)));
 }
 
 type TextureCache = ByteLru<gdk::Texture>;
@@ -39,12 +55,6 @@ struct ByteLru<V> {
     total: usize,
     tick: u64,
     budget: usize,
-}
-
-impl<V> Default for ByteLru<V> {
-    fn default() -> Self {
-        Self::with_budget(CACHE_BUDGET)
-    }
 }
 
 impl<V> ByteLru<V> {
@@ -72,7 +82,16 @@ impl<V: Clone> ByteLru<V> {
             self.total -= old;
         }
         self.total += bytes;
-        // The newest entry stays even when it alone is over budget.
+        self.evict();
+    }
+
+    fn set_budget(&mut self, budget: usize) {
+        self.budget = budget;
+        self.evict();
+    }
+
+    /// The newest entry stays even when it alone is over budget.
+    fn evict(&mut self) {
         while self.total > self.budget && self.entries.len() > 1 {
             let Some(oldest) = self
                 .entries
@@ -101,8 +120,24 @@ pub fn prune_disk_cache() {
     std::thread::spawn(image_disk_cache::prune);
 }
 
+/// Trims the disk cache now and returns its new size in bytes.
+pub async fn prune_disk_cache_now() -> u64 {
+    spawn_tokio(async {
+        tokio::task::spawn_blocking(|| {
+            image_disk_cache::prune();
+            image_disk_cache::size()
+        })
+        .await
+        .unwrap_or(0)
+    })
+    .await
+}
+
 pub fn clear_cache() {
-    CACHE.with(|cache| *cache.borrow_mut() = TextureCache::default());
+    CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        *cache = TextureCache::with_budget(cache.budget);
+    });
 }
 
 /// Empties the memory and on-disk image caches (the disk part off the main
@@ -242,6 +277,19 @@ pub async fn file(
 #[cfg(test)]
 mod tests {
     use super::ByteLru;
+
+    #[test]
+    fn a_smaller_budget_drops_the_oldest_at_once() {
+        let mut cache = ByteLru::<u8>::with_budget(100);
+        cache.insert("a".into(), 1, 40);
+        cache.insert("b".into(), 2, 40);
+        cache.get("a");
+        cache.set_budget(50);
+        assert_eq!(cache.get("b"), None);
+        assert_eq!(cache.get("a"), Some(1));
+        cache.set_budget(0); // the newest entry is always kept
+        assert_eq!(cache.get("a"), Some(1));
+    }
 
     #[test]
     fn evicts_least_recently_used_past_the_byte_budget() {
