@@ -3,6 +3,7 @@
 //! stay hidden.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -10,7 +11,7 @@ use gtk::{gio, glib};
 
 use super::card::Shape;
 use super::library::{grid, load_pages};
-use super::{Ui, add_home_button, icons};
+use super::{Ui, add_home_button, icons, search_names};
 use crate::emby::browse::ItemQuery;
 use crate::runtime::spawn_tokio;
 
@@ -310,6 +311,79 @@ fn show_tab(tab: &Tab, results: &adw::ViewStack, entry: &gtk::SearchEntry) {
     handler.set(Some(id));
 }
 
+/// Emby's results first, then items whose title merely contains the text
+/// (Emby's `SearchTerm` matches word starts only).
+fn load_with_name_matches(
+    ui: &Ui,
+    tab: &Tab,
+    query: ItemQuery,
+    name_types: Vec<&'static str>,
+    still_wanted: impl Fn() -> bool + 'static,
+    found: impl Fn(usize) + 'static,
+) {
+    let (client, user_id) = (ui.client(), ui.user_id());
+    let term = query.search_term.clone().unwrap_or_default();
+    let store = tab.store.downgrade();
+    let ui = ui.clone();
+    glib::spawn_future_local(async move {
+        let page = spawn_tokio({
+            let (client, user_id, query) = (client.clone(), user_id.clone(), query.clone());
+            async move { client.items(&user_id, &query).await }
+        })
+        .await;
+        if !still_wanted() {
+            return;
+        }
+        let page = match page {
+            Ok(page) => page,
+            Err(e) => {
+                ui.report_error("Could not load items", &e);
+                return;
+            }
+        };
+        let mut seen: HashSet<String> = page.items.iter().map(|i| i.id.clone()).collect();
+        let mut extra_ids = Vec::new();
+        for item_type in name_types {
+            let room = RESULT_LIMIT.saturating_sub(page.items.len() + extra_ids.len());
+            let ids = search_names::find(&ui, item_type, &term, &seen, room).await;
+            if !still_wanted() {
+                return;
+            }
+            seen.extend(ids.iter().cloned());
+            extra_ids.extend(ids);
+        }
+        let mut extras = Vec::new();
+        if !extra_ids.is_empty() {
+            let extra_query = ItemQuery {
+                ids: Some(extra_ids.join(",")),
+                include_types: query.include_types,
+                recursive: true,
+                sort_by: Some("SortName"),
+                limit: extra_ids.len(),
+                ..Default::default()
+            };
+            match spawn_tokio(async move { client.items(&user_id, &extra_query).await }).await {
+                Ok(r) => extras = r.items,
+                Err(e) => tracing::warn!("search extra items failed: {e:#}"),
+            }
+            if !still_wanted() {
+                return;
+            }
+        }
+        let Some(store) = store.upgrade() else {
+            return;
+        };
+        found(page.total_record_count.max(page.items.len()) + extras.len());
+        let objects: Vec<_> = page
+            .items
+            .into_iter()
+            .chain(extras)
+            .map(glib::BoxedAnyObject::new)
+            .collect();
+        store.extend_from_slice(&objects);
+    });
+}
+
 fn load_tab(
     ui: &Ui,
     tab: &Tab,
@@ -326,8 +400,13 @@ fn load_tab(
                 limit: RESULT_LIMIT,
                 ..Default::default()
             };
-            // One page is plenty for search.
-            load_pages(ui, &tab.store, query, RESULT_LIMIT, still_wanted, found);
+            let name_types = search_names::matching_types(types);
+            if name_types.is_empty() {
+                // One page is plenty for search.
+                load_pages(ui, &tab.store, query, RESULT_LIMIT, still_wanted, found);
+            } else {
+                load_with_name_matches(ui, tab, query, name_types, still_wanted, found);
+            }
         }
         source => {
             let (client, user_id, term) = (ui.client(), ui.user_id(), term.to_string());

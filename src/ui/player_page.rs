@@ -27,6 +27,11 @@ const CONTROLS_IDLE: Duration = Duration::from_secs(4);
 /// Position/markers/Up Next refresh rate while the page is shown.
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
 const SEEK_STEP: i32 = 10;
+/// Double-tap window when GTK's setting can't be read.
+const DEFAULT_DOUBLE_TAP: Duration = Duration::from_millis(400);
+/// Gamescope turns a tap into a pointer warp (showing the OSD) plus a click:
+/// an OSD revealed this recently was shown by the tap itself, not before it.
+const TAP_REVEAL_GRACE: Duration = Duration::from_millis(300);
 /// One zoom step, in mpv's log2 units (about 7%).
 const ZOOM_STEP: f64 = 0.1;
 /// How often the SVP button re-checks whether SVP attached.
@@ -48,6 +53,29 @@ const SVP_STATE_CLASSES: [&str; 3] = ["svp-active", "svp-waiting", "svp-missing"
 const VOLUME_STEP: f64 = 5.0;
 /// Subtitle action target meaning "off".
 const SUBTITLES_OFF_ID: i64 = -1;
+
+/// Which third of the video a touch landed in.
+#[derive(Debug, PartialEq, Eq)]
+enum TapZone {
+    Left,
+    Middle,
+    Right,
+}
+
+/// Share of the width each seek zone takes; the middle strip gets the rest.
+/// Proportional, so an ultrawide window keeps the same 40/20/40 split.
+const SEEK_ZONE: f64 = 0.4;
+
+/// Left seek zone, middle strip or right seek zone of a video `width` wide.
+fn tap_zone(x: f64, width: f64) -> TapZone {
+    if x < width * SEEK_ZONE {
+        TapZone::Left
+    } else if x > width * (1.0 - SEEK_ZONE) {
+        TapZone::Right
+    } else {
+        TapZone::Middle
+    }
+}
 
 thread_local! {
     /// Titles already told that HDR keeps SVP off (once per run).
@@ -199,6 +227,10 @@ struct Inner {
     seeked_at: Cell<Option<Instant>>,
     last_motion: Cell<Option<(f64, f64)>>,
     hide_timer: RefCell<Option<glib::SourceId>>,
+    /// A touch tap waiting out the double-tap window before it toggles the OSD.
+    tap_timer: RefCell<Option<glib::SourceId>>,
+    /// When the OSD last went from hidden to shown.
+    osd_revealed_at: Cell<Option<Instant>>,
     tick: RefCell<Option<glib::SourceId>>,
     volume_report: RefCell<Option<glib::SourceId>>,
     /// Last volume/mute seen, so only real changes pop up the volume OSD.
@@ -314,6 +346,8 @@ impl PlayerPage {
             seeked_at: Cell::new(None),
             last_motion: Cell::new(None),
             hide_timer: RefCell::new(None),
+            tap_timer: RefCell::new(None),
+            osd_revealed_at: Cell::new(None),
             tick: RefCell::new(None),
             volume_report: RefCell::new(None),
             volume_seen: Cell::new(None),
@@ -1329,12 +1363,29 @@ impl Inner {
         clicks.connect_pressed(glib::clone!(
             #[strong]
             weak,
-            move |_, presses, _, _| {
-                if presses == 2
-                    && let Some(inner) = weak.upgrade()
-                {
-                    inner.toggle_fullscreen();
+            move |gesture, presses, x, _| {
+                let Some(inner) = weak.upgrade() else { return };
+                // Gamescope hands touch to apps as mouse clicks, so Game Mode
+                // clicks get the tap gestures too. Elsewhere a touch has an
+                // event sequence; X11 and Windows may also send it as a
+                // pointer-emulated click, and the device can be the logical
+                // pointer, so its source alone isn't enough.
+                let touch = crate::gamescope::detected()
+                    || gesture.current_sequence().is_some()
+                    || gesture
+                        .current_event()
+                        .is_some_and(|event| event.is_pointer_emulated())
+                    || gesture
+                        .current_event_device()
+                        .is_some_and(|device| device.source() == gdk::InputSource::Touchscreen);
+                tracing::info!(touch, presses, "player: video pressed");
+                if !touch {
+                    if presses == 2 {
+                        inner.toggle_fullscreen();
+                    }
+                    return;
                 }
+                inner.touch_tap(presses, x, f64::from(inner.video.width()));
             }
         ));
         self.video.add_controller(clicks);
@@ -2361,6 +2412,8 @@ impl Inner {
                     self.skip();
                 }
             }
+            // Browsing only (window.rs).
+            KeyAction::Search => return glib::Propagation::Proceed,
         }
         self.show_osd();
         glib::Propagation::Stop
@@ -2371,6 +2424,7 @@ impl Inner {
     fn show_osd(self: &Rc<Self>) {
         // Logged for the stats lines: drawing the OSD over the video costs frames.
         if !self.osd.bottom.reveals_child() {
+            self.osd_revealed_at.set(Some(Instant::now()));
             tracing::info!("player: controls shown");
         }
         self.osd.refresh_hints();
@@ -2396,12 +2450,62 @@ impl Inner {
                 inner.show_osd();
                 return;
             }
-            inner.osd.top.set_reveal_child(false);
-            inner.osd.bottom.set_reveal_child(false);
-            inner.page.set_cursor_from_name(Some("none"));
-            tracing::info!("player: controls hidden");
+            inner.hide_osd();
         });
         self.hide_timer.replace(Some(timer));
+    }
+
+    /// Hides the OSD and cursor now, cancelling a pending auto-hide.
+    fn hide_osd(&self) {
+        if let Some(timer) = self.hide_timer.take() {
+            timer.remove();
+        }
+        self.osd.top.set_reveal_child(false);
+        self.osd.bottom.set_reveal_child(false);
+        self.page.set_cursor_from_name(Some("none"));
+        tracing::info!("player: controls hidden");
+    }
+
+    /// A touch press on the video. A single tap toggles the OSD once the
+    /// double-tap window has passed; double taps seek or go fullscreen by zone.
+    fn touch_tap(self: &Rc<Self>, presses: i32, x: f64, width: f64) {
+        if let Some(pending) = self.tap_timer.take() {
+            pending.remove();
+        }
+        if presses < 2 {
+            // Decided at the press: the timer fires after this tap's own reveal.
+            let was_shown = self.osd.bottom.reveals_child()
+                && self
+                    .osd_revealed_at
+                    .get()
+                    .is_none_or(|at| at.elapsed() >= TAP_REVEAL_GRACE);
+            let window = gtk::Settings::default().map_or(DEFAULT_DOUBLE_TAP, |s| {
+                Duration::from_millis(u64::try_from(s.gtk_double_click_time()).unwrap_or(400))
+            });
+            let weak = Rc::downgrade(self);
+            let timer = glib::timeout_add_local_once(window, move || {
+                let Some(inner) = weak.upgrade() else { return };
+                inner.tap_timer.take();
+                let hide = was_shown
+                    && inner.osd.bottom.reveals_child()
+                    && !inner.osd.menu_open()
+                    && !inner.controls_mode.get();
+                if hide {
+                    inner.hide_osd();
+                } else {
+                    inner.show_osd();
+                }
+            });
+            self.tap_timer.replace(Some(timer));
+            return;
+        }
+        match tap_zone(x, width) {
+            TapZone::Left => self.seek_by(-SEEK_STEP, false, false),
+            TapZone::Right => self.seek_by(SEEK_STEP, false, false),
+            TapZone::Middle if presses == 2 => self.toggle_fullscreen(),
+            TapZone::Middle => {}
+        }
+        self.show_osd();
     }
 
     fn window(&self) -> Option<gtk::Window> {
@@ -2691,6 +2795,21 @@ fn scrub_rate(tilt: f64, duration: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tap_zones_split_the_video_40_20_40() {
+        assert_eq!(tap_zone(0.0, 1000.0), TapZone::Left);
+        assert_eq!(tap_zone(399.0, 1000.0), TapZone::Left);
+        assert_eq!(tap_zone(400.0, 1000.0), TapZone::Middle);
+        assert_eq!(tap_zone(500.0, 1000.0), TapZone::Middle);
+        assert_eq!(tap_zone(600.0, 1000.0), TapZone::Middle);
+        assert_eq!(tap_zone(601.0, 1000.0), TapZone::Right);
+        assert_eq!(tap_zone(1000.0, 1000.0), TapZone::Right);
+        // Ultrawide 3440 px: 1376 px per seek zone, 688 px middle.
+        assert_eq!(tap_zone(1375.0, 3440.0), TapZone::Left);
+        assert_eq!(tap_zone(1720.0, 3440.0), TapZone::Middle);
+        assert_eq!(tap_zone(2065.0, 3440.0), TapZone::Right);
+    }
 
     #[test]
     fn scrub_speed_follows_tilt_and_length() {

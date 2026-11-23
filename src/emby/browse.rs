@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use anyhow::Result;
 
 use super::EmbyClient;
@@ -460,6 +462,13 @@ impl EmbyClient {
         .await
     }
 
+    /// Id and name of every item of `types` (comma-separated), for matching
+    /// titles client-side. Small enough to fetch unpaged.
+    pub async fn item_names(&self, user_id: &str, types: &str) -> Result<Vec<ItemName>> {
+        let result: QueryResult<ItemName> = self.get(&item_names_path(user_id, types)).await?;
+        Ok(result.items)
+    }
+
     /// What was played, newest first: watched and partly watched movies and
     /// episodes (Emby can't ask for both at once), up to `limit`.
     pub async fn history(&self, user_id: &str, limit: usize) -> Result<Vec<BaseItem>> {
@@ -619,17 +628,37 @@ impl EmbyClient {
         }
     }
 
-    /// Server-relative image path, resized server-side to `max_width`.
-    /// Quality 80: about a third smaller than 90, no visible loss at
-    /// poster sizes; Emby keeps its resized copies, so it encodes each once.
+    /// Server-relative image path, resized server-side to `max_width`, at
+    /// the user's artwork quality. Emby keeps its resized copies, so it
+    /// encodes each size/quality once.
     pub fn image_path(image: &ImageRef, max_width: u32) -> String {
-        format!(
-            "/emby/Items/{}/Images/{}?maxWidth={max_width}&tag={}&quality=80",
-            image.item_id,
-            image.kind.path_segment(),
-            encode(&image.tag)
-        )
+        image_path_at(image, max_width, IMAGE_QUALITY.load(Ordering::Relaxed))
     }
+}
+
+/// JPEG quality Emby encodes artwork at; lower it to download less.
+pub const DEFAULT_IMAGE_QUALITY: u32 = 90;
+
+static IMAGE_QUALITY: AtomicU32 = AtomicU32::new(DEFAULT_IMAGE_QUALITY);
+
+/// Sets the artwork quality (1–100, or 0 for the server's own default) for
+/// every image requested from now on.
+pub fn set_image_quality(quality: u32) {
+    IMAGE_QUALITY.store(quality.min(100), Ordering::Relaxed);
+}
+
+fn image_path_at(image: &ImageRef, max_width: u32, quality: u32) -> String {
+    let mut path = format!(
+        "/emby/Items/{}/Images/{}?maxWidth={max_width}&tag={}",
+        image.item_id,
+        image.kind.path_segment(),
+        encode(&image.tag)
+    );
+    // 0: no parameter, so the server picks its own quality.
+    if quality > 0 {
+        path.push_str(&format!("&quality={quality}"));
+    }
+    path
 }
 
 impl BaseItem {
@@ -798,6 +827,22 @@ fn image(item_id: &str, kind: ImageKind, tag: &str) -> ImageRef {
     }
 }
 
+/// Just an item's id and title.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ItemName {
+    #[serde(rename = "Id")]
+    pub id: String,
+    #[serde(rename = "Name", default)]
+    pub name: String,
+}
+
+fn item_names_path(user_id: &str, types: &str) -> String {
+    format!(
+        "/emby/Users/{user_id}/Items?Recursive=true&IncludeItemTypes={}&EnableImages=false&EnableUserData=false&Fields=",
+        encode(types)
+    )
+}
+
 /// Percent-encodes a query value (RFC 3986 unreserved characters pass).
 pub(super) fn encode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
@@ -888,6 +933,16 @@ mod tests {
     }
 
     #[test]
+    fn item_names_path_is_names_only() {
+        let path = item_names_path("u1", "Movie,Series");
+        assert!(path.starts_with("/emby/Users/u1/Items?Recursive=true"));
+        assert!(path.contains("IncludeItemTypes=Movie,Series"));
+        assert!(path.contains("EnableImages=false"));
+        assert!(path.ends_with("Fields="));
+        assert!(!path.contains("Limit"));
+    }
+
+    #[test]
     fn query_string_carries_sort_and_filters() {
         let query = ItemQuery {
             sort_by: Some("DateCreated"),
@@ -944,10 +999,17 @@ mod tests {
 
     #[test]
     fn image_path_includes_size_and_tag() {
-        let path = EmbyClient::image_path(&image("abc", ImageKind::Backdrop, "t1"), 1280);
+        let path = image_path_at(&image("abc", ImageKind::Backdrop, "t1"), 1280, 80);
         assert_eq!(
             path,
             "/emby/Items/abc/Images/Backdrop?maxWidth=1280&tag=t1&quality=80"
+        );
+        let best = image_path_at(&image("abc", ImageKind::Backdrop, "t1"), 1280, 100);
+        assert!(best.ends_with("&quality=100"));
+        let server = image_path_at(&image("abc", ImageKind::Backdrop, "t1"), 1280, 0);
+        assert_eq!(
+            server,
+            "/emby/Items/abc/Images/Backdrop?maxWidth=1280&tag=t1"
         );
     }
 

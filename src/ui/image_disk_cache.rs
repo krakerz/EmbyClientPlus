@@ -8,8 +8,14 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-/// Oldest-used files are deleted past this total size.
-const MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// Oldest-used files are deleted past this total size (the user's setting).
+fn max_bytes() -> u64 {
+    let mb = crate::config::Settings::load()
+        .unwrap_or_default()
+        .storage
+        .image_cache_mb;
+    u64::from(mb).saturating_mul(1024 * 1024)
+}
 
 /// Tags already catch changed images; this just re-fetches anything older
 /// so a bad or odd copy can't live forever.
@@ -68,10 +74,11 @@ pub fn write(url: &str, bytes: &[u8]) {
     }
 }
 
-/// Trims the cache to [`MAX_BYTES`], least recently used first. Run once at startup.
+/// Trims the cache to the size set in Preferences, least recently used first.
+/// Runs at startup and when that setting changes.
 pub fn prune() {
     if let Some(dir) = dir() {
-        prune_in(&dir, MAX_BYTES);
+        prune_in(&dir, max_bytes());
     }
 }
 

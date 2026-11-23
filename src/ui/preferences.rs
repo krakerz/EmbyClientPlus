@@ -504,9 +504,83 @@ fn cache_size_label(bytes: u64) -> String {
     }
 }
 
-/// The image cache's size and a Clear button.
+/// Choices for the on-disk image cache's maximum size, in MiB, and their labels.
+const DISK_CACHE_SIZES_MB: [u32; 6] = [256, 512, 1024, 2048, 5120, 10240];
+const DISK_CACHE_LABELS: [&str; 6] = ["256 MB", "512 MB", "1 GB", "2 GB", "5 GB", "10 GB"];
+/// Choices for the in-memory image cache's budget, in MiB, and their labels.
+const MEMORY_CACHE_SIZES_MB: [u32; 5] = [128, 256, 512, 1024, 2048];
+const MEMORY_CACHE_LABELS: [&str; 5] = ["128 MB", "256 MB", "512 MB", "1 GB", "2 GB"];
+/// JPEG qualities for artwork (0: whatever the server uses), and their labels.
+const IMAGE_QUALITIES: [u32; 6] = [0, 60, 70, 80, 90, 100];
+const IMAGE_QUALITY_LABELS: [&str; 6] = [
+    "Follow server",
+    "60 (smallest)",
+    "70",
+    "80",
+    "90 (default)",
+    "100 (best)",
+];
+
+/// Size in MiB for a combo row position (out of range: the largest).
+fn cache_size_mb(options: &[u32], index: u32) -> u32 {
+    options[(index as usize).min(options.len() - 1)]
+}
+
+/// Combo row position for a stored size: the exact option, else the
+/// smallest one above it, else the last (hand-edited values stay safe).
+fn cache_size_index(options: &[u32], mb: u32) -> u32 {
+    options
+        .iter()
+        .position(|&option| option >= mb)
+        .unwrap_or(options.len() - 1) as u32
+}
+
+fn cache_size_row(title: &str, subtitle: &str, labels: &[&str], selected: u32) -> adw::ComboRow {
+    adw::ComboRow::builder()
+        .title(title)
+        .subtitle(subtitle)
+        .model(&gtk::StringList::new(labels))
+        .selected(selected)
+        .build()
+}
+
+/// The image caches' limits, the disk cache's size and a Clear button.
 fn storage_group(toasts: &adw::ToastOverlay) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder().title("Storage").build();
+    let storage = Settings::load().unwrap_or_default().storage;
+    let memory_size = cache_size_row(
+        "Image memory cache",
+        "Artwork kept in RAM so pages scroll without reloading it",
+        &MEMORY_CACHE_LABELS,
+        cache_size_index(&MEMORY_CACHE_SIZES_MB, storage.image_memory_mb),
+    );
+    memory_size.connect_selected_notify(|combo| {
+        let mb = cache_size_mb(&MEMORY_CACHE_SIZES_MB, combo.selected());
+        save(|s| s.storage.image_memory_mb = mb);
+        super::images::set_memory_budget(mb);
+    });
+    group.add(&memory_size);
+    let quality = cache_size_row(
+        "Artwork quality",
+        "Higher is sharper but downloads more; artwork reloads at the new quality",
+        &IMAGE_QUALITY_LABELS,
+        cache_size_index(&IMAGE_QUALITIES, storage.image_quality),
+    );
+    quality.connect_selected_notify(|combo| {
+        let value = cache_size_mb(&IMAGE_QUALITIES, combo.selected());
+        save(|s| s.storage.image_quality = value);
+        crate::emby::browse::set_image_quality(value);
+        // Old-quality textures would only linger until evicted.
+        super::images::clear_cache();
+    });
+    group.add(&quality);
+    let max_size = cache_size_row(
+        "Maximum image cache size",
+        "The oldest images on disk are removed past this size",
+        &DISK_CACHE_LABELS,
+        cache_size_index(&DISK_CACHE_SIZES_MB, storage.image_cache_mb),
+    );
+    group.add(&max_size);
     let row = adw::ActionRow::builder()
         .title("Image cache")
         .subtitle("Calculating…")
@@ -524,6 +598,23 @@ fn storage_group(toasts: &adw::ToastOverlay) -> adw::PreferencesGroup {
         async move {
             let size = super::images::disk_cache_size().await;
             row.set_subtitle(&cache_size_label(size));
+        }
+    ));
+    max_size.connect_selected_notify(glib::clone!(
+        #[weak]
+        row,
+        move |combo| {
+            let mb = cache_size_mb(&DISK_CACHE_SIZES_MB, combo.selected());
+            save(|s| s.storage.image_cache_mb = mb);
+            // A smaller cap frees the space right away.
+            glib::spawn_future_local(glib::clone!(
+                #[weak]
+                row,
+                async move {
+                    let size = super::images::prune_disk_cache_now().await;
+                    row.set_subtitle(&cache_size_label(size));
+                }
+            ));
         }
     ));
     clear.connect_clicked(glib::clone!(
@@ -1094,9 +1185,9 @@ fn keyboard_page() -> adw::PreferencesPage {
         .icon_name(crate::ui::icons::KEYBOARD)
         .build();
     let group = adw::PreferencesGroup::builder()
-        .title("In the Player")
+        .title("Shortcuts")
         .description(
-            "Change a shortcut, then press the new key. A key moves off any other action using it.",
+            "Change a shortcut, then press the new key (or Ctrl/Alt with a key). A key moves off any other action using it.",
         )
         .build();
     let reset = gtk::Button::builder()
@@ -1186,8 +1277,12 @@ fn capture_key(
     };
     keys.connect_key_pressed({
         let finish = finish.clone();
-        move |_, key, _, _| {
-            if let Some(name) = crate::keys::key_name(key) {
+        move |_, key, _, modifiers| {
+            // A bare Ctrl/Alt/Shift is the start of a combination.
+            if crate::keys::is_modifier_key(key) {
+                return glib::Propagation::Stop;
+            }
+            if let Some(name) = crate::keys::key_press_name(key, modifiers) {
                 let mut bindings = crate::keys::bindings();
                 bindings.set(action, &name);
                 crate::keys::set_bindings(bindings);
@@ -1680,8 +1775,40 @@ pub(super) fn save(change: impl FnOnce(&mut Settings)) {
 
 #[cfg(test)]
 mod tests {
-    use super::expand_folder;
+    use super::{
+        DISK_CACHE_LABELS, DISK_CACHE_SIZES_MB, IMAGE_QUALITIES, IMAGE_QUALITY_LABELS,
+        MEMORY_CACHE_LABELS, MEMORY_CACHE_SIZES_MB, cache_size_index, cache_size_mb, expand_folder,
+    };
     use std::path::Path;
+
+    #[test]
+    fn cache_size_index_picks_exact_then_next_larger_then_last() {
+        let disk = &DISK_CACHE_SIZES_MB;
+        assert_eq!(cache_size_index(disk, 0), 0);
+        assert_eq!(cache_size_index(disk, 300), 1);
+        assert_eq!(cache_size_index(disk, 2048), 3);
+        assert_eq!(cache_size_index(disk, 99999), 5);
+        assert_eq!(cache_size_index(&MEMORY_CACHE_SIZES_MB, 256), 1);
+    }
+
+    #[test]
+    fn cache_size_mb_clamps_the_index() {
+        let disk = &DISK_CACHE_SIZES_MB;
+        assert_eq!(cache_size_mb(disk, 0), 256);
+        assert_eq!(cache_size_mb(disk, 3), 2048);
+        assert_eq!(cache_size_mb(disk, 99), 10240);
+        assert_eq!(cache_size_mb(&MEMORY_CACHE_SIZES_MB, 99), 2048);
+    }
+
+    #[test]
+    fn cache_size_labels_match_their_options() {
+        assert_eq!(DISK_CACHE_LABELS.len(), DISK_CACHE_SIZES_MB.len());
+        assert_eq!(MEMORY_CACHE_LABELS.len(), MEMORY_CACHE_SIZES_MB.len());
+        assert_eq!(IMAGE_QUALITY_LABELS.len(), IMAGE_QUALITIES.len());
+        assert_eq!(cache_size_index(&IMAGE_QUALITIES, 0), 0);
+        assert_eq!(cache_size_index(&IMAGE_QUALITIES, 90), 4);
+        assert_eq!(cache_size_index(&IMAGE_QUALITIES, 85), 4);
+    }
 
     #[test]
     fn typed_download_folders_expand_tilde_and_must_be_absolute() {
