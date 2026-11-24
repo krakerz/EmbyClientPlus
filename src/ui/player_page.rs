@@ -192,7 +192,7 @@ impl Menus {
             audio: gio::Menu::new(),
             subtitles: gio::Menu::new(),
             quality: gio::Menu::new(),
-            sleep: sleep_menu(true),
+            sleep: sleep_menu(true, false),
         }
     }
 }
@@ -563,7 +563,13 @@ impl PlayerPage {
         inner.osd.previous.set_sensitive(session.previous.is_some());
         inner.osd.next.set_sensitive(session.next.is_some());
         inner.show_chapter_buttons(session.markers.can_skip_chapters());
-        inner.menus.borrow_mut().sleep = sleep_menu(session.item.item_type == "Episode");
+        let has_intro = session.item.series_id.is_some() && session.markers.intro.is_some();
+        inner.menus.borrow_mut().sleep = sleep_menu(session.item.item_type == "Episode", has_intro);
+        set_state(
+            &inner.actions,
+            "intro-mode",
+            crate::playback::intro_mode_name(session.auto_skip()).to_variant(),
+        );
         inner.osd.svp.set_active(session.svp_enabled());
         if session.hdr && !session.svp_enabled() {
             let first_time =
@@ -1063,6 +1069,31 @@ impl Inner {
             }
         ));
         self.actions.add_action(&sleep);
+        let intro_mode = gio::SimpleAction::new_stateful(
+            "intro-mode",
+            Some(glib::VariantTy::STRING),
+            &crate::playback::intro_mode_name(None).to_variant(),
+        );
+        intro_mode.connect_activate(glib::clone!(
+            #[strong]
+            weak,
+            move |action, value| {
+                let (Some(inner), Some(mode)) = (
+                    weak.upgrade(),
+                    value
+                        .and_then(|v| v.get::<String>())
+                        .and_then(|name| crate::playback::intro_mode_from_name(&name)),
+                ) else {
+                    return;
+                };
+                let Some(session) = inner.session() else {
+                    return;
+                };
+                session.set_auto_skip(mode);
+                action.set_state(&crate::playback::intro_mode_name(mode).to_variant());
+            }
+        ));
+        self.actions.add_action(&intro_mode);
 
         // Picture: bar fill (global), aspect and zoom (per title).
         let fill_names = ["off", "blur", "glow"];
@@ -1913,13 +1944,21 @@ impl Inner {
             && duration > 0.0
             && left_in_file <= self.up_next_seconds.get() + 1.0;
         let in_intro = markers.in_intro(position);
-        let intro_skip = self.intro_skip.get();
+        let intro_skip = match session.auto_skip() {
+            Some(true) => crate::config::IntroSkip::AutoSkip,
+            Some(false) => crate::config::IntroSkip::ShowButton,
+            None => self.intro_skip.get(),
+        };
+        // Once per item: seeking back into the intro leaves it alone.
         if in_intro
             && intro_skip == crate::config::IntroSkip::AutoSkip
             && !self.intro_auto_skipped.replace(true)
             && let Some((_, end)) = markers.intro
         {
             warn(self.player.seek_absolute(end));
+            if let Some(handlers) = self.handlers() {
+                (handlers.toast)("Skipped intro");
+            }
         }
         let skip_label = if in_intro && intro_skip == crate::config::IntroSkip::ShowButton {
             Some("Skip Intro")
@@ -1967,7 +2006,7 @@ impl Inner {
                 .map(|dir| dir.display().to_string())
                 .unwrap_or_else(|| crate::svp::default_dir_label().to_string());
             button.set_tooltip_text(Some(&format!(
-                "SVP isn't installed ({looked_in} not found; set its folder in Preferences → General)"
+                "SVP isn't installed ({looked_in} not found; set its folder in Preferences → SVP)"
             )));
             return;
         }
@@ -2643,12 +2682,26 @@ fn picture_menu() -> gio::Menu {
     menu
 }
 
-fn sleep_menu(episode: bool) -> gio::Menu {
+fn sleep_menu(episode: bool, intro: bool) -> gio::Menu {
     let menu = gio::Menu::new();
     for choice in SLEEP_CHOICES {
         let item = gio::MenuItem::new(Some(&choice.label(episode)), None);
         item.set_action_and_target_value(Some("player.sleep"), Some(&choice.name().to_variant()));
         menu.append_item(&item);
+    }
+    if intro {
+        let section = gio::Menu::new();
+        let default_label = crate::playback::intro_default_label();
+        for mode in crate::playback::INTRO_CHOICES {
+            let label = crate::playback::intro_choice_label(mode, &default_label);
+            let item = gio::MenuItem::new(Some(&label), None);
+            item.set_action_and_target_value(
+                Some("player.intro-mode"),
+                Some(&crate::playback::intro_mode_name(mode).to_variant()),
+            );
+            section.append_item(&item);
+        }
+        menu.append_section(Some("Intros in this series"), &section);
     }
     menu
 }

@@ -83,7 +83,10 @@ impl Hero {
             .xalign(0.0)
             .css_classes(["dim-label"])
             .build();
-        let buttons = gtk::Box::builder().spacing(12).margin_top(6).build();
+        let buttons = gtk::Box::builder().spacing(12).build();
+        // The sync chips are added beside the buttons (see `sync_markers`).
+        let actions = gtk::Box::builder().margin_top(6).build();
+        actions.append(&buttons);
         // Word-or-character wrapping: a long unbroken string (a URL) can't
         // widen the page either.
         let tagline = gtk::Label::builder()
@@ -120,7 +123,7 @@ impl Hero {
         info.append(&kicker);
         info.append(&title);
         info.append(&meta);
-        info.append(&buttons);
+        info.append(&actions);
         info.append(&tagline);
         info.append(&details);
         // Poster (or still), then the text column with the rest of the width.
@@ -390,10 +393,12 @@ pub fn show_related(ui: &Ui, related: &gtk::Box, item: &BaseItem) {
             limit: SIMILAR_LIMIT,
             ..Default::default()
         };
-        let (included, similar) = spawn_tokio(async move {
+        let (included, similar, extras, parts) = spawn_tokio(async move {
             tokio::join!(
                 client.items(&user_id, &collections),
-                client.similar(&user_id, &item_id, SIMILAR_LIMIT)
+                client.similar(&user_id, &item_id, SIMILAR_LIMIT),
+                client.special_features(&user_id, &item_id),
+                client.additional_parts(&user_id, &item_id)
             )
         })
         .await;
@@ -434,6 +439,34 @@ pub fn show_related(ui: &Ui, related: &gtk::Box, item: &BaseItem) {
             }
             Ok(_) => {}
             Err(e) => tracing::warn!("collections holding the item failed: {e:#}"),
+        }
+        match parts {
+            Ok(items) if !items.is_empty() => {
+                related.append(&row(
+                    &ui,
+                    "Parts",
+                    &items,
+                    Shape::Landscape,
+                    Click::Open,
+                    More::None,
+                ));
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("additional parts failed: {e:#}"),
+        }
+        match extras {
+            Ok(items) if !items.is_empty() => {
+                related.append(&row(
+                    &ui,
+                    "Extras",
+                    &items,
+                    Shape::Landscape,
+                    Click::Open,
+                    More::None,
+                ));
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("special features failed: {e:#}"),
         }
         match similar {
             Ok(items) if !items.is_empty() => {

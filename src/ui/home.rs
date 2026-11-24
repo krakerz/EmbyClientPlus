@@ -224,6 +224,7 @@ fn load(ui: &Ui, content: &gtk::Box) {
                 client.next_up(&user_id, None, ROW_LIMIT),
             );
             let mut views = views?;
+            crate::library_langs::remember_libraries(&views);
             // Without them, everything shows in the server's order.
             let settings = settings.unwrap_or_else(|e| {
                 tracing::warn!("library display settings failed: {e:#}");

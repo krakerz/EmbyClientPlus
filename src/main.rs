@@ -17,6 +17,7 @@ mod flavour;
 mod frame_gen;
 mod gamescope;
 mod keys;
+mod library_langs;
 mod local;
 mod logging;
 mod music;

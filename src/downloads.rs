@@ -12,11 +12,19 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
+use crate::config::DownloadQuality;
 use crate::emby::EmbyClient;
 use crate::emby::models::BaseItem;
 use crate::update::Progress;
 
 const META_SUFFIX: &str = ".emby.json";
+
+/// The metadata key naming the quality a download was transcoded to.
+const QUALITY_KEY: &str = "EmbyClientPlusQuality";
+
+/// Audio bitrate asked of a transcode, in kbps (see
+/// `EmbyClient::transcoded_download_url`); part of the size estimate.
+const TRANSCODE_AUDIO_KBPS: u64 = 192;
 
 /// A downloaded title.
 #[derive(Debug, Clone)]
@@ -29,6 +37,14 @@ pub struct Download {
 impl Download {
     pub fn size(&self) -> u64 {
         std::fs::metadata(&self.file).map_or(0, |m| m.len())
+    }
+
+    /// The quality this copy was transcoded to (its serde name, see
+    /// `config::DownloadQuality`); `None` for the original file.
+    pub fn quality(&self) -> Option<String> {
+        let meta: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(meta_path(&self.file)).ok()?).ok()?;
+        meta[QUALITY_KEY].as_str().map(str::to_string)
     }
 }
 
@@ -122,10 +138,13 @@ pub struct Pending {
     pub season: Option<i32>,
     pub episode: Option<i32>,
     pub paused: bool,
+    /// Never `Ask` here: the picker has answered by the time it's queued.
+    #[serde(default)]
+    pub quality: DownloadQuality,
 }
 
 impl Pending {
-    pub fn new(user_id: &str, item: &BaseItem, paused: bool) -> Self {
+    pub fn new(user_id: &str, item: &BaseItem, paused: bool, quality: DownloadQuality) -> Self {
         Pending {
             user_id: user_id.to_string(),
             id: item.id.clone(),
@@ -136,6 +155,7 @@ impl Pending {
             season: item.parent_index_number,
             episode: item.index_number,
             paused,
+            quality,
         }
     }
 
@@ -490,19 +510,27 @@ pub fn discard_partial(server_id: Option<&str>, item_id: &str) {
     }
 }
 
-/// Downloads `item_id`'s original file from server `server_id` with its
+/// Downloads `item_id`'s original file (or, for a quality other than
+/// Original, a transcoded copy) from server `server_id` with its
 /// metadata and artwork; returns where it went. `progress` and `cancelled` are shared with the
 /// UI. A cancelled or interrupted download keeps its partial file, which
 /// the next attempt continues; `discard` (a cancel, not a pause) deletes it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one flat call from the queue runner"
+)]
 pub async fn fetch(
     client: Arc<EmbyClient>,
     server_id: Option<String>,
     user_id: String,
     item_id: String,
+    quality: DownloadQuality,
     progress: Arc<Progress>,
     cancelled: Arc<AtomicBool>,
     discard: Arc<AtomicBool>,
 ) -> Result<PathBuf> {
+    // A transcode (Emby can't resume one by byte range) always starts over.
+    let transcode = quality.transcode();
     let raw = client.item_json(&user_id, &item_id).await?;
     let mut value: serde_json::Value =
         serde_json::from_str(&raw).context("Emby sent unreadable metadata")?;
@@ -519,16 +547,20 @@ pub async fn fetch(
     let server_id = server_id.or_else(|| item.server_id.clone());
     let key = partial_key(server_id.as_deref(), &item.id);
     let source = &value["MediaSources"][0];
-    let extension = source["Container"]
-        .as_str()
-        .and_then(|c| c.split(',').next())
-        .or_else(|| {
-            source["Path"]
-                .as_str()
-                .and_then(|p| Path::new(p).extension()?.to_str())
-        })
-        .unwrap_or("mkv")
-        .to_string();
+    let extension = if transcode.is_some() {
+        "mkv".to_string()
+    } else {
+        source["Container"]
+            .as_str()
+            .and_then(|c| c.split(',').next())
+            .or_else(|| {
+                source["Path"]
+                    .as_str()
+                    .and_then(|p| Path::new(p).extension()?.to_str())
+            })
+            .unwrap_or("mkv")
+            .to_string()
+    };
     let source_id = source["Id"].as_str().unwrap_or(&item.id).to_string();
 
     let base = folder().join(relative_path(&item));
@@ -547,25 +579,77 @@ pub async fn fetch(
         .into_iter()
         .next()
         .unwrap_or_else(|| partial_path(&file, &key));
+    if transcode.is_some() {
+        let _ = std::fs::remove_file(&partial);
+    }
     let have = std::fs::metadata(&partial).map_or(0, |m| m.len());
-    let size = source["Size"].as_u64().filter(|s| *s > 0);
+    let size = match transcode {
+        Some((kbps, _)) => item
+            .run_time_ticks
+            .filter(|t| *t > 0)
+            .map(|ticks| estimated_transcode_size(kbps, ticks)),
+        None => source["Size"].as_u64().filter(|s| *s > 0),
+    };
+    let mut audio_index = None;
     // Finished but never renamed (the app died in between): nothing to fetch.
-    if !size.is_some_and(|size| have >= size) {
+    // (A transcode is never finished before it starts.)
+    if transcode.is_some() || !size.is_some_and(|size| have >= size) {
         if let (Some(size), Some(free)) = (size, free_space(&file)) {
             let needed = size.saturating_sub(have);
             if needed + SPACE_RESERVE > free {
                 return Err(NotEnoughSpace { needed, free }.into());
             }
         }
-        let url = client.direct_stream_url(&item.id, &source_id)?;
-        if let Err(e) = client
-            .download_to(&url, &partial, &progress, &cancelled, true)
-            .await
-        {
-            if discard.load(std::sync::atomic::Ordering::Relaxed) {
+        if let Some((kbps, height)) = transcode {
+            let streams = source["MediaStreams"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let remembered = crate::playback::remembered_for(&crate::playback::title_key(&item).0)
+                .and_then(|o| o.audio_language);
+            audio_index = pick_audio_index(
+                &streams,
+                remembered.as_deref(),
+                &crate::account::playback().audio_language,
+            );
+            let session = uuid::Uuid::new_v4().simple().to_string();
+            let url = client.transcoded_download_url(
+                &item.id,
+                &source_id,
+                kbps,
+                height,
+                audio_index.and_then(|i| i32::try_from(i).ok()),
+                &session,
+            )?;
+            if let Err(e) = client
+                .download_to(
+                    &url,
+                    &partial,
+                    &progress,
+                    &cancelled,
+                    false,
+                    size.unwrap_or(0),
+                )
+                .await
+            {
+                // The server keeps encoding for a dropped client otherwise.
+                if let Err(stop) = client.stop_encoding(&session).await {
+                    tracing::warn!("couldn't stop the server's encode: {stop:#}");
+                }
                 let _ = std::fs::remove_file(&partial);
+                return Err(e);
             }
-            return Err(e);
+        } else {
+            let url = client.direct_stream_url(&item.id, &source_id)?;
+            if let Err(e) = client
+                .download_to(&url, &partial, &progress, &cancelled, true, 0)
+                .await
+            {
+                if discard.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = std::fs::remove_file(&partial);
+                }
+                return Err(e);
+            }
         }
     }
     // Decided now, not at the start: another download may have taken the
@@ -573,10 +657,23 @@ pub async fn fetch(
     let file = claim(file, server_id.as_deref(), &item.id);
     std::fs::rename(&partial, &file)
         .with_context(|| format!("couldn't finish {}", file.display()))?;
+    let raw = if transcode.is_some() {
+        transcoded_meta(&value, audio_index, quality).to_string()
+    } else {
+        raw
+    };
     crate::config::write_atomic(&meta_path(&file), raw.as_bytes())
         .with_context(|| format!("couldn't write the metadata for {}", file.display()))?;
     forget_ids();
-    save_subtitles(&client, &item.id, &source_id, source, &file).await;
+    save_subtitles(
+        &client,
+        &item.id,
+        &source_id,
+        source,
+        &file,
+        transcode.is_some(),
+    )
+    .await;
     if let Some(image) = item.landscape().or_else(|| item.poster()) {
         let url = client.url(&EmbyClient::image_path(&image, 640));
         let art = Progress::default();
@@ -588,6 +685,7 @@ pub async fn fetch(
                 &art,
                 &AtomicBool::new(false),
                 false,
+                0,
             )
             .await
         {
@@ -601,14 +699,16 @@ pub async fn fetch(
 const SUBTITLE_EXTENSIONS: [&str; 5] = ["srt", "ass", "ssa", "vtt", "sub"];
 
 /// Saves `source`'s external subtitles beside `file`. Embedded ones are
-/// already inside the file. A subtitle that fails is skipped: the video
-/// still plays.
+/// already inside the file, except with `all_text` (a transcode drops
+/// them): then embedded text ones are saved too. A subtitle that fails is
+/// skipped: the video still plays.
 async fn save_subtitles(
     client: &EmbyClient,
     item_id: &str,
     source_id: &str,
     source: &serde_json::Value,
     file: &Path,
+    all_text: bool,
 ) {
     let streams = source["MediaStreams"]
         .as_array()
@@ -616,7 +716,8 @@ async fn save_subtitles(
         .unwrap_or_default();
     let mut used: Vec<PathBuf> = Vec::new();
     for stream in streams.iter().filter(|s| {
-        s["Type"].as_str() == Some("Subtitle") && s["IsExternal"].as_bool() == Some(true)
+        s["Type"].as_str() == Some("Subtitle")
+            && (s["IsExternal"].as_bool() == Some(true) || (all_text && is_text_subtitle(s)))
     }) {
         let Some(index) = stream["Index"].as_i64().and_then(|i| i32::try_from(i).ok()) else {
             continue;
@@ -643,7 +744,7 @@ async fn save_subtitles(
         };
         let done = Progress::default();
         match client
-            .download_to(&url, &path, &done, &AtomicBool::new(false), false)
+            .download_to(&url, &path, &done, &AtomicBool::new(false), false, 0)
             .await
         {
             Ok(()) => used.push(path),
@@ -656,6 +757,83 @@ async fn save_subtitles(
             }
         }
     }
+}
+
+/// A subtitle stream in a text format (not PGS/VobSub), so it can be
+/// saved as a sidecar file.
+fn is_text_subtitle(stream: &serde_json::Value) -> bool {
+    stream["IsTextSubtitleStream"].as_bool() == Some(true)
+        && stream["Codec"].as_str().is_some_and(|c| {
+            matches!(
+                c.to_ascii_lowercase().as_str(),
+                "srt" | "subrip" | "ass" | "ssa" | "webvtt" | "vtt" | "mov_text"
+            )
+        })
+}
+
+/// Bytes a transcode of `ticks` (100 ns units) of video at `video_kbps`
+/// is expected to take: Emby sends no Content-Length for one.
+fn estimated_transcode_size(video_kbps: u32, ticks: i64) -> u64 {
+    let seconds = u64::try_from(ticks).unwrap_or(0) / 10_000_000;
+    (u64::from(video_kbps) + TRANSCODE_AUDIO_KBPS) * 1000 / 8 * seconds
+}
+
+/// The `Index` of the audio stream a transcode keeps: the remembered
+/// language, else the account's, else the file's default, else the first.
+fn pick_audio_index(
+    streams: &[serde_json::Value],
+    remembered: Option<&str>,
+    account_language: &str,
+) -> Option<i64> {
+    let audio: Vec<&serde_json::Value> = streams
+        .iter()
+        .filter(|s| s["Type"].as_str() == Some("Audio"))
+        .collect();
+    let by_language = |language: &str| {
+        audio.iter().find(|s| {
+            s["Language"]
+                .as_str()
+                .is_some_and(|l| l.eq_ignore_ascii_case(language))
+        })
+    };
+    remembered
+        .filter(|l| !l.is_empty())
+        .and_then(by_language)
+        .or_else(|| {
+            Some(account_language)
+                .filter(|l| !l.is_empty())
+                .and_then(by_language)
+        })
+        .or_else(|| {
+            audio
+                .iter()
+                .find(|s| s["IsDefault"].as_bool() == Some(true))
+        })
+        .or_else(|| audio.first())
+        .and_then(|s| s["Index"].as_i64())
+}
+
+/// The metadata of a transcoded copy: matroska, the video and the one
+/// audio stream kept, and the quality it was made at.
+fn transcoded_meta(
+    value: &serde_json::Value,
+    audio_index: Option<i64>,
+    quality: DownloadQuality,
+) -> serde_json::Value {
+    let mut meta = value.clone();
+    let source = &mut meta["MediaSources"][0];
+    if source.is_object() {
+        source["Container"] = "mkv".into();
+        if let Some(streams) = source["MediaStreams"].as_array_mut() {
+            streams.retain(|s| match s["Type"].as_str() {
+                Some("Video") => true,
+                Some("Audio") => s["Index"].as_i64() == audio_index && audio_index.is_some(),
+                _ => false,
+            });
+        }
+    }
+    meta[QUALITY_KEY] = serde_json::to_value(quality).unwrap_or_default();
+    meta
 }
 
 /// `<name>.<language>[.forced][.2].<format>` beside `file`, not one of `used`.
@@ -936,13 +1114,71 @@ mod tests {
             index_number: Some(2),
             ..Default::default()
         };
-        let pending = Pending::new("u", &item, true);
+        let pending = Pending::new("u", &item, true, DownloadQuality::P720);
         let back: Pending =
             serde_json::from_str(&serde_json::to_string(&pending).unwrap()).unwrap();
         let again = back.item();
         assert!(back.paused);
         assert_eq!((again.id.as_str(), again.index_number), ("7", Some(2)));
         assert_eq!(again.series_name.as_deref(), Some("Show"));
+        assert_eq!(back.quality, DownloadQuality::P720);
+        // A queue saved before qualities existed loads as Original.
+        let mut old = serde_json::to_value(&pending).unwrap();
+        old.as_object_mut().unwrap().remove("quality");
+        let old: Pending = serde_json::from_value(old).unwrap();
+        assert_eq!(old.quality, DownloadQuality::Original);
+    }
+
+    #[test]
+    fn transcoded_meta_keeps_one_audio_and_names_the_quality() {
+        let value = serde_json::json!({
+            "Id": "1",
+            "MediaSources": [{
+                "Container": "mp4",
+                "MediaStreams": [
+                    {"Type": "Video", "Index": 0},
+                    {"Type": "Audio", "Index": 1, "Language": "jpn"},
+                    {"Type": "Audio", "Index": 2, "Language": "eng"},
+                    {"Type": "Subtitle", "Index": 3},
+                ],
+            }],
+        });
+        let meta = transcoded_meta(&value, Some(2), DownloadQuality::P1080);
+        let source = &meta["MediaSources"][0];
+        assert_eq!(source["Container"], "mkv");
+        let kept: Vec<i64> = source["MediaStreams"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s["Index"].as_i64())
+            .collect();
+        assert_eq!(kept, [0, 2]);
+        assert_eq!(meta[QUALITY_KEY], "p1080");
+    }
+
+    #[test]
+    fn transcodes_pick_audio_by_language_then_default_then_first() {
+        let streams: Vec<serde_json::Value> = serde_json::from_value(serde_json::json!([
+            {"Type": "Video", "Index": 0},
+            {"Type": "Audio", "Index": 1, "Language": "jpn"},
+            {"Type": "Audio", "Index": 2, "Language": "eng", "IsDefault": true},
+        ]))
+        .unwrap();
+        assert_eq!(pick_audio_index(&streams, Some("JPN"), "eng"), Some(1));
+        assert_eq!(pick_audio_index(&streams, None, "jpn"), Some(1));
+        assert_eq!(pick_audio_index(&streams, Some("fra"), ""), Some(2));
+        assert_eq!(pick_audio_index(&streams[..2], None, ""), Some(1));
+        assert_eq!(pick_audio_index(&streams[..1], None, ""), None);
+    }
+
+    #[test]
+    fn transcode_size_estimate_counts_video_and_audio() {
+        // 1 hour at 4000 + 192 kbps.
+        assert_eq!(
+            estimated_transcode_size(4000, 3600 * 10_000_000),
+            4192 * 1000 / 8 * 3600
+        );
+        assert_eq!(estimated_transcode_size(4000, -5), 0);
     }
 
     #[test]

@@ -374,7 +374,15 @@ fn show_menu_with(ui: &Ui, widget: &gtk::Widget, item: &BaseItem, in_place: bool
         };
         add(
             label,
-            Box::new(move |ui| super::downloads::start_episodes_of(ui, &target)),
+            Box::new(move |ui| {
+                let target = target.clone();
+                super::downloads::ask_quality(
+                    ui,
+                    &target.clone(),
+                    ui.widget(),
+                    move |ui, quality| super::downloads::start_episodes_of(ui, &target, quality),
+                );
+            }),
         );
     }
     if item.item_type == "Series" {

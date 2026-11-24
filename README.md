@@ -12,13 +12,13 @@ Icons: [Lucide](https://lucide.dev/) (ISC, `data/icons/LICENSE`), converted for 
 
 ## Features
 
-- **Browsing:** Home follows your Emby library order and visibility; library grids with remembered sort and filters (decade, HD/SD, subtitles, rating, recently added) and an A–Z strip, Suggestions, Episodes (TV) and Collections tabs; series open on the season you're watching; details show original title, air dates, studios, genres, tags and each season's own overview when the server has them; cast, More Like This, Included In, favourites, History, search.
-- **Playback:** direct play or transcode (Original down to 420 kbps), version picker, resume and watched state synced, chapters with seek-bar previews, Skip Intro/Credits, Up Next, sleep timer, aspect/zoom, black-bar blur/glow.
+- **Browsing:** Home follows your Emby library order and visibility; library grids with remembered sort and filters (decade, HD/SD, subtitles, rating, recently added) and an A–Z strip, Suggestions, Episodes (TV) and Collections tabs; series open on the season you're watching; details show original title, air dates, studios, genres, tags and each season's own overview when the server has them; cast, Extras and Parts, More Like This, Included In, favourites, History, search.
+- **Playback:** direct play or transcode (Original down to 420 kbps), version picker, resume and watched state synced, chapters with seek-bar previews, Skip Intro/Credits (or always skip/always show per series), Up Next, sleep timer, aspect/zoom, black-bar blur/glow.
 - **Picture:** quality presets or custom scalers and debanding strength, deinterlacing, and per-title shaders: FSR, Anime4K, chroma upscalers (KrigBilateral, Chroma from Luma), luma upscalers (RAVU, NNEDI3, FSRCNNX), sharpeners (AMD CAS, Adaptive sharpen), plus your own.
 - **SVP:** attaches when SVP 4 is installed; per-title toggle with a status light; mpv frame blending as an alternative; Preferences shows SVP's main settings and can override them.
-- **Profile:** your Emby account's own settings (languages, subtitle mode, autoplay, intro skipping, hidden watched items, library order), picture, password and PIN; shared with Emby's apps.
+- **Profile:** your Emby account's own settings (languages, subtitle mode, autoplay, intro skipping, hidden watched items, library order), picture, password and PIN; shared with Emby's apps. Audio and subtitle languages can also be set per library (Preferences → General → Library languages), and each series or movie remembers its own.
 - **Tracking:** MyAnimeList, AniList, Kitsu and Trakt follow what you watch, including split anime seasons (matched through AniBridge) and downloads watched offline; MyAnimeList and AniList log in from Desktop Mode; Trakt uses your own free Client ID (see [below](#trakt-use-your-own-client-id)).
-- **Downloads:** original files for offline play with the full player; pause and resume, resuming after the app closes, with disk space shown; auto-download keeps a series' next unwatched episodes and can delete watched ones; downloaded titles are badged.
+- **Downloads:** original files or smaller server-converted copies (1080p/720p; default, per series or asked each time) for offline play with the full player; pause and resume (also all at once), clear the queue, resuming after the app closes, with disk space shown; auto-download keeps a series' next unwatched episodes and can delete watched ones; downloaded titles are badged.
 - **Music:** mini player, queue, shuffle/repeat, gapless, playlists, Instant Mix, media keys and now-playing on every OS.
 - **Controller & Steam Deck:** everything works with a gamepad, with on-screen hints and remappable buttons; Steam library artwork included.
 - **Also:** standalone player for local files and links (`--player`), UI size 50–200%, light/dark theme, own `mpv.conf`, YouTube trailers (`yt-dlp`), self-updates.
@@ -46,7 +46,7 @@ AppImage it needs a current glibc and says so at start if the system's is too ol
 macOS: the app isn't notarized; allow it once in System Settings → Privacy & Security → **Open
 Anyway** (or `xattr -dr com.apple.quarantine "/Applications/Emby Client+.app"`).
 
-Every build updates itself (Preferences → Updates). SVP 4 is optional and found in its usual
+Every build updates itself (Preferences → General → Updates). SVP 4 is optional and found in its usual
 folder (`~/SVP4`, `C:\Program Files\SVP 4`, `/Applications/SVP 4 Mac.app`) or one you set. On
 macOS, SVP also needs VapourSynth from Homebrew (`brew install vapoursynth`), as SVP for Mac does.
 
@@ -74,8 +74,8 @@ Sign in to your Emby server (remembered), pick a title, press **Play**. App sett
 menu → **Preferences**; your account's settings are on **Profile** (the avatar, top right).
 
 - **Downloads:** the download button on a movie or episode page, or **Download** in any item's
-  menu (X on a controller, right-click). A series' Download menu also has **Auto-download…**.
-  Files go to `Videos/Emby Client+` (Preferences → Downloads); Home's menu → **Downloads** lists
+  menu (X on a controller, right-click). A series' Download menu also has **Auto-download…** and **Download Quality…**; its settings button sets how its **Intros** are handled.
+  Files go to `Videos/Emby Client+` (Preferences → General → Downloads, which also sets the quality); Home's menu → **Downloads** lists
   them.
 - **Video:** Preferences → Video picks a preset (**Auto**, **Fast** for Steam Deck, **Balanced**,
   **High quality**, **Custom**). The player's **Shaders** button picks one preset per group
@@ -85,7 +85,7 @@ menu → **Preferences**; your account's settings are on **Profile** (the avatar
   BSD-3-Clause, LGPL-3.0); each group's `LICENSE` is in `data/shaders/<group>/` and next to the
   installed copies.
 - **Server identity:** the server lists the app as Emby Web by default; turn off Preferences →
-  Server → "Appear as a web browser" to list it as Emby Client+ (sign in again).
+  General → Server → "Appear as a web browser" to list it as Emby Client+ (sign in again).
 - **Steam Game Mode:** add the AppImage (or `~/.local/bin/embyclientplus`) as a non-Steam game with
   the **Gamepad** layout. Artwork is in `EmbyClientPlus-<version>-steam-library.zip` on the
   release page (and the archive's `steam-library/`); set it from the shortcut's library page.

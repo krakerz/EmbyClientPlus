@@ -3,7 +3,7 @@
 //! runs at a time; the rest wait in a queue (a whole season or series).
 
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,6 +12,7 @@ use adw::prelude::*;
 use gtk::glib;
 
 use super::{Ui, clear, fixed_picture, format_runtime};
+use crate::config::DownloadQuality;
 use crate::downloads::Download;
 use crate::emby::models::BaseItem;
 use crate::update::Progress;
@@ -35,6 +36,9 @@ thread_local! {
     static PAUSED: RefCell<Vec<BaseItem>> = const { RefCell::new(Vec::new()) };
     /// Bumped at sign-out: downloads started before it leave the lists alone.
     static EPOCH: Cell<u64> = const { Cell::new(0) };
+    /// The quality each queued, running or paused download was asked for
+    /// (by item id); anything missing gets the default from Preferences.
+    static QUALITY: RefCell<HashMap<String, DownloadQuality>> = RefCell::new(HashMap::new());
     /// An auto-download check is under way.
     static SYNCING: Cell<bool> = const { Cell::new(false) };
     /// The check waiting to run after playback stops.
@@ -56,9 +60,122 @@ fn is_paused(item_id: &str) -> bool {
     PAUSED.with(|p| p.borrow().iter().any(|i| i.id == item_id))
 }
 
-/// Downloads `item` (once), after whatever is already downloading.
-pub fn start(ui: &Ui, item: &BaseItem) {
-    if enqueue(ui, item) {
+/// The quality to download `item_id` at.
+fn quality_of(item_id: &str) -> DownloadQuality {
+    QUALITY
+        .with(|q| q.borrow().get(item_id).copied())
+        .unwrap_or_else(|| {
+            crate::config::Settings::load()
+                .unwrap_or_default()
+                .downloads
+                .quality
+                .resolved()
+        })
+}
+
+/// The quality chosen for a series (or movie) on its page, if any.
+fn stored_quality(item: &BaseItem) -> Option<DownloadQuality> {
+    // A series (not an episode) is its own key.
+    let key = if item.item_type == "Series" {
+        item.id.clone()
+    } else {
+        crate::playback::title_key(item).0
+    };
+    crate::playback::remembered_for(&key).and_then(|o| o.download_quality)
+}
+
+/// The quality to download `item` at: its series' (or movie's) own, else
+/// Preferences'. `None` means ask.
+pub fn quality_for(item: &BaseItem) -> Option<DownloadQuality> {
+    let setting = stored_quality(item).unwrap_or_else(|| {
+        crate::config::Settings::load()
+            .unwrap_or_default()
+            .downloads
+            .quality
+    });
+    (setting != DownloadQuality::Ask).then_some(setting)
+}
+
+/// The quality for auto-downloads of a series: nobody is there to ask, so
+/// "Ask each time" means Original.
+fn unattended_quality(series_id: &str) -> DownloadQuality {
+    crate::playback::remembered_for(series_id)
+        .and_then(|o| o.download_quality)
+        .unwrap_or_else(|| {
+            crate::config::Settings::load()
+                .unwrap_or_default()
+                .downloads
+                .quality
+        })
+        .resolved()
+}
+
+/// Calls `then` with the quality to download `item` at: the series' own or
+/// Preferences' default, or the one picked in a dialog when that is "Ask
+/// each time".
+pub fn ask_quality(
+    ui: &Ui,
+    item: &BaseItem,
+    parent: &impl IsA<gtk::Widget>,
+    then: impl Fn(&Ui, DownloadQuality) + 'static,
+) {
+    if let Some(quality) = quality_for(item) {
+        then(ui, quality);
+        return;
+    }
+    let then = Rc::new(then);
+    let group = adw::PreferencesGroup::builder()
+        .description("Smaller copies are converted by the server first")
+        .build();
+    let rows: Vec<(DownloadQuality, adw::ActionRow)> = DownloadQuality::ALL
+        .into_iter()
+        .filter(|q| *q != DownloadQuality::Ask)
+        .map(|q| {
+            let row = adw::ActionRow::builder()
+                .title(q.label())
+                .subtitle(quality_hint(q))
+                .activatable(true)
+                .build();
+            row.add_suffix(&gtk::Image::from_icon_name(crate::ui::icons::DOWNLOAD));
+            group.add(&row);
+            (q, row)
+        })
+        .collect();
+    let dialog = super::form_dialog("Download quality", &[&group]);
+    if let Some((_, first)) = rows.first() {
+        dialog.set_focus(Some(first));
+    }
+    for (quality, row) in &rows {
+        let (weak, then, dialog_ref, quality) =
+            (ui.downgrade(), then.clone(), dialog.downgrade(), *quality);
+        row.connect_activated(move |_| {
+            if let Some(dialog) = dialog_ref.upgrade() {
+                dialog.close();
+            }
+            if let Some(ui) = weak.upgrade() {
+                then(&ui, quality);
+            }
+        });
+    }
+    dialog.present(Some(parent));
+}
+
+/// The quality picker's subtitle: what the choice means in practice.
+fn quality_hint(quality: DownloadQuality) -> String {
+    match quality.transcode() {
+        // Video plus the 192 kbps stereo track, per hour of video.
+        Some((kbps, height)) => {
+            let gb_per_hour = (f64::from(kbps) + 192.0) * 3600.0 / 8.0 / 1_000_000.0;
+            format!("Up to {height}p, about {gb_per_hour:.1} GB per hour, stereo")
+        }
+        None => "The server's file as is, all tracks · recommended".to_string(),
+    }
+}
+
+/// Downloads `item` (once) at `quality`, after whatever is already
+/// downloading.
+pub fn start(ui: &Ui, item: &BaseItem, quality: DownloadQuality) {
+    if enqueue(ui, item, quality) {
         if RUNNING.with(|r| r.borrow().is_empty()) {
             ui.toast(&format!("Downloading {}", item.episode_label()));
         } else {
@@ -69,8 +186,8 @@ pub fn start(ui: &Ui, item: &BaseItem) {
 }
 
 /// Queues `item` unless it's downloaded, downloading or queued already;
-/// a paused one is resumed.
-fn enqueue(ui: &Ui, item: &BaseItem) -> bool {
+/// a paused one is resumed (at the quality it had).
+fn enqueue(ui: &Ui, item: &BaseItem, quality: DownloadQuality) -> bool {
     // The cached id set: queueing a long series mustn't rescan the folder
     // for every episode.
     if is_running(&item.id) || crate::downloads::is_downloaded(ui.server_id(), &item.id) {
@@ -81,6 +198,9 @@ fn enqueue(ui: &Ui, item: &BaseItem) -> bool {
         let index = paused.iter().position(|i| i.id == item.id)?;
         Some(paused.remove(index))
     });
+    if paused.is_none() {
+        QUALITY.with(|q| q.borrow_mut().insert(item.id.clone(), quality));
+    }
     QUEUE.with(|q| {
         q.borrow_mut()
             .push_back(paused.unwrap_or_else(|| item.clone()))
@@ -90,7 +210,7 @@ fn enqueue(ui: &Ui, item: &BaseItem) -> bool {
 
 /// Downloads every episode of `target` (a series or a season) not yet
 /// downloaded, in order.
-pub fn start_episodes_of(ui: &Ui, target: &BaseItem) {
+pub fn start_episodes_of(ui: &Ui, target: &BaseItem, quality: DownloadQuality) {
     let series_id = match target.item_type.as_str() {
         "Series" => target.id.clone(),
         _ => match &target.series_id {
@@ -115,7 +235,7 @@ pub fn start_episodes_of(ui: &Ui, target: &BaseItem) {
         let added = episodes
             .iter()
             .filter(|e| season.is_none() || e.season_id == season)
-            .filter(|e| enqueue(&ui, e))
+            .filter(|e| enqueue(&ui, e, quality))
             .count();
         match added {
             0 => ui.toast(&format!("Everything in {name} is downloaded already")),
@@ -125,6 +245,67 @@ pub fn start_episodes_of(ui: &Ui, target: &BaseItem) {
         pump(&ui);
         ui.data_changed();
     });
+}
+
+/// Pauses everything: the waiting ones move to Paused (so none starts in
+/// place of the running one) and the running one stops, keeping its partial.
+fn pause_all(ui: &Ui) {
+    let waiting: Vec<BaseItem> = QUEUE.with(|q| q.borrow_mut().drain(..).collect());
+    PAUSED.with(|p| p.borrow_mut().extend(waiting));
+    RUNNING.with(|r| {
+        for d in r.borrow().iter() {
+            d.cancelled.store(true, Ordering::Relaxed);
+        }
+    });
+    save_state(ui);
+    ui.data_changed();
+}
+
+/// Cancels the running download and drops every waiting and paused one with
+/// its partial file. Finished downloads stay.
+fn clear_all(ui: &Ui) {
+    let dropped: Vec<BaseItem> = QUEUE.with(|q| q.borrow_mut().drain(..).collect());
+    let paused: Vec<BaseItem> = PAUSED.with(|p| p.borrow_mut().drain(..).collect());
+    for item in dropped.iter().chain(&paused) {
+        crate::downloads::discard_partial(ui.server_id(), &item.id);
+    }
+    let running: Vec<String> =
+        RUNNING.with(|r| r.borrow().iter().map(|d| d.item.id.clone()).collect());
+    for id in running {
+        cancel_running(&id);
+    }
+    save_state(ui);
+    ui.data_changed();
+}
+
+/// Asks before [`clear_all`].
+fn confirm_clear_all(ui: &Ui, count: usize, parent: &impl IsA<gtk::Widget>) {
+    let message = adw::PreferencesGroup::builder()
+        .title(if count == 1 {
+            "Clear 1 download?".to_string()
+        } else {
+            format!("Clear {count} downloads?")
+        })
+        .description(
+            "Stops what's downloading and removes everything waiting or paused, deleting the \
+             partial files. Finished downloads stay.",
+        )
+        .build();
+    let clear = super::action_row("Clear All", "destructive-action");
+    let dialog = super::form_dialog(
+        "Clear Downloads",
+        &[&message, &super::actions_group(&[&clear])],
+    );
+    let (weak, dialog_ref) = (ui.downgrade(), dialog.downgrade());
+    clear.connect_activated(move |_| {
+        if let Some(dialog) = dialog_ref.upgrade() {
+            dialog.close();
+        }
+        if let Some(ui) = weak.upgrade() {
+            clear_all(&ui);
+        }
+    });
+    dialog.present(Some(parent));
 }
 
 /// Starts the next queued download if none is running, and saves what's
@@ -148,24 +329,22 @@ fn save_state(ui: &Ui) {
 fn save_state_for(user_id: &str) {
     let mut pending: Vec<crate::downloads::Pending> = Vec::new();
     RUNNING.with(|r| {
-        pending.extend(
-            r.borrow()
-                .iter()
-                .map(|d| crate::downloads::Pending::new(user_id, &d.item, false)),
-        )
+        pending.extend(r.borrow().iter().map(|d| {
+            crate::downloads::Pending::new(user_id, &d.item, false, quality_of(&d.item.id))
+        }))
     });
     QUEUE.with(|q| {
         pending.extend(
             q.borrow()
                 .iter()
-                .map(|i| crate::downloads::Pending::new(user_id, i, false)),
+                .map(|i| crate::downloads::Pending::new(user_id, i, false, quality_of(&i.id))),
         )
     });
     PAUSED.with(|p| {
         pending.extend(
             p.borrow()
                 .iter()
-                .map(|i| crate::downloads::Pending::new(user_id, i, true)),
+                .map(|i| crate::downloads::Pending::new(user_id, i, true, quality_of(&i.id))),
         )
     });
     crate::downloads::save_pending(user_id, &pending);
@@ -185,6 +364,7 @@ pub fn sign_out(ui: &Ui) {
     RUNNING.with(|r| r.borrow_mut().clear());
     QUEUE.with(|q| q.borrow_mut().clear());
     PAUSED.with(|p| p.borrow_mut().clear());
+    QUALITY.with(|q| q.borrow_mut().clear());
     if let Some(source) = PENDING_SYNC.with(|p| p.take()) {
         source.remove();
     }
@@ -204,6 +384,7 @@ pub fn restore(ui: &Ui) {
     let mut resumed = 0;
     for entry in pending {
         let item = entry.item();
+        QUALITY.with(|q| q.borrow_mut().insert(item.id.clone(), entry.quality));
         if crate::downloads::is_downloaded(ui.server_id(), &item.id)
             || is_running(&item.id)
             || is_paused(&item.id)
@@ -237,6 +418,7 @@ fn run(ui: &Ui, item: &BaseItem) {
     let server_id = ui.server_id().map(str::to_string);
     let weak = ui.downgrade();
     let epoch = EPOCH.with(Cell::get);
+    let quality = quality_of(&item.id);
     glib::spawn_future_local(async move {
         let (progress, cancelled, discard, id) = (
             running.progress.clone(),
@@ -249,6 +431,7 @@ fn run(ui: &Ui, item: &BaseItem) {
             server_id,
             user_id.clone(),
             id,
+            quality,
             progress,
             cancelled,
             discard,
@@ -500,6 +683,14 @@ fn fill(ui: &Ui, content: &gtk::Box) {
         );
         return;
     }
+    let queued = running.len() + waiting.len() + paused.len();
+    if queued > 0 {
+        content.append(&queue_controls(
+            ui,
+            queued,
+            running.len() + waiting.len() > 0,
+        ));
+    }
     if !jobs.is_empty() {
         let list = section(content, "Auto-download", None);
         for job in &jobs {
@@ -558,6 +749,41 @@ fn fill(ui: &Ui, content: &gtk::Box) {
     if let Some(mark) = mark {
         mark.restore();
     }
+}
+
+/// "Pause all" (while anything is going; the Paused section has its own
+/// Resume All) and "Clear all", above the queue.
+fn queue_controls(ui: &Ui, queued: usize, active: bool) -> gtk::Box {
+    let bar = gtk::Box::builder()
+        .spacing(12)
+        .halign(gtk::Align::End)
+        .build();
+    if active {
+        let pause = gtk::Button::builder()
+            .label("Pause all")
+            .tooltip_text("Pause every download (keeps what's downloaded)")
+            .build();
+        let weak = ui.downgrade();
+        pause.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                pause_all(&ui);
+            }
+        });
+        bar.append(&pause);
+    }
+    let clear = gtk::Button::builder()
+        .label("Clear all")
+        .tooltip_text("Cancel every download and delete the partial files")
+        .css_classes(["destructive-action"])
+        .build();
+    let weak = ui.downgrade();
+    clear.connect_clicked(move |button| {
+        if let Some(ui) = weak.upgrade() {
+            confirm_clear_all(&ui, queued, button);
+        }
+    });
+    bar.append(&clear);
+    bar
 }
 
 /// A heading (with an optional button at its end) over a list.
@@ -726,6 +952,12 @@ fn finished_row(ui: &Ui, download: &Download) -> adw::ActionRow {
         details.push(format_runtime(ticks));
     }
     details.push(super::format_size(download.size()));
+    if let Some(quality) = download.quality() {
+        details.push(
+            serde_json::from_value::<DownloadQuality>(quality.into())
+                .map_or_else(|_| "Transcoded".to_string(), |q| q.label().to_string()),
+        );
+    }
     row.set_subtitle(&glib::markup_escape_text(&details.join(" · ")));
     let thumb = match &download.image {
         Some(path) => gtk::Picture::for_filename(path),
@@ -906,6 +1138,50 @@ pub fn auto_dialog(ui: &Ui, item: &BaseItem, parent: &impl IsA<gtk::Widget>) {
     dialog.present(Some(parent));
 }
 
+/// Picks the download quality of the series `item` belongs to ("As in
+/// Preferences" clears it).
+pub fn quality_dialog(item: &BaseItem, parent: &impl IsA<gtk::Widget>) {
+    let (key, item_type) = if item.item_type == "Series" {
+        (item.id.clone(), crate::db::ItemType::Series)
+    } else {
+        crate::playback::title_key(item)
+    };
+    let name = item.series_name.as_deref().unwrap_or(&item.name);
+    let current = crate::playback::remembered_for(&key).and_then(|o| o.download_quality);
+    let group = adw::PreferencesGroup::builder()
+        .title(glib::markup_escape_text(name))
+        .description("Used by this series' downloads, auto-downloads included")
+        .build();
+    let choices = std::iter::once(None).chain(DownloadQuality::ALL.map(Some));
+    let rows: Vec<(Option<DownloadQuality>, adw::ActionRow)> = choices
+        .map(|choice| {
+            let row = adw::ActionRow::builder()
+                .title(choice.map_or("As in Preferences", DownloadQuality::label))
+                .activatable(true)
+                .build();
+            if choice == current {
+                row.add_suffix(&gtk::Image::from_icon_name(crate::ui::icons::WATCHED));
+            }
+            group.add(&row);
+            (choice, row)
+        })
+        .collect();
+    let dialog = super::form_dialog("Download quality", &[&group]);
+    if let Some((_, row)) = rows.iter().find(|(choice, _)| *choice == current) {
+        dialog.set_focus(Some(row));
+    }
+    for (choice, row) in &rows {
+        let (dialog_ref, key, choice) = (dialog.downgrade(), key.clone(), *choice);
+        row.connect_activated(move |_| {
+            crate::playback::remember_for(&key, item_type, |o| o.download_quality = choice);
+            if let Some(dialog) = dialog_ref.upgrade() {
+                dialog.close();
+            }
+        });
+    }
+    dialog.present(Some(parent));
+}
+
 /// At sign-in: carries on with last time's downloads, then checks
 /// auto-downloads now and every half hour while signed in.
 pub fn start_auto(ui: &Ui) {
@@ -983,10 +1259,11 @@ pub fn sync_auto(ui: &Ui) {
                 })
                 .count();
             // A paused episode stays paused (by you, or for disk space).
+            let quality = unattended_quality(&job.series_id);
             let queued = plan
                 .download
                 .iter()
-                .filter(|e| !is_paused(&e.id) && enqueue(&ui, e))
+                .filter(|e| !is_paused(&e.id) && enqueue(&ui, e, quality))
                 .count();
             let mut news = Vec::new();
             match queued {
@@ -1042,10 +1319,13 @@ pub fn button(ui: &Ui, item: &BaseItem) -> Option<gtk::Button> {
     } else {
         button.set_icon_name(crate::ui::icons::DOWNLOAD);
         button.set_tooltip_text(Some("Download"));
-        button.connect_clicked(move |_| {
+        button.connect_clicked(move |button| {
             if let Some(ui) = weak.upgrade() {
-                start(&ui, &target);
-                ui.data_changed();
+                let target = target.clone();
+                ask_quality(&ui, &target.clone(), button, move |ui, quality| {
+                    start(ui, &target, quality);
+                    ui.data_changed();
+                });
             }
         });
     }

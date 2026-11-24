@@ -550,6 +550,35 @@ impl EmbyClient {
         .await
     }
 
+    /// The id of the library (collection folder) an item lives in.
+    pub async fn library_of(&self, user_id: &str, item_id: &str) -> Result<Option<String>> {
+        let ancestors: Vec<BaseItem> = self
+            .get(&format!("/emby/Items/{item_id}/Ancestors?UserId={user_id}"))
+            .await?;
+        Ok(ancestors
+            .into_iter()
+            .find(|item| item.item_type == "CollectionFolder")
+            .map(|item| item.id))
+    }
+
+    /// Extras (featurettes, behind the scenes, ...) of a movie or series.
+    pub async fn special_features(&self, user_id: &str, item_id: &str) -> Result<Vec<BaseItem>> {
+        self.get(&format!(
+            "/emby/Users/{user_id}/Items/{item_id}/SpecialFeatures"
+        ))
+        .await
+    }
+
+    /// The other parts of a multi-part movie.
+    pub async fn additional_parts(&self, user_id: &str, item_id: &str) -> Result<Vec<BaseItem>> {
+        let result: QueryResult<BaseItem> = self
+            .get(&format!(
+                "/emby/Videos/{item_id}/AdditionalParts?UserId={user_id}"
+            ))
+            .await?;
+        Ok(result.items)
+    }
+
     /// People (cast and crew) whose name matches `term`.
     pub async fn search_people(
         &self,

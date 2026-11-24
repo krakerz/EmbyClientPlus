@@ -9,8 +9,9 @@
 //! round buttons are centred on. Chips are not focusable, so pad navigation
 //! doesn't see them.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::Duration;
 
 use adw::prelude::*;
 use gtk::glib;
@@ -23,6 +24,10 @@ use crate::tracking::tracker;
 
 /// CSS class of every chip (see the stylesheet in `window.rs`).
 const CHIP_CLASS: &str = "sync-chip";
+/// CSS class of the container of a details page's chips.
+const CHIPS_CLASS: &str = "sync-chips";
+/// Gap between the chips of a details page (as the button row's spacing).
+const CHIP_GAP: i32 = 12;
 /// While an update is still queued the page asks again, this often...
 const RECHECK_SECS: u32 = 3;
 /// ...and this many times.
@@ -43,6 +48,40 @@ fn state_icon(state: ChipState) -> Option<&'static str> {
         ChipState::NotYet => None,
         ChipState::Queued => Some(icons::HISTORY),
         ChipState::Unmatched => Some(icons::UNMATCHED),
+    }
+}
+
+/// Holds the chips of a details page. It asks for no minimum width: the
+/// page's width follows its content's minimum (AdwClamp), so chips arriving
+/// late would shift everything. They take the row's spare width and are
+/// clipped when there is none. It sits beside the button box, not in it: a
+/// box's spacing would count into the minimum too.
+fn chip_row() -> gtk::Box {
+    let row = gtk::Box::builder()
+        .hexpand(true)
+        .valign(gtk::Align::Center)
+        .overflow(gtk::Overflow::Hidden)
+        .focusable(false)
+        .can_focus(false)
+        .css_classes([CHIPS_CLASS])
+        .build();
+    row.set_layout_manager(Some(super::side_by_side::NoMinWidth::new(
+        CHIP_GAP, CHIP_GAP,
+    )));
+    row
+}
+
+/// Removes the chips next to `buttons`, if any.
+fn remove_chip_row(buttons: &gtk::Box) {
+    let Some(actions) = buttons.parent().and_downcast::<gtk::Box>() else {
+        return;
+    };
+    let mut child = actions.first_child();
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        if widget.has_css_class(CHIPS_CLASS) {
+            actions.remove(&widget);
+        }
     }
 }
 
@@ -190,12 +229,62 @@ pub fn show_on_buttons(buttons: &gtk::Box, item: &BaseItem) {
         "Movie" => true,
         _ => false,
     };
+    remove_chip_row(buttons);
+    // The box is reused for the next item: its name says whose it is, also
+    // when that item gets no chips, so a late answer for the last one drops.
+    buttons.set_widget_name(&item.id);
     if !supported || tracker::get().active().is_empty() {
         return;
     }
-    // The box is reused for the next item: its name says whose it is.
-    buttons.set_widget_name(&item.id);
+    register(buttons, item);
     refresh_buttons(buttons.downgrade(), item.clone(), 0);
+}
+
+/// Waits for several services finishing together before re-reading.
+const SYNCED_DEBOUNCE_MS: u64 = 500;
+
+thread_local! {
+    /// The live details-page button boxes and the item each shows.
+    static BUTTONS: RefCell<Vec<(glib::WeakRef<gtk::Box>, BaseItem)>> =
+        const { RefCell::new(Vec::new()) };
+    static REFRESH_PENDING: Cell<bool> = const { Cell::new(false) };
+}
+
+fn register(buttons: &gtk::Box, item: &BaseItem) {
+    BUTTONS.with(|all| {
+        let mut all = all.borrow_mut();
+        // Dead boxes out; the reused box gets its new item.
+        all.retain(|(weak, _)| weak.upgrade().is_some_and(|b| b != *buttons));
+        all.push((buttons.downgrade(), item.clone()));
+    });
+}
+
+/// Re-reads the details-page chips whenever the tracker settles something
+/// (a flush or live scrobble finished); once, from `Ui::new`.
+pub fn connect_synced() {
+    tracker::set_synced_listener(|| {
+        if REFRESH_PENDING.replace(true) {
+            return;
+        }
+        glib::timeout_add_local_once(Duration::from_millis(SYNCED_DEBOUNCE_MS), || {
+            REFRESH_PENDING.set(false);
+            refresh_registered();
+        });
+    });
+}
+
+fn refresh_registered() {
+    let live: Vec<(glib::WeakRef<gtk::Box>, BaseItem)> = BUTTONS.with(|all| {
+        let mut all = all.borrow_mut();
+        all.retain(|(weak, _)| weak.upgrade().is_some());
+        all.clone()
+    });
+    for (weak, item) in live {
+        // Same check as a late answer: the box may show another item by now.
+        if weak.upgrade().is_some_and(|b| b.widget_name() == item.id) {
+            refresh_buttons(weak, item, 0);
+        }
+    }
 }
 
 fn refresh_buttons(buttons: glib::WeakRef<gtk::Box>, item: BaseItem, tries: u32) {
@@ -227,15 +316,15 @@ fn refresh_buttons(buttons: glib::WeakRef<gtk::Box>, item: BaseItem, tries: u32)
                 return;
             }
         };
-        let mut child = buttons.first_child();
-        while let Some(widget) = child {
-            child = widget.next_sibling();
-            if widget.has_css_class(CHIP_CLASS) {
-                buttons.remove(&widget);
+        remove_chip_row(&buttons);
+        if !chips.is_empty() {
+            let row = chip_row();
+            for chip in &chips {
+                row.append(&chip_widget(chip));
             }
-        }
-        for chip in &chips {
-            buttons.append(&chip_widget(chip));
+            if let Some(actions) = buttons.parent().and_downcast::<gtk::Box>() {
+                actions.append(&row);
+            }
         }
         if any_queued(&[chips]) && tries < RECHECKS {
             let weak = buttons.downgrade();

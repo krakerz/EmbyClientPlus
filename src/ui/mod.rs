@@ -153,6 +153,7 @@ impl Ui {
                 }
             }
         });
+        sync_markers::connect_synced();
         ui.inner.nav.add(&home::page(&ui));
 
         // `nav.home` is reachable from every page's header (see `add_home_button`).
@@ -778,7 +779,10 @@ impl Ui {
     }
 
     pub fn download(&self, item: &BaseItem) {
-        downloads::start(self, item);
+        let target = item.clone();
+        downloads::ask_quality(self, item, self.widget(), move |ui, quality| {
+            downloads::start(ui, &target, quality)
+        });
     }
 
     pub fn delete_download(&self, item: &BaseItem) {

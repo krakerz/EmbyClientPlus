@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [1.39.0] — 2026-11-24
+
+### Added
+- Pause all and Clear all on the Downloads page
+- Download quality per series, set on the series page
+- Preferences → General → Library languages: audio and subtitle languages per library, used unless a series or movie has its own choice
+- Downloads at a lower quality (1080p or 720p), chosen per download or as a default in Preferences → Downloads
+- Per-series intro setting, in the player's Sleep menu and the series page's settings button: always skip or always show the button, with a note when an intro is skipped
+- Extras and Parts rows on movie and series pages
+
+### Fixed
+- Details pages no longer shift when the tracking chips appear
+- Tracking chips on a details page update after watching, once the sync goes through
+
 ## [1.38.0] — 2026-11-23
 
 ### Added

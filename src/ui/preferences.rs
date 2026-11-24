@@ -7,8 +7,8 @@ use gtk::{gio, glib};
 #[cfg(not(target_os = "macos"))]
 use crate::config::VapourSynthSource;
 use crate::config::{
-    DEFAULT_SVP_SOCKET, EpisodeArt, FrameGenBackend, FullscreenMode, Settings, Theme,
-    TrailerQuality, VideoQuality,
+    DEFAULT_SVP_SOCKET, DownloadQuality, EpisodeArt, FrameGenBackend, FullscreenMode, Settings,
+    Theme, TrailerQuality, VideoQuality,
 };
 use crate::controller::{self, Action, Context};
 use crate::db::Db;
@@ -344,6 +344,9 @@ fn show_with(parent: &impl IsA<gtk::Widget>, server: bool) {
     forget.add_suffix(&forget_button);
     remembered.add(&forget);
     page.add(&remembered);
+    if server {
+        page.add(&library_languages_group());
+    }
 
     if server {
         let parent = parent.as_ref().clone();
@@ -675,6 +678,22 @@ fn downloads_group(parent: &gtk::Widget, toasts: &adw::ToastOverlay) -> adw::Pre
         save(|s| s.downloads.resume_at_start = on);
     });
     group.add(&resume);
+    let quality = choice_row(
+        "Quality",
+        &DownloadQuality::ALL.map(DownloadQuality::label),
+        DownloadQuality::ALL
+            .iter()
+            .position(|q| *q == Settings::load().unwrap_or_default().downloads.quality)
+            .unwrap_or(0),
+    );
+    // Short on purpose: a long subtitle squeezes the value to "Ori…".
+    quality.set_subtitle("Lower qualities are converted by the server");
+    quality.connect_selected_notify(|row| {
+        if let Some(quality) = DownloadQuality::ALL.get(row.selected() as usize).copied() {
+            save(|s| s.downloads.quality = quality);
+        }
+    });
+    group.add(&quality);
     let folder = adw::EntryRow::builder()
         .title("Download folder")
         .text(crate::downloads::folder().to_string_lossy())
@@ -1727,6 +1746,114 @@ fn local_playback_group(settings: &Settings) -> adw::PreferencesGroup {
     });
     group.add(&intro);
     group
+}
+
+/// Preferences ▸ Library languages: audio and subtitle defaults per library.
+fn library_languages_group() -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder()
+        .title("Library languages")
+        .description(
+            "Audio and subtitles for titles in a library, unless you picked others for that series or movie",
+        )
+        .build();
+    let libraries = crate::library_langs::libraries();
+    if libraries.is_empty() {
+        group.add(
+            &adw::ActionRow::builder()
+                .title("Open Home once to list your libraries")
+                .build(),
+        );
+        return group;
+    }
+    for library in libraries {
+        let saved = crate::library_langs::defaults(&library.id);
+        let audio = library_language_row(
+            "Audio",
+            false,
+            saved.as_ref().and_then(|o| o.audio_language.as_deref()),
+        );
+        let subtitle = library_language_row(
+            "Subtitles",
+            true,
+            saved.as_ref().and_then(|o| o.subtitle_language.as_deref()),
+        );
+        let expander = adw::ExpanderRow::builder()
+            .title(glib::markup_escape_text(&library.name))
+            .build();
+        for row in [&audio, &subtitle] {
+            row.connect_selected_notify(glib::clone!(
+                #[weak]
+                audio,
+                #[weak]
+                subtitle,
+                #[strong(rename_to = id)]
+                library.id,
+                move |_| {
+                    crate::library_langs::set(
+                        &id,
+                        library_language_choice(&audio),
+                        library_language_choice(&subtitle),
+                    );
+                }
+            ));
+        }
+        expander.add_row(&audio);
+        expander.add_row(&subtitle);
+        group.add(&expander);
+    }
+    group
+}
+
+/// Entries of a library language row, in order: the Emby profile (None),
+/// Off (subtitles only), then the languages.
+fn library_language_entries(with_off: bool) -> Vec<(Option<String>, String)> {
+    let mut entries = vec![(None, "Emby profile".to_string())];
+    if with_off {
+        entries.push((
+            Some(crate::playback::tracks::SUBTITLES_OFF.to_string()),
+            "Off".to_string(),
+        ));
+    }
+    entries.extend(
+        LANGUAGES
+            .iter()
+            .map(|(code, name)| (Some(code.to_string()), name.to_string())),
+    );
+    entries
+}
+
+fn library_language_row(title: &str, with_off: bool, current: Option<&str>) -> adw::ComboRow {
+    let mut entries = library_language_entries(with_off);
+    let current = current.map(|c| {
+        if c == crate::playback::tracks::SUBTITLES_OFF {
+            c.to_string()
+        } else {
+            normalize_language(c)
+        }
+    });
+    if let Some(c) = &current
+        && !entries.iter().any(|(code, _)| code.as_deref() == Some(c))
+    {
+        entries.push((Some(c.clone()), c.clone()));
+    }
+    let names: Vec<&str> = entries.iter().map(|(_, name)| name.as_str()).collect();
+    let selected = entries
+        .iter()
+        .position(|(code, _)| *code == current)
+        .unwrap_or(0);
+    let row = choice_row(title, &names, selected);
+    let codes: Vec<Option<String>> = entries.into_iter().map(|(code, _)| code).collect();
+    // SAFETY: only ever stored and read as `Vec<Option<String>>` under this key.
+    unsafe { row.set_data(LIBRARY_CODES_KEY, codes) };
+    row
+}
+
+const LIBRARY_CODES_KEY: &str = "embyclientplus-library-language-codes";
+
+fn library_language_choice(row: &adw::ComboRow) -> Option<String> {
+    // SAFETY: see `library_language_row`.
+    let codes = unsafe { row.data::<Vec<Option<String>>>(LIBRARY_CODES_KEY)?.as_ref() };
+    codes.get(row.selected() as usize).cloned().flatten()
 }
 
 /// A drop-down row of `labels`, with `selected` chosen.
