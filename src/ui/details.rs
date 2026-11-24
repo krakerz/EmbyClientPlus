@@ -417,6 +417,7 @@ fn trailer_button(ui: &Ui, item: &BaseItem) -> Option<gtk::Button> {
     }
     let button = gtk::Button::builder()
         .label("Trailer")
+        .valign(gtk::Align::Center)
         .css_classes(["pill"])
         .build();
     let weak = ui.downgrade();
@@ -457,6 +458,9 @@ fn play_button(
 ) -> gtk::Button {
     let button = gtk::Button::builder()
         .label(label)
+        // Centred like the rest of the row, so the sync chips appended
+        // later don't nudge the row's alignment.
+        .valign(gtk::Align::Center)
         .css_classes(if primary {
             vec!["suggested-action", "pill"]
         } else {

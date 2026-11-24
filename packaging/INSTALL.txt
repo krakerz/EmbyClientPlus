@@ -15,7 +15,7 @@ Two ways to run it:
    Uninstall:  ./uninstall.sh  (keeps your settings)
    Or run in place without installing:  bin/embyclientplus
 
-Updates: Preferences > Updates (or the notice at start-up) downloads the
+Updates: Preferences > General > Updates (or the notice at start-up) downloads the
 latest release and replaces the installed copy or the AppImage.
 
 First launch: enter your Emby server address, username and password.
@@ -24,9 +24,9 @@ nothing has to be edited by hand. Logs: ~/.config/embyclientplus/logs/
 
 SVP (frame interpolation, optional)
 - Install SVP 4 for Linux (default folder ~/SVP4). If it lives elsewhere,
-  set the folder in Preferences > Playback > SVP folder and restart the app.
+  set the folder in Preferences > SVP > SVP folder and restart the app.
 - On a desktop, start SVP Manager yourself. In Steam Game Mode the app
-  starts it for you (Preferences > Playback > Start SVP Manager
+  starts it for you (Preferences > SVP > Start SVP Manager
   automatically).
 - Without SVP the app plays normally.
 

@@ -83,6 +83,9 @@ pub struct DownloadSettings {
     /// at the next start; off, they wait on the Downloads page.
     #[serde(default = "default_true")]
     pub resume_at_start: bool,
+    /// Default quality for new downloads (auto-downloads too; Ask means Original there).
+    #[serde(default)]
+    pub quality: DownloadQuality,
 }
 
 impl Default for DownloadSettings {
@@ -90,6 +93,58 @@ impl Default for DownloadSettings {
         DownloadSettings {
             folder: None,
             resume_at_start: true,
+            quality: DownloadQuality::default(),
+        }
+    }
+}
+
+/// How a download is fetched: the original file, or a server transcode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum DownloadQuality {
+    #[default]
+    Original,
+    P1080High,
+    P1080,
+    P720,
+    Ask,
+}
+
+impl DownloadQuality {
+    pub const ALL: [DownloadQuality; 5] = [
+        DownloadQuality::Original,
+        DownloadQuality::P1080High,
+        DownloadQuality::P1080,
+        DownloadQuality::P720,
+        DownloadQuality::Ask,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DownloadQuality::Original => "Original",
+            DownloadQuality::P1080High => "1080p · 8 Mbps",
+            DownloadQuality::P1080 => "1080p · 4 Mbps",
+            DownloadQuality::P720 => "720p · 2 Mbps",
+            DownloadQuality::Ask => "Ask each time",
+        }
+    }
+
+    /// Video bitrate (kbps) and maximum height of the transcode; `None` for
+    /// the original file and for Ask.
+    pub fn transcode(self) -> Option<(u32, u32)> {
+        match self {
+            DownloadQuality::P1080High => Some((8000, 1080)),
+            DownloadQuality::P1080 => Some((4000, 1080)),
+            DownloadQuality::P720 => Some((2000, 720)),
+            DownloadQuality::Original | DownloadQuality::Ask => None,
+        }
+    }
+
+    /// What an unattended download uses: Ask means Original.
+    pub fn resolved(self) -> Self {
+        match self {
+            DownloadQuality::Ask => DownloadQuality::Original,
+            other => other,
         }
     }
 }
@@ -1061,7 +1116,31 @@ pub fn write_atomic(path: &std::path::Path, contents: &[u8]) -> std::io::Result<
 
 #[cfg(test)]
 mod tests {
-    use super::DisplayRate;
+    use super::{DisplayRate, DownloadQuality};
+
+    #[test]
+    fn download_quality_serde_names_round_trip() {
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct Wrap {
+            quality: DownloadQuality,
+        }
+        let names = ["original", "p1080-high", "p1080", "p720", "ask"];
+        for (quality, name) in DownloadQuality::ALL.into_iter().zip(names) {
+            let text = toml::to_string(&Wrap { quality }).unwrap();
+            assert_eq!(text.trim(), format!("quality = \"{name}\""));
+            let back: Wrap = toml::from_str(&text).unwrap();
+            assert_eq!(back.quality, quality);
+        }
+    }
+
+    #[test]
+    fn downloads_without_quality_load_as_original() {
+        let settings: super::Settings =
+            toml::from_str("[downloads]\nresume_at_start = false\n").unwrap();
+        assert_eq!(settings.downloads.quality, DownloadQuality::Original);
+        assert_eq!(DownloadQuality::Ask.resolved(), DownloadQuality::Original);
+        assert_eq!(DownloadQuality::P720.transcode(), Some((2000, 720)));
+    }
 
     #[test]
     fn storage_defaults_when_missing() {

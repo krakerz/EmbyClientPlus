@@ -3,13 +3,15 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use rusqlite::Connection;
 
-use crate::config::FrameGenBackend;
 use crate::config::config_dir;
+use crate::config::{DownloadQuality, FrameGenBackend};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemType {
     Movie,
     Series,
+    /// Per-library audio/subtitle defaults; key = the library's id.
+    Library,
 }
 
 impl ItemType {
@@ -17,6 +19,7 @@ impl ItemType {
         match self {
             ItemType::Movie => "movie",
             ItemType::Series => "series",
+            ItemType::Library => "library",
         }
     }
 
@@ -24,6 +27,7 @@ impl ItemType {
         match s {
             "movie" => Ok(ItemType::Movie),
             "series" => Ok(ItemType::Series),
+            "library" => Ok(ItemType::Library),
             other => bail!("unknown item_type {other:?} in db"),
         }
     }
@@ -69,6 +73,11 @@ pub struct TitleOverride {
     pub shaders: Option<String>,
     /// mpv volume (0–130, above 100 boosts), if changed for this title.
     pub volume: Option<f64>,
+    /// Intros for this series: always skip, always offer the button, or
+    /// `None` for the Preferences/Emby mode.
+    pub auto_skip: Option<bool>,
+    /// Download quality for this series or movie; `None` follows Preferences.
+    pub download_quality: Option<DownloadQuality>,
 }
 
 /// How a library grid was last sorted and filtered (Emby `SortBy` and
@@ -122,6 +131,7 @@ impl Db {
     /// rows kept under [`LEGACY_SCOPE`]. Version 2 adds `tracking_queue`. Version 3
     /// adds `library_watched` (what is played on the server and whether Trakt
     /// has it) and `library_scans` (when each scope was last read in full).
+    /// Version 4 adds `title_overrides.auto_skip`, version 5 `download_quality`.
     fn init_schema(conn: &Connection) -> Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if version < 1 {
@@ -169,6 +179,34 @@ impl Db {
                  COMMIT;",
             )
             .context("failed to create the library tables")?;
+        }
+        if version < 4 {
+            let tx = conn.unchecked_transaction()?;
+            let exists = tx
+                .prepare(
+                    "SELECT 1 FROM pragma_table_info('title_overrides') WHERE name = 'auto_skip'",
+                )?
+                .exists([])?;
+            if !exists {
+                tx.execute_batch("ALTER TABLE title_overrides ADD COLUMN auto_skip INTEGER;")
+                    .context("failed to add the auto_skip column")?;
+            }
+            tx.execute_batch("PRAGMA user_version = 4;")?;
+            tx.commit().context("failed to migrate to schema v4")?;
+        }
+        if version < 5 {
+            let tx = conn.unchecked_transaction()?;
+            let exists = tx
+                .prepare(
+                    "SELECT 1 FROM pragma_table_info('title_overrides') WHERE name = 'download_quality'",
+                )?
+                .exists([])?;
+            if !exists {
+                tx.execute_batch("ALTER TABLE title_overrides ADD COLUMN download_quality TEXT;")
+                    .context("failed to add the download_quality column")?;
+            }
+            tx.execute_batch("PRAGMA user_version = 5;")?;
+            tx.commit().context("failed to migrate to schema v5")?;
         }
         Ok(())
     }
@@ -280,7 +318,7 @@ impl Db {
 
     pub fn get_override(&self, scope: &str, emby_item_id: &str) -> Result<Option<TitleOverride>> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {OVERRIDE_COLUMNS}
+            "SELECT {OVERRIDE_COLUMNS}, auto_skip, download_quality
              FROM title_overrides WHERE scope = ?1 AND emby_item_id = ?2"
         ))?;
         let mut rows = stmt.query([scope, emby_item_id])?;
@@ -291,6 +329,7 @@ impl Db {
         let item_type: String = row.get(1)?;
         let frame_gen_backend: Option<String> = row.get(5)?;
         let subtitle_forced_only: Option<i64> = row.get(4)?;
+        let download_quality: Option<String> = row.get(12)?;
 
         Ok(Some(TitleOverride {
             emby_item_id: row.get(0)?,
@@ -306,6 +345,10 @@ impl Db {
             zoom: row.get(8)?,
             shaders: row.get(9)?,
             volume: row.get(10)?,
+            auto_skip: row.get::<_, Option<i64>>(11)?.map(|v| v != 0),
+            // An unknown name (a newer build's) reads as unset.
+            download_quality: download_quality
+                .and_then(|s| serde_json::from_value(serde_json::Value::String(s)).ok()),
         }))
     }
 
@@ -314,8 +357,8 @@ impl Db {
             "INSERT INTO title_overrides
                 (scope, emby_item_id, item_type, audio_language, subtitle_language,
                  subtitle_forced_only, frame_gen_backend, frame_gen_multiplier,
-                 aspect_mode, zoom, shaders, volume)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                 aspect_mode, zoom, shaders, volume, auto_skip, download_quality)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(scope, emby_item_id) DO UPDATE SET
                 item_type = excluded.item_type,
                 audio_language = excluded.audio_language,
@@ -326,7 +369,9 @@ impl Db {
                 aspect_mode = excluded.aspect_mode,
                 zoom = excluded.zoom,
                 shaders = excluded.shaders,
-                volume = excluded.volume",
+                volume = excluded.volume,
+                auto_skip = excluded.auto_skip,
+                download_quality = excluded.download_quality",
             rusqlite::params![
                 scope,
                 entry.emby_item_id,
@@ -340,6 +385,11 @@ impl Db {
                 entry.zoom,
                 entry.shaders,
                 entry.volume,
+                entry.auto_skip.map(i64::from),
+                entry
+                    .download_quality
+                    .and_then(|q| serde_json::to_value(q).ok())
+                    .and_then(|v| v.as_str().map(str::to_string)),
             ],
         )?;
         Ok(())
@@ -385,11 +435,14 @@ impl Db {
     }
 
     /// Forgets every remembered per-title choice, whoever's; returns how many.
+    /// Library languages stay: Preferences clears those per library.
     pub fn clear_overrides(&self) -> Result<usize> {
-        Ok(self.conn.execute("DELETE FROM title_overrides", [])?)
+        Ok(self.conn.execute(
+            "DELETE FROM title_overrides WHERE item_type != 'library'",
+            [],
+        )?)
     }
 
-    #[allow(dead_code)] // no per-title "reset" in the UI yet
     pub fn delete_override(&self, scope: &str, emby_item_id: &str) -> Result<()> {
         self.conn.execute(
             "DELETE FROM title_overrides WHERE scope = ?1 AND emby_item_id = ?2",
@@ -756,6 +809,8 @@ mod tests {
             zoom: None,
             shaders: None,
             volume: None,
+            auto_skip: None,
+            download_quality: None,
         };
 
         db.upsert_override(S, &entry).unwrap();
@@ -784,6 +839,8 @@ mod tests {
             zoom: None,
             shaders: None,
             volume: None,
+            auto_skip: None,
+            download_quality: None,
         };
         db.upsert_override(S, &entry).unwrap();
 
@@ -825,6 +882,8 @@ mod tests {
             zoom: None,
             shaders: None,
             volume: None,
+            auto_skip: None,
+            download_quality: None,
         };
         db.upsert_override(S, &entry).unwrap();
         db.delete_override(S, "movie-2").unwrap();
@@ -832,17 +891,21 @@ mod tests {
     }
 
     #[test]
-    fn clear_overrides_removes_everything() {
+    fn clear_overrides_removes_titles_but_keeps_libraries() {
         let db = Db::open(
             &std::env::temp_dir().join(format!("embyclientplus-clear-{}.db", std::process::id())),
         )
         .unwrap();
-        for id in ["a", "b"] {
+        for (id, item_type) in [
+            ("a", ItemType::Movie),
+            ("b", ItemType::Series),
+            ("lib", ItemType::Library),
+        ] {
             db.upsert_override(
                 S,
                 &TitleOverride {
                     emby_item_id: id.into(),
-                    item_type: ItemType::Movie,
+                    item_type,
                     audio_language: Some("jpn".into()),
                     subtitle_language: None,
                     subtitle_forced_only: None,
@@ -852,12 +915,15 @@ mod tests {
                     zoom: None,
                     shaders: None,
                     volume: None,
+                    auto_skip: None,
+                    download_quality: None,
                 },
             )
             .unwrap();
         }
         assert_eq!(db.clear_overrides().unwrap(), 2);
         assert!(db.get_override(S, "a").unwrap().is_none());
+        assert!(db.get_override(S, "lib").unwrap().is_some());
     }
 
     #[test]
@@ -923,6 +989,8 @@ mod tests {
             zoom: None,
             shaders: None,
             volume: None,
+            auto_skip: None,
+            download_quality: None,
         }
     }
 
@@ -991,7 +1059,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         old_database(&path);
         let db = Db::open(&path).unwrap();
-        assert_eq!(user_version(&db), 3);
+        assert_eq!(user_version(&db), 5);
         let old = db.get_override("", "old").unwrap().unwrap();
         assert_eq!(old.audio_language.as_deref(), Some("jpn"));
         assert_eq!(old.volume, Some(80.0));
@@ -1030,8 +1098,97 @@ mod tests {
         old_database(&path);
         drop(Db::open(&path).unwrap());
         let db = Db::open(&path).unwrap();
-        assert_eq!(user_version(&db), 3);
+        assert_eq!(user_version(&db), 5);
         assert!(db.get_override("", "old").unwrap().is_some());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn auto_skip_round_trips() {
+        let db = Db::open_in_memory().unwrap();
+        let mut entry = movie("m", "jpn");
+        for mode in [Some(true), Some(false), None] {
+            entry.auto_skip = mode;
+            db.upsert_override(S, &entry).unwrap();
+            let got = db.get_override(S, "m").unwrap().unwrap();
+            assert_eq!(got.auto_skip, mode);
+        }
+    }
+
+    #[test]
+    fn download_quality_round_trips() {
+        let db = Db::open_in_memory().unwrap();
+        let mut entry = movie("m", "jpn");
+        for quality in DownloadQuality::ALL.map(Some).into_iter().chain([None]) {
+            entry.download_quality = quality;
+            db.upsert_override(S, &entry).unwrap();
+            let got = db.get_override(S, "m").unwrap().unwrap();
+            assert_eq!(got.download_quality, quality);
+        }
+    }
+
+    #[test]
+    fn v4_databases_gain_download_quality() {
+        let path =
+            std::env::temp_dir().join(format!("embyclientplus-v5-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = Connection::open(&path).unwrap();
+            Db::init_schema(&conn).unwrap();
+            conn.execute_batch(
+                "ALTER TABLE title_overrides DROP COLUMN download_quality; PRAGMA user_version = 4;",
+            )
+            .unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        assert_eq!(user_version(&db), 5);
+        let has_column = db
+            .conn
+            .prepare(
+                "SELECT 1 FROM pragma_table_info('title_overrides') WHERE name = 'download_quality'",
+            )
+            .unwrap()
+            .exists([])
+            .unwrap();
+        assert!(has_column);
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn library_rows_round_trip() {
+        let db = Db::open_in_memory().unwrap();
+        let mut entry = movie("lib1", "jpn");
+        entry.item_type = ItemType::Library;
+        db.upsert_override(S, &entry).unwrap();
+        let got = db.get_override(S, "lib1").unwrap().unwrap();
+        assert_eq!(got.item_type, ItemType::Library);
+        assert_eq!(got, entry);
+    }
+
+    #[test]
+    fn v3_databases_gain_auto_skip() {
+        let path =
+            std::env::temp_dir().join(format!("embyclientplus-v4-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = Connection::open(&path).unwrap();
+            Db::init_schema(&conn).unwrap();
+            conn.execute_batch(
+                "ALTER TABLE title_overrides DROP COLUMN auto_skip; PRAGMA user_version = 3;",
+            )
+            .unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        assert_eq!(user_version(&db), 5);
+        let has_column = db
+            .conn
+            .prepare("SELECT 1 FROM pragma_table_info('title_overrides') WHERE name = 'auto_skip'")
+            .unwrap()
+            .exists([])
+            .unwrap();
+        assert!(has_column);
+        drop(db);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1092,7 +1249,7 @@ mod tests {
             .unwrap();
         }
         let db = Db::open(&path).unwrap();
-        assert_eq!(user_version(&db), 3);
+        assert_eq!(user_version(&db), 5);
         assert_eq!(db.tracking_queue("srv").unwrap().len(), 1);
         assert_eq!(db.record_played(SCOPE, &[played("a", None)], 1).unwrap(), 1);
         drop(db);

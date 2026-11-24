@@ -328,6 +328,7 @@ fn load(ui: &Ui, view: &Rc<SeriesView>, series_id: &str) {
         view.hero
             .buttons
             .append(&download_button(&ui, &view, &series));
+        view.hero.buttons.append(&settings_button(&series));
         super::hero::show_related(&ui, &view.related, &series);
         show_tracking(&view, &series_id);
 
@@ -661,6 +662,7 @@ fn download_button(ui: &Ui, view: &Rc<SeriesView>, series: &BaseItem) -> gtk::Me
     menu.append(Some("Download Series"), Some("series-download.series"));
     menu.append(Some("Download This Season"), Some("series-download.season"));
     menu.append(Some("Auto-download…"), Some("series-download.auto"));
+    menu.append(Some("Download Quality…"), Some("series-download.quality"));
     let button = gtk::MenuButton::builder()
         .icon_name(crate::ui::icons::DOWNLOAD)
         .tooltip_text("Download")
@@ -673,7 +675,10 @@ fn download_button(ui: &Ui, view: &Rc<SeriesView>, series: &BaseItem) -> gtk::Me
     let (weak, target) = (ui.downgrade(), series.clone());
     whole.connect_activate(move |_, _| {
         if let Some(ui) = weak.upgrade() {
-            super::downloads::start_episodes_of(&ui, &target);
+            let target = target.clone();
+            super::downloads::ask_quality(&ui, &target.clone(), ui.widget(), move |ui, quality| {
+                super::downloads::start_episodes_of(ui, &target, quality)
+            });
         }
     });
     let season = gtk::gio::SimpleAction::new("season", None);
@@ -689,7 +694,9 @@ fn download_button(ui: &Ui, view: &Rc<SeriesView>, series: &BaseItem) -> gtk::Me
             .cloned();
         if let Some(mut season) = current {
             season.series_id.get_or_insert_with(|| series_id.clone());
-            super::downloads::start_episodes_of(&ui, &season);
+            super::downloads::ask_quality(&ui, &season.clone(), ui.widget(), move |ui, quality| {
+                super::downloads::start_episodes_of(ui, &season, quality)
+            });
         }
     });
     let auto = gtk::gio::SimpleAction::new("auto", None);
@@ -699,11 +706,84 @@ fn download_button(ui: &Ui, view: &Rc<SeriesView>, series: &BaseItem) -> gtk::Me
             ui.auto_download(&target, &anchor);
         }
     });
+    let quality = gtk::gio::SimpleAction::new("quality", None);
+    let (target, anchor) = (series.clone(), button.downgrade());
+    quality.connect_activate(move |_, _| {
+        if let Some(anchor) = anchor.upgrade() {
+            super::downloads::quality_dialog(&target, &anchor);
+        }
+    });
+    group.add_action(&quality);
     group.add_action(&whole);
     group.add_action(&season);
     group.add_action(&auto);
     button.insert_action_group("series-download", Some(&group));
     button
+}
+
+/// Per-series settings menu, next to the download one.
+fn settings_button(series: &BaseItem) -> gtk::MenuButton {
+    let menu = gtk::gio::Menu::new();
+    menu.append(Some("Intros…"), Some("series-settings.intros"));
+    let button = gtk::MenuButton::builder()
+        .icon_name(crate::ui::icons::SETTINGS)
+        .tooltip_text("Series settings")
+        .menu_model(&menu)
+        .valign(gtk::Align::Center)
+        .css_classes(["circular"])
+        .build();
+    let group = gtk::gio::SimpleActionGroup::new();
+    let intros = gtk::gio::SimpleAction::new("intros", None);
+    let (target, anchor) = (series.clone(), button.downgrade());
+    intros.connect_activate(move |_, _| {
+        if let Some(anchor) = anchor.upgrade() {
+            intros_dialog(&target, &anchor);
+        }
+    });
+    group.add_action(&intros);
+    button.insert_action_group("series-settings", Some(&group));
+    button
+}
+
+/// Picks how this series' intros are handled; "default" follows the
+/// account's (or Preferences') mode.
+fn intros_dialog(series: &BaseItem, parent: &impl IsA<gtk::Widget>) {
+    let current = crate::playback::remembered_for(&series.id).and_then(|o| o.auto_skip);
+    let default_label = crate::playback::intro_default_label();
+    let group = adw::PreferencesGroup::builder()
+        .title(glib::markup_escape_text(&series.name))
+        .description("How this series' intros are handled while playing")
+        .build();
+    let rows: Vec<(Option<bool>, adw::ActionRow)> = crate::playback::INTRO_CHOICES
+        .into_iter()
+        .map(|mode| {
+            let row = adw::ActionRow::builder()
+                .title(crate::playback::intro_choice_label(mode, &default_label))
+                .activatable(true)
+                .build();
+            if mode == current {
+                row.add_suffix(&gtk::Image::from_icon_name(crate::ui::icons::WATCHED));
+            }
+            group.add(&row);
+            (mode, row)
+        })
+        .collect();
+    let dialog = super::form_dialog("Intros", &[&group]);
+    if let Some((_, row)) = rows.iter().find(|(mode, _)| *mode == current) {
+        dialog.set_focus(Some(row));
+    }
+    for (mode, row) in &rows {
+        let (dialog_ref, key, mode) = (dialog.downgrade(), series.id.clone(), *mode);
+        row.connect_activated(move |_| {
+            crate::playback::remember_for(&key, crate::db::ItemType::Series, |o| {
+                o.auto_skip = mode
+            });
+            if let Some(dialog) = dialog_ref.upgrade() {
+                dialog.close();
+            }
+        });
+    }
+    dialog.present(Some(parent));
 }
 
 /// Puts the subtitle picker after `play`, once the episode's subtitle

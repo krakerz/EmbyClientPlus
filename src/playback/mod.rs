@@ -190,6 +190,10 @@ pub struct PlaybackSession {
     shader_groups: Vec<crate::shaders::Group>,
     /// The volume this title started at, so only real changes are saved.
     start_volume: Cell<f64>,
+    /// This title's intro mode (see TitleOverride::auto_skip).
+    auto_skip: Cell<Option<bool>>,
+    /// The library's language defaults (server titles only).
+    library_defaults: Option<TitleOverride>,
 }
 
 impl PlaybackSession {
@@ -276,6 +280,12 @@ impl PlaybackSession {
         let hdr = crate::emby::models::is_hdr(&source.media_streams);
         let (previous, next) = neighbours(&episodes, &item.id);
         let (override_key, override_type) = title_key(&item);
+        let auto_skip = remembered_for(&override_key).and_then(|o| o.auto_skip);
+        let library_defaults = if source.is_remote {
+            None
+        } else {
+            library_defaults_for(&client, &session.user_id, &item.id, &override_key).await
+        };
 
         // Nothing to sharpen or upscale in music.
         let shader_groups = if item.is_audio() {
@@ -304,6 +314,8 @@ impl PlaybackSession {
             hdr,
             shader_groups,
             start_volume: Cell::new(player.volume()),
+            auto_skip: Cell::new(auto_skip),
+            library_defaults,
         });
 
         // The user moved on while this loaded: leave mpv to the newer start.
@@ -365,6 +377,7 @@ impl PlaybackSession {
         } else {
             Origin::File
         };
+        let auto_skip = remembered_for(&media.override_key).and_then(|o| o.auto_skip);
         let session = Rc::new(PlaybackSession {
             client: media.client,
             origin,
@@ -386,6 +399,8 @@ impl PlaybackSession {
             hdr,
             shader_groups: crate::shaders::groups(),
             start_volume: Cell::new(player.volume()),
+            auto_skip: Cell::new(auto_skip),
+            library_defaults: None,
         });
         // The user moved on while this loaded: leave mpv to the newer start.
         if !wanted() {
@@ -484,11 +499,11 @@ impl PlaybackSession {
         let tracks = self.player.tracks();
         let remembered = self.remembered();
         let prefs = crate::account::playback();
+        let wanted =
+            crate::library_langs::merge(remembered.as_ref(), self.library_defaults.as_ref());
         let audio = tracks::initial_audio(
             &tracks,
-            remembered
-                .as_ref()
-                .and_then(|o| o.audio_language.as_deref()),
+            wanted.audio.as_deref(),
             &prefs.audio_language,
             prefs.play_default_audio,
         );
@@ -505,13 +520,8 @@ impl PlaybackSession {
             .and_then(|t| t.lang.clone());
         let subtitle = tracks::initial_subtitle(
             &tracks,
-            remembered
-                .as_ref()
-                .and_then(|o| o.subtitle_language.as_deref()),
-            remembered
-                .as_ref()
-                .and_then(|o| o.subtitle_forced_only)
-                .unwrap_or(false),
+            wanted.subtitle.as_deref(),
+            wanted.forced_only,
             &prefs.subtitle_language,
             prefs.subtitle_mode,
             audio_language.as_deref(),
@@ -668,6 +678,16 @@ impl PlaybackSession {
         }
         self.start_volume.set(volume);
         self.remember(|o| o.volume = Some(volume));
+    }
+
+    pub fn auto_skip(&self) -> Option<bool> {
+        self.auto_skip.get()
+    }
+
+    /// `None` goes back to the Preferences/Emby intro mode.
+    pub fn set_auto_skip(&self, mode: Option<bool>) {
+        self.auto_skip.set(mode);
+        self.remember(|o| o.auto_skip = mode);
     }
 
     /// Picks `preset` ("" for off) for `group`, for this title from now on.
@@ -1022,6 +1042,81 @@ pub fn title_key(item: &BaseItem) -> (String, ItemType) {
     }
 }
 
+thread_local! {
+    /// Library id per title key, so later episodes skip the request.
+    static LIBRARY_OF: RefCell<std::collections::HashMap<String, Option<String>>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+/// The language defaults of the library `item_id` lives in. A failed
+/// lookup is logged and gives None: it never holds up playback.
+async fn library_defaults_for(
+    client: &Arc<EmbyClient>,
+    user_id: &str,
+    item_id: &str,
+    key: &str,
+) -> Option<TitleOverride> {
+    let cached = LIBRARY_OF.with(|m| m.borrow().get(key).cloned());
+    let library = match cached {
+        Some(library) => library,
+        None => {
+            let (client, user_id, item_id) =
+                (client.clone(), user_id.to_string(), item_id.to_string());
+            let found = spawn_tokio(async move { client.library_of(&user_id, &item_id).await })
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!("library lookup failed: {e:#}");
+                    None
+                });
+            LIBRARY_OF.with(|m| m.borrow_mut().insert(key.to_string(), found.clone()));
+            found
+        }
+    };
+    library.and_then(|id| crate::library_langs::defaults(&id))
+}
+
+/// A series' intro choices, in menu order: `None` follows the global mode.
+pub const INTRO_CHOICES: [Option<bool>; 3] = [None, Some(true), Some(false)];
+
+/// The `player.intro-mode` target for a series' intro mode.
+pub fn intro_mode_name(mode: Option<bool>) -> &'static str {
+    match mode {
+        None => "default",
+        Some(true) => "skip",
+        Some(false) => "button",
+    }
+}
+
+pub fn intro_mode_from_name(name: &str) -> Option<Option<bool>> {
+    INTRO_CHOICES
+        .into_iter()
+        .find(|mode| intro_mode_name(*mode) == name)
+}
+
+/// Label of a series' intro choice; `default_label` is the `None` one.
+pub fn intro_choice_label(mode: Option<bool>, default_label: &str) -> String {
+    match mode {
+        None => default_label.to_string(),
+        Some(true) => "Always skip".to_string(),
+        Some(false) => "Show Skip button".to_string(),
+    }
+}
+
+/// The "follow the global mode" label, naming where that mode is set: the
+/// Emby profile when signed in, Preferences in the player-only mode.
+pub fn intro_default_label_for(signed_in: bool, global: crate::config::IntroSkip) -> String {
+    let place = if signed_in { "Profile" } else { "Preferences" };
+    format!("{place} default ({})", global.label())
+}
+
+/// [`intro_default_label_for`] for the mode in effect now.
+pub fn intro_default_label() -> String {
+    intro_default_label_for(
+        crate::account::user().is_some(),
+        crate::account::playback().intro_skip,
+    )
+}
+
 /// The choices remembered under `key` (see [`title_key`]).
 pub fn remembered_for(key: &str) -> Option<TitleOverride> {
     Db::open_default()
@@ -1046,6 +1141,8 @@ pub fn remember_for(key: &str, item_type: ItemType, change: impl FnOnce(&mut Tit
         zoom: None,
         shaders: None,
         volume: None,
+        auto_skip: None,
+        download_quality: None,
     });
     change(&mut entry);
     if let Err(e) =
@@ -1069,6 +1166,29 @@ fn seconds_to_ticks(seconds: f64) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn intro_default_label_names_the_place_and_mode() {
+        use super::intro_default_label_for;
+        use crate::config::IntroSkip;
+        assert_eq!(
+            intro_default_label_for(true, IntroSkip::AutoSkip),
+            "Profile default (Skip automatically)"
+        );
+        assert_eq!(
+            intro_default_label_for(false, IntroSkip::ShowButton),
+            "Preferences default (Show a Skip button)"
+        );
+    }
+
+    #[test]
+    fn intro_mode_names_round_trip() {
+        use super::{INTRO_CHOICES, intro_mode_from_name, intro_mode_name};
+        for mode in INTRO_CHOICES {
+            assert_eq!(intro_mode_from_name(intro_mode_name(mode)), Some(mode));
+        }
+        assert_eq!(intro_mode_from_name("nope"), None);
+    }
+
     #[test]
     fn rewinds_only_a_real_resume() {
         use super::{TICKS_PER_SECOND, resume_start, rewound};

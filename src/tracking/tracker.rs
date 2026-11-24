@@ -10,7 +10,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -76,6 +76,9 @@ pub struct Tracker {
     /// The sync markers' reads: (service, entry id) → the entry. Dropped
     /// after a flush that sent something, so our own updates show up.
     lists: Mutex<HashMap<(ServiceId, u32), EntryInfo>>,
+    /// Bumped with every `lists` drop: a read that began before it must not
+    /// store its (possibly pre-push) result afterwards.
+    lists_epoch: AtomicU64,
     /// Series id → its external ids, for the Trakt marker.
     show_ids: Mutex<HashMap<String, ShowIds>>,
     /// One error toast per session per service.
@@ -122,6 +125,52 @@ fn notify(text: String) {
             }
         });
     });
+}
+
+type SyncedListener = Box<dyn Fn()>;
+
+thread_local! {
+    static SYNCED: RefCell<Option<SyncedListener>> = const { RefCell::new(None) };
+}
+
+/// Called on the GTK thread whenever the tracker may have changed what the
+/// sync markers show (a flush, a live scrobble); once, from `Ui::new`.
+pub fn set_synced_listener(listener: impl Fn() + 'static) {
+    SYNCED.with(|s| *s.borrow_mut() = Some(Box::new(listener)));
+}
+
+/// Tells the UI (from any thread) to re-read the markers. Always called
+/// after the list caches were dropped, so the re-read sees fresh data.
+fn announce_synced() {
+    gtk::glib::MainContext::default().invoke(|| {
+        SYNCED.with(|s| {
+            if let Some(f) = &*s.borrow() {
+                f();
+            }
+        });
+    });
+}
+
+/// Stores a read's entries unless the cache was dropped since `epoch` was
+/// taken. Returns whether they were stored.
+fn store_if_current(
+    lists: &Mutex<HashMap<(ServiceId, u32), EntryInfo>>,
+    current: &AtomicU64,
+    epoch: u64,
+    id: ServiceId,
+    fetched: &HashMap<u32, EntryInfo>,
+) -> bool {
+    let Ok(mut lists) = lists.lock() else {
+        return false;
+    };
+    // The epoch is bumped under this lock, so the check can't interleave.
+    if current.load(Ordering::SeqCst) != epoch {
+        return false;
+    }
+    for (entry, info) in fetched {
+        lists.insert((id, *entry), info.clone());
+    }
+    true
 }
 
 /// What went wrong with one service's update.
@@ -180,6 +229,7 @@ impl Tracker {
             session: Mutex::new(None),
             cache: Mutex::new(HashMap::new()),
             lists: Mutex::new(HashMap::new()),
+            lists_epoch: AtomicU64::new(0),
             show_ids: Mutex::new(HashMap::new()),
             warned: Mutex::new(HashSet::new()),
             flushing: tokio::sync::Mutex::new(()),
@@ -349,6 +399,10 @@ impl Tracker {
                         if let Some((series_id, upto)) = anchor {
                             self.backfill_after_stop(&series_id, upto).await;
                         }
+                        // No queue row and no flush in live mode: this is the
+                        // only moment the Trakt chip can turn.
+                        self.invalidate_lists();
+                        announce_synced();
                         return;
                     };
                     if matches!(self.report(ServiceId::Trakt, &e), Failure::LoggedOut) {
@@ -609,6 +663,7 @@ impl Tracker {
         let mut stopped = false;
         let mut held = 0usize;
         let sent = !rows.is_empty();
+        let mut touched = false;
         for row in rows {
             // Only Trakt left and not due: leave the row queued, no Emby call.
             let left = row_services(&row, &active);
@@ -681,10 +736,16 @@ impl Tracker {
             let report = self.library_pass(&session, scan, Caps::Automatic).await;
             if report.sent > 0 || report.removed > 0 {
                 self.invalidate_lists();
+                touched = true;
             }
         }
         if sent {
             self.invalidate_lists();
+            touched = true;
+        }
+        // Success or failure: the chips re-read what is really queued/sent.
+        if touched {
+            announce_synced();
         }
     }
 
@@ -1069,6 +1130,7 @@ impl Tracker {
     fn invalidate_lists(&self) {
         if let Ok(mut lists) = self.lists.lock() {
             lists.clear();
+            self.lists_epoch.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -1300,6 +1362,7 @@ impl Tracker {
     ) -> Result<HashMap<u32, EntryInfo>> {
         let mut found = HashMap::new();
         let mut missing = Vec::new();
+        let epoch = self.lists_epoch.load(Ordering::SeqCst);
         if let Ok(lists) = self.lists.lock() {
             for key in keys {
                 match lists.get(&(id, key.id)) {
@@ -1312,11 +1375,7 @@ impl Tracker {
         }
         if !missing.is_empty() {
             let fetched = self.service(id).entries(&missing).await?;
-            if let Ok(mut lists) = self.lists.lock() {
-                for (entry, info) in &fetched {
-                    lists.insert((id, *entry), info.clone());
-                }
-            }
+            store_if_current(&self.lists, &self.lists_epoch, epoch, id, &fetched);
             found.extend(fetched);
         }
         Ok(found)
@@ -1757,6 +1816,47 @@ pub fn status_line(resolved: &[EpisodeResolution], active: &[ServiceId]) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_read_is_not_cached_after_invalidation() {
+        let lists = Mutex::new(HashMap::new());
+        let epoch = AtomicU64::new(0);
+        let info = EntryInfo {
+            title: "x".into(),
+            entry: None,
+            total: None,
+            airing: false,
+        };
+        let fetched = HashMap::from([(7u32, info)]);
+        let seen = epoch.load(Ordering::SeqCst);
+        assert!(store_if_current(
+            &lists,
+            &epoch,
+            seen,
+            ServiceId::Mal,
+            &fetched
+        ));
+        assert_eq!(lists.lock().unwrap().len(), 1);
+        // A flush drops the cache while another read is in flight.
+        lists.lock().unwrap().clear();
+        epoch.fetch_add(1, Ordering::SeqCst);
+        assert!(!store_if_current(
+            &lists,
+            &epoch,
+            seen,
+            ServiceId::Mal,
+            &fetched
+        ));
+        assert!(lists.lock().unwrap().is_empty());
+        let now = epoch.load(Ordering::SeqCst);
+        assert!(store_if_current(
+            &lists,
+            &epoch,
+            now,
+            ServiceId::Mal,
+            &fetched
+        ));
+    }
 
     fn t(id: u32, episode: u32) -> Option<Target> {
         Some(Target {

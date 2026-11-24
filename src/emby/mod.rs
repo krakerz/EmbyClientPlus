@@ -273,6 +273,44 @@ impl EmbyClient {
         ))
     }
 
+    /// A progressive h264/aac Matroska stream of one audio track, for
+    /// saving a smaller copy of a title. With no subtitle index Emby leaves
+    /// subtitles out (it rejects `SubtitleMethod=Drop`); the caller saves
+    /// text tracks as sidecars.
+    pub fn transcoded_download_url(
+        &self,
+        item_id: &str,
+        media_source_id: &str,
+        video_kbps: u32,
+        max_height: u32,
+        audio_stream_index: Option<i32>,
+        play_session_id: &str,
+    ) -> Result<String> {
+        let token = self
+            .access_token
+            .as_deref()
+            .context("cannot build a stream url before authentication")?;
+        let audio = audio_stream_index
+            .map(|index| format!("&AudioStreamIndex={index}"))
+            .unwrap_or_default();
+        Ok(format!(
+            "{}/emby/Videos/{item_id}/stream.mkv?MediaSourceId={media_source_id}&Static=false&Container=mkv&VideoCodec=h264&AudioCodec=aac&AudioChannels=2&AudioBitRate=192000&VideoBitRate={}&MaxHeight={max_height}&DeviceId={}&PlaySessionId={play_session_id}{audio}&api_key={token}",
+            self.base_url,
+            u64::from(video_kbps) * 1000,
+            self.device_id
+        ))
+    }
+
+    /// Tells the server to stop the transcode started under `play_session_id`
+    /// (best effort: callers only log a failure).
+    pub async fn stop_encoding(&self, play_session_id: &str) -> Result<()> {
+        self.delete(&format!(
+            "/emby/Videos/ActiveEncodings?DeviceId={}&PlaySessionId={play_session_id}",
+            self.device_id
+        ))
+        .await
+    }
+
     /// An item as Emby sends it (kept beside a download as its metadata).
     pub async fn item_json(&self, user_id: &str, item_id: &str) -> Result<String> {
         self.get_text(&format!(
@@ -284,7 +322,8 @@ impl EmbyClient {
     /// Streams `url` into `file`, counting bytes into `progress`; stops
     /// early (with an error) once `cancelled` turns true. With `resume`, a
     /// `file` already partly there is continued where it stopped (when the
-    /// server allows ranges; else it starts over).
+    /// server allows ranges; else it starts over). `estimate` is the progress
+    /// total to show when the server sends no Content-Length (0: unknown).
     pub async fn download_to(
         &self,
         url: &str,
@@ -292,6 +331,7 @@ impl EmbyClient {
         progress: &crate::update::Progress,
         cancelled: &std::sync::atomic::AtomicBool,
         resume: bool,
+        estimate: u64,
     ) -> Result<()> {
         use std::io::Write;
         use std::sync::atomic::Ordering::Relaxed;
@@ -326,7 +366,11 @@ impl EmbyClient {
             .context("download failed")?;
         let continuing = have > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
         let already = if continuing { have } else { 0 };
-        progress.start(response.content_length().map_or(0, |rest| rest + already));
+        progress.start(
+            response
+                .content_length()
+                .map_or(estimate, |rest| rest + already),
+        );
         progress.add(already);
         let opened = if continuing {
             std::fs::OpenOptions::new().append(true).open(file)
@@ -499,5 +543,30 @@ mod tests {
         let client = EmbyClient::new("http://192.168.1.3:8096", "device-1");
         let absolute = "https://cdn.example.com/stream.m3u8";
         assert_eq!(client.resolve_transcoding_url(absolute), absolute);
+    }
+
+    #[test]
+    fn transcoded_download_url_carries_quality_and_audio_index() {
+        let client = EmbyClient::new("http://server", "device-1").with_token("tok");
+        let url = client
+            .transcoded_download_url("7", "src9", 4000, 1080, Some(2), "sess")
+            .unwrap();
+        assert!(url.starts_with("http://server/emby/Videos/7/stream.mkv?MediaSourceId=src9&"));
+        for part in [
+            "Static=false",
+            "VideoBitRate=4000000",
+            "MaxHeight=1080",
+            "AudioStreamIndex=2",
+            "DeviceId=device-1",
+            "PlaySessionId=sess",
+            "api_key=tok",
+        ] {
+            assert!(url.contains(part), "{part} missing from {url}");
+        }
+        let none = client
+            .transcoded_download_url("7", "src9", 2000, 720, None, "sess")
+            .unwrap();
+        assert!(!none.contains("AudioStreamIndex"));
+        assert!(!url.contains("SubtitleMethod"));
     }
 }

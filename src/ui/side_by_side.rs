@@ -6,6 +6,8 @@
 //!   width allows, one above the other when it doesn't.
 //! - [`FillLast`]: children in a row at their natural widths, the last one
 //!   taking the rest (poster, then the text column).
+//! - [`NoMinWidth`]: children in a row at their natural widths, asking for
+//!   no minimum width, so what is added to it later can't move the page.
 
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
@@ -41,6 +43,19 @@ glib::wrapper! {
 impl FillLast {
     pub fn new() -> Self {
         glib::Object::new()
+    }
+}
+
+glib::wrapper! {
+    pub struct NoMinWidth(ObjectSubclass<imp::NoMinWidth>) @extends gtk::LayoutManager;
+}
+
+impl NoMinWidth {
+    pub fn new(spacing: i32, lead: i32) -> Self {
+        let layout: Self = glib::Object::new();
+        layout.imp().spacing.set(spacing);
+        layout.imp().lead.set(lead);
+        layout
     }
 }
 
@@ -158,6 +173,53 @@ mod imp {
                 let (_, child_height, _, _) = child.measure(gtk::Orientation::Vertical, width);
                 child.allocate(width, child_height, -1, translate(0, y));
                 y += child_height + STACK_GAP;
+            }
+        }
+    }
+
+    #[derive(Default)]
+    pub struct NoMinWidth {
+        pub spacing: std::cell::Cell<i32>,
+        /// Space before the first child.
+        pub lead: std::cell::Cell<i32>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for NoMinWidth {
+        const NAME: &'static str = "EcpNoMinWidth";
+        type Type = super::NoMinWidth;
+        type ParentType = gtk::LayoutManager;
+    }
+
+    impl ObjectImpl for NoMinWidth {}
+
+    impl LayoutManagerImpl for NoMinWidth {
+        fn measure(
+            &self,
+            widget: &gtk::Widget,
+            orientation: gtk::Orientation,
+            _for_size: i32,
+        ) -> (i32, i32, i32, i32) {
+            let children = visible_children(widget);
+            if orientation == gtk::Orientation::Horizontal {
+                let gaps = self.spacing.get() * children.len().saturating_sub(1) as i32;
+                let nat: i32 = children.iter().map(|c| c.measure(orientation, -1).1).sum();
+                return (0, self.lead.get() + nat + gaps, -1, -1);
+            }
+            let height = children
+                .iter()
+                .map(|c| c.measure(orientation, -1).1)
+                .max()
+                .unwrap_or(0);
+            (height, height, -1, -1)
+        }
+
+        fn allocate(&self, widget: &gtk::Widget, _width: i32, height: i32, _baseline: i32) {
+            let mut x = self.lead.get();
+            for child in visible_children(widget) {
+                let width = child.measure(gtk::Orientation::Horizontal, -1).1;
+                child.allocate(width, height, -1, translate(x, 0));
+                x += width + self.spacing.get();
             }
         }
     }
