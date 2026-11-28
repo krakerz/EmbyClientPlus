@@ -1,0 +1,59 @@
+name: PR check
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+    paths-ignore: [README.md, CHANGELOG.md, LICENSE, INSTALL.txt, .gitignore]
+concurrency:
+  group: pr-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+env:
+  CARGO_PROFILE_DEV_DEBUG: "0"
+jobs:
+  check:
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest   # same as build.yml's Linux job (cache key)
+    # same Arch container as the release build's Linux job (hosted Ubuntu
+    # lacks libadwaita >= 1.6 and VapourSynth headers)
+    container: archlinux:latest
+    steps:
+      - name: Install system dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel git rust meson ninja pkgconf curl file patchelf \
+            gtk4 libadwaita ffmpeg libplacebo libass vapoursynth zimg lcms2 uchardet \
+            wayland wayland-protocols libxkbcommon libxpresent libxss libxv libxrandr \
+            libdrm mesa vulkan-headers vulkan-icd-loader libva libvdpau libdisplay-info \
+            pipewire libpulse alsa-lib systemd-libs desktop-file-utils \
+            xorg-server-xvfb xorg-xauth strace nss-mdns
+
+      - uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: pr-check
+          save-if: false
+
+      # libmpv links these by soname; a cached build against older ones breaks it.
+      - name: libmpv dependency versions
+        id: mpvdeps
+        run: echo "hash=$(pacman -Q ffmpeg libplacebo libass | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache libmpv
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/mpv-src
+            third_party/mpv-build
+            third_party/mpv-prefix
+          key: libmpv-${{ hashFiles('scripts/build-libmpv.sh') }}-${{ steps.mpvdeps.outputs.hash }}
+
+      - name: Build libmpv
+        run: scripts/build-libmpv.sh
+
+      - run: cargo fmt -- --check
+
+      - run: cargo clippy --release --locked --all-targets -- -D warnings
+      - run: cargo build --release --locked
+      - run: cargo test --release --locked
