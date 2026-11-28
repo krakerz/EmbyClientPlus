@@ -28,7 +28,7 @@ jobs:
             pipewire libpulse alsa-lib systemd-libs desktop-file-utils \
             xorg-server-xvfb xorg-xauth strace nss-mdns
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -41,7 +41,7 @@ jobs:
         run: echo "hash=$(pacman -Q ffmpeg libplacebo libass | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
       - name: Cache libmpv
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             third_party/mpv-src

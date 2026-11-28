@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.39.1] — 2026-11-28
+
+### Fixed
+- AppImage icon missing in some launchers
+
 ## [1.39.0] — 2026-11-24
 
 ### Added

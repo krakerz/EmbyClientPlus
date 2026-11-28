@@ -199,6 +199,13 @@ done < <(lib_paths "$appdir"/usr/lib/fallback/*.so*)
 write_needs "$appdir/usr/lib" "${elfs[@]}"
 echo "AppImage: $(find "$appdir/usr/lib/fallback" -name '*.so*' | wc -l) fallbacks," \
     "needs glibc $(cat "$appdir/usr/lib/glibc.needs")"
+# appimagetool needs a PNG icon at the top of the AppDir and a .DirIcon that
+# is one too; linuxdeploy only got the SVG, which leaves .DirIcon invalid.
+# rm first: .DirIcon may be a symlink, and cp would write through it.
+rm -f "$appdir/.DirIcon"
+install -Dm644 "packaging/$APP_ID.png" "$appdir/$APP_ID.png"
+install -Dm644 "packaging/$APP_ID.png" "$appdir/usr/share/icons/hicolor/256x256/apps/$APP_ID.png"
+cp "packaging/$APP_ID.png" "$appdir/.DirIcon"
 # Packed by appimagetool, not linuxdeploy again: that would set RUNPATH=$ORIGIN
 # on the fallbacks, hiding their dependencies in usr/lib.
 ARCH=x86_64 "$TOOLS/appimagetool-x86_64.AppImage" --no-appstream "$appdir" "$LDAI_OUTPUT"
