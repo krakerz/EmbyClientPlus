@@ -4,11 +4,7 @@ A native Emby client for Linux, Windows and macOS with SVP frame interpolation, 
 
 ## Description
 
-A GTK4/libadwaita Emby client with libmpv embedded in-process. Its libmpv has VapourSynth, so
-SVP 4 attaches just as it does to a standalone mpv.
-
-Icons: [Lucide](https://lucide.dev/) (ISC, `data/icons/LICENSE`), converted for GTK by
-`scripts/update-icons.sh` (needs `picosvg`).
+Emby's official desktop apps either wrap a web view or lack VapourSynth support for SVP 4 frame interpolation and controller-first Steam Game Mode integration. Emby Client+ pairs a native GTK4/libadwaita interface with an in-process `libmpv` built with VapourSynth, so SVP 4 attaches just as it does to standalone `mpv`, alongside full gamepad navigation and automatic display refresh-rate switching in Game Mode.
 
 ## Features
 
@@ -22,6 +18,49 @@ Icons: [Lucide](https://lucide.dev/) (ISC, `data/icons/LICENSE`), converted for 
 - **Music:** mini player, queue, shuffle/repeat, gapless, playlists, Instant Mix, media keys and now-playing on every OS.
 - **Controller & Steam Deck:** everything works with a gamepad, with on-screen hints and remappable buttons; Steam library artwork included.
 - **Also:** standalone player for local files and links (`--player`), UI size 50–200%, light/dark theme, own `mpv.conf`, YouTube trailers (`yt-dlp`), self-updates.
+
+## Dependencies
+
+### Runtime
+
+- **Pre-built releases:**
+  - **Linux AppImage (`.AppImage` / `-compat.AppImage`):** bundles GTK4, libadwaita, `libmpv`, FFmpeg and `libplacebo`; needs standard host desktop graphics (OpenGL/EGL/Vulkan) and audio libraries. The plain AppImage uses the host's `glibc`; the `-compat.AppImage` bundles its own `glibc` (SVP inside it still requires host `glibc` ≥ 2.38).
+  - **Linux archive (`.tar.gz`):** bundles `libmpv`, FFmpeg and `libplacebo`, and requires system **GTK ≥ 4.12** (`gtk4`), **libadwaita ≥ 1.6** (`libadwaita-1`) and a current `glibc`.
+  - **Windows / macOS (`.zip`):** self-contained; all required runtime libraries are bundled.
+- **Optional (all platforms):**
+  - **Emby Server:** required for browsing and streaming your library (not needed for standalone `--player` playback).
+  - **SVP 4:** optional, for SVP frame interpolation. On macOS, SVP also requires VapourSynth (`brew install vapoursynth`).
+  - **`yt-dlp`:** optional, on `PATH`, for playing YouTube trailers and web video page links.
+
+### Build
+
+- **All platforms:**
+  - **Rust ≥ 1.85** (Rust 2024 edition) and Cargo
+  - C compiler (`cc` / `gcc`) and `pkg-config` (`pkgconf`)
+  - **GTK ≥ 4.12** (`gtk4`) and **libadwaita ≥ 1.6** (`libadwaita-1`) development files
+- **Linux** (builds a private VapourSynth-enabled `libmpv` `v0.42.0` via `scripts/build-libmpv.sh`, because distro `libmpv` packages ship without VapourSynth):
+  - Extra tools: `git`, `meson`, `ninja` (`patchelf` if running `packaging/package.sh`)
+  - Libraries/headers (`pkg-config` / library names): `ffmpeg`, `libplacebo`, `libass`, `vapoursynth` (including `VSScript4.h`, `libvapoursynth.so`, `libvapoursynth-script.so`), `zimg`, `lcms2`, `uchardet`, `wayland`, `wayland-protocols`, `xkbcommon`, `libdrm`, Mesa/OpenGL/EGL, Vulkan headers & ICD loader, `libva`, `libvdpau`, `libdisplay-info`, X11 extensions (`libXpresent`, `libXss`, `libXv`, `libXrandr`), PipeWire / PulseAudio / ALSA, and `libsystemd`
+  - **Arch Linux:**
+    ```sh
+    sudo pacman -Syu --needed \
+      base-devel git rust meson ninja pkgconf curl file patchelf \
+      gtk4 libadwaita ffmpeg libplacebo libass vapoursynth zimg lcms2 uchardet \
+      wayland wayland-protocols libxkbcommon libxpresent libxss libxv libxrandr \
+      libdrm mesa vulkan-headers vulkan-icd-loader libva libvdpau libdisplay-info \
+      pipewire libpulse alsa-lib systemd-libs desktop-file-utils
+    ```
+  - Other distros (Debian 13+, Ubuntu 24.10+, Fedora 41+): install the matching development packages for the libraries and tools listed above (Debian 12 lacks `libadwaita` ≥ 1.6 and VapourSynth headers).
+- **Windows (MSYS2 UCRT64)** (uses MSYS2's `mpv`, which includes VapourSynth):
+  ```sh
+  pacboy -S rust:p pkgconf:p gcc:p gtk4:p libadwaita:p mpv:p \
+    gdk-pixbuf2:p librsvg:p ntldd:p adwaita-icon-theme:p hicolor-icon-theme:p
+  ```
+  (Install `zip` as well if running `packaging/package-windows.sh`.)
+- **macOS (Homebrew)** (uses Homebrew's `mpv`, which includes VapourSynth):
+  ```sh
+  brew install rust pkgconf gtk4 libadwaita adwaita-icon-theme hicolor-icon-theme mpv librsvg bash
+  ```
 
 ## Installation
 
@@ -52,26 +91,62 @@ macOS, SVP also needs VapourSynth from Homebrew (`brew install vapoursynth`), as
 
 ## Building from source
 
-Linux needs Rust, `meson`, `ninja` and the dev files of GTK 4.12 or newer, libadwaita 1.6 or
-newer, FFmpeg, libplacebo, libass and VapourSynth (Debian 13, Ubuntu 24.10, Fedora 41, Arch and
-newer have them; Debian 12 doesn't):
+Install the [Build dependencies](#build) for your platform, then clone the repository:
 
 ```sh
-scripts/build-libmpv.sh && cargo build --release && target/release/embyclientplus
-EMBYCLIENTPLUS_PORTABLE=1 cargo build --release && packaging/package.sh   # release packages → dist/
+git clone https://github.com/krakerz/EmbyClientPlus.git
+cd EmbyClientPlus
+```
+
+**Linux:**
+
+```sh
+scripts/build-libmpv.sh && cargo build --release --locked && target/release/embyclientplus
+EMBYCLIENTPLUS_PORTABLE=1 cargo build --release --locked && packaging/package.sh   # release packages → dist/
 ```
 
 `scripts/build-libmpv.sh` builds mpv 0.42.0 into `third_party/`. Run it again after your distribution
 updates FFmpeg or libplacebo (a "Could not find dependency: libplacebo.so.N" error when packaging
 means the old build is linked against a library that's gone).
 
-Windows (MSYS2 UCRT64) and macOS (Homebrew) use their packaged `mpv`; see the `windows` and
-`macos` jobs in `.github/workflows/build.yml` and `packaging/package-{windows,macos}.sh`.
+**Windows (MSYS2 UCRT64):**
+
+```sh
+cargo build --release --locked
+packaging/package-windows.sh   # optional release zip → dist/
+```
+
+**macOS (Homebrew):**
+
+```sh
+LIBRARY_PATH="$(brew --prefix)/lib" cargo build --release --locked
+packaging/package-macos.sh     # optional release zip → dist/
+```
+
+See `.github/workflows/build.yml` for the full CI build and packaging setup.
 
 ## Usage
 
-Sign in to your Emby server (remembered), pick a title, press **Play**. App settings are in Home's
-menu → **Preferences**; your account's settings are on **Profile** (the avatar, top right).
+Launch the app, sign in to your Emby server (remembered across runs), pick a title and press **Play** — or play a local file or stream directly without an Emby server:
+
+```sh
+embyclientplus /path/to/video.mkv
+```
+
+App settings live in Home's menu → **Preferences**; your Emby account's settings are on **Profile** (the avatar, top right).
+
+### Command line
+
+```sh
+embyclientplus                         # start the app
+embyclientplus --player [<file|url>]   # just the player (no Emby); plays the next video in the folder after each one
+embyclientplus <file|url>              # same as --player <file|url>
+embyclientplus -- <file>               # same, for a file named like an option
+embyclientplus -h | --help
+embyclientplus -v | --version
+```
+
+### Configuration
 
 - **Downloads:** the download button on a movie or episode page, or **Download** in any item's
   menu (X on a controller, right-click). A series' Download menu also has **Auto-download…** and **Download Quality…**; its settings button sets how its **Intros** are handled.
@@ -134,15 +209,6 @@ current screen's buttons.
 | Ctrl+F (Cmd+F on macOS) or / | Search (outside the player) |  |  |  |
 |  |  | Right stick | Scroll the row (←/→) or page (↑/↓) under the cursor | Scrub along the bar (seeks 2 s after you let go) |
 
-### Command line
-
-```sh
-embyclientplus                       # the app
-embyclientplus --player [file|url]   # just the player; plays the next video in the folder after it
-embyclientplus <file|url>            # same as --player <file|url>
-embyclientplus --help | --version
-```
-
 ## FAQ
 
 **SVP doesn't kick in?** The SVP button shows why: green interpolating, amber waiting for SVP
@@ -173,6 +239,12 @@ are skipped, with a warning in the log. Ordinary `.glsl` / `.hook` shaders work.
 
 **Is HDR supported?** Not really: HDR plays converted to SDR, untested. SVP starts off for HDR
 titles unless you turn it on for that title.
+
+## License
+
+Licensed under the GNU General Public License v3.0 or later ([LICENSE](LICENSE)).
+
+Bundled shaders retain their respective licenses (MIT, BSD-3-Clause, LGPL-3.0; see `data/shaders/<group>/` and the installed copies). Bundled icons are from [Lucide](https://lucide.dev/) (ISC, `data/icons/LICENSE`).
 
 ---
 
