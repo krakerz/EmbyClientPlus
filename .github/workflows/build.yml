@@ -47,7 +47,7 @@ jobs:
             pipewire libpulse alsa-lib systemd-libs desktop-file-utils \
             xorg-server-xvfb xorg-xauth strace nss-mdns
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -63,7 +63,7 @@ jobs:
         run: echo "hash=$(pacman -Q ffmpeg libplacebo libass | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
       - name: Cache libmpv
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             third_party/mpv-src
@@ -125,7 +125,7 @@ jobs:
       # The pinned quick-sharun (packaging/appimage/quick-sharun.pin) for the
       # compat AppImage; the pin file is the cache key.
       - name: Cache quick-sharun
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: packaging/tools/quick-sharun-*.sh
           key: quick-sharun-${{ hashFiles('packaging/appimage/quick-sharun.pin') }}
@@ -143,7 +143,7 @@ jobs:
         if: steps.compat.outcome == 'failure'
         run: echo "::warning::the compat AppImage failed to build; the release goes out without it"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux
           path: |
@@ -171,7 +171,7 @@ jobs:
             gdk-pixbuf2:p librsvg:p ntldd:p adwaita-icon-theme:p hicolor-icon-theme:p
           install: zip
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # MSYS2's cargo would use MSYS2's home, which the cache doesn't see.
       - name: Point cargo's home at the cache
@@ -197,7 +197,7 @@ jobs:
       - name: Package
         run: packaging/package-windows.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows
           path: dist/*-windows-x86_64.zip
@@ -216,7 +216,7 @@ jobs:
           brew update
           brew install rust pkgconf gtk4 libadwaita adwaita-icon-theme hicolor-icon-theme mpv librsvg bash
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: Swatinem/rust-cache@v2
 
@@ -234,7 +234,7 @@ jobs:
       - name: Package
         run: packaging/package-macos.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: macos
           path: dist/*-macos-arm64.zip
@@ -252,9 +252,9 @@ jobs:
         # The latest stable releases only (the tags follow new releases).
         image: ["debian:stable", "ubuntu:latest"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: linux
           path: artifacts
@@ -296,9 +296,9 @@ jobs:
       matrix:
         image: ["ubuntu:24.04", "fedora:latest", "archlinux:latest", "opensuse/tumbleweed:latest"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: linux
           path: artifacts
@@ -332,9 +332,9 @@ jobs:
       && (github.event_name == 'push' || (inputs.platform == 'all' && !inputs.quick)) }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
@@ -390,7 +390,7 @@ jobs:
 
       - name: Draft release
         if: steps.gate.outputs.released == 'false'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           draft: true
           tag_name: ${{ steps.version.outputs.version }}

@@ -80,7 +80,9 @@ export APPDIR="$work/AppDir"
 export OUTPATH="$work/out"
 export ARCH=x86_64 VERSION
 export DESKTOP="$REPO_ROOT/packaging/$APP_ID.desktop"
-export ICON="$REPO_ROOT/packaging/$APP_ID.svg"
+# A PNG: quick-sharun copies it to the AppDir top and as .DirIcon, and
+# appimagetool rejects an SVG there.
+export ICON="$REPO_ROOT/packaging/$APP_ID.png"
 export USE_HOST_DRIVERS_EXPERIMENTAL=1
 export DEPLOY_PIPEWIRE=1 DEPLOY_PULSE=1
 export STRACE_BINARY=embyclientplus
